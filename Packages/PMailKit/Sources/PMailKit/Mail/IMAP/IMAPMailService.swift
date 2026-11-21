@@ -32,6 +32,9 @@ public struct IMAPMessageID: RawRepresentable, Sendable, Hashable {
 /// The service keeps a single connection and runs one operation at a time on it. When the connection turns out
 /// to have dropped (the server timed it out, the network changed), it connects again and tries once more. Waiting
 /// for changes (IMAP IDLE) happens on a second connection of its own, so it never holds the other calls up.
+///
+/// Given a local store, it keeps Sent, Drafts and Trash on this Mac when the server has no folder for them: sent
+/// copies and drafts are saved there, and deleted messages are copied there before they leave the server.
 public actor IMAPMailService: MailService {
     /// The ID of the virtual folder that lists the inbox's starred (\Flagged) messages.
     public static let starredFolderID = "pmail:starred"
@@ -63,6 +66,9 @@ public actor IMAPMailService: MailService {
     private var mailboxes: [IMAPMailbox]?
     private var isBusy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// Sent, Drafts and Trash kept on this Mac for a server without them (nil: such a server's mail can't be deleted
+    /// and its sent copies aren't kept).
+    private let localFolders: LocalFolders?
     /// The second connection, which waits for changes in the inbox.
     private var changeClient: IMAPClient?
     /// How long each read on `changeClient` may take, when the connector is the network's.
@@ -75,12 +81,13 @@ public actor IMAPMailService: MailService {
     var pollInterval: TimeInterval = 60
 
     public init(account: Account, incoming: ServerSettings, credential: Credential, sender: any MailSending,
-                connector: any ByteStreamConnector = URLSessionConnector()) {
+                connector: any ByteStreamConnector = URLSessionConnector(), localStore: LocalMailStore? = nil) {
         self.account = account
         self.incoming = incoming
         self.credential = credential
         self.sender = sender
         self.connector = connector
+        localFolders = localStore.map(LocalFolders.init(store:))
     }
 
     public nonisolated var capabilities: MailCapabilities {
@@ -117,6 +124,8 @@ public actor IMAPMailService: MailService {
                 folders.append(MailFolder(id: box.name, name: box.displayName, role: roles[box.name], unreadCount: unread,
                                           totalCount: total, parentID: parent, isSelectable: box.isSelectable))
             }
+            // Sent, Drafts and Trash the server doesn't have are kept on this Mac.
+            if let local = self.localFolders { folders += await local.folders(besides: Set(roles.values)) }
             // The inbox first, then its starred messages as a folder of their own.
             if let index = folders.firstIndex(where: { $0.role == .inbox }) { folders.insert(folders.remove(at: index), at: 0) }
             let starred = MailFolder(id: Self.starredFolderID, name: "Starred", role: .starred)
@@ -128,7 +137,8 @@ public actor IMAPMailService: MailService {
     // MARK: Listing
 
     public func listConversations(_ request: ListRequest) async throws -> ConversationPage {
-        try await withClient { client in
+        if let local = localFolders, LocalFolders.contains(request.folderID) { return await local.page(request) }
+        return try await withClient { client in
             let (mailbox, filter) = try await self.listTarget(for: request.folderID, client: client)
             // Opened again each time, so the list sees the mailbox as it is now.
             let selected = try await client.select(mailbox, readOnly: true)
@@ -222,7 +232,14 @@ public actor IMAPMailService: MailService {
     // MARK: Reading
 
     public func loadConversation(id: String, hint: Conversation?) async throws -> [MailMessage] {
-        try await withClient { client in
+        let kept = (hint?.messages ?? []).filter { IMAPMessageID(rawValue: $0.id) == nil }
+        // A conversation kept wholly on this Mac opens without the server.
+        if let local = localFolders, let hint, !kept.isEmpty, kept.count == hint.messages.count {
+            var messages: [MailMessage] = []
+            for summary in kept { messages.append(try await local.message(summary)) }
+            return messages.sorted { $0.summary.date < $1.summary.date }
+        }
+        return try await withClient { client in
             var messages: [MailMessage] = []
             var loaded = Set<IMAPMessageID>()
             var messageIDs = Set<String>()
@@ -248,6 +265,15 @@ public actor IMAPMailService: MailService {
             for mailbox in places where !roots.isEmpty {
                 messages += try await self.relatedMessages(in: mailbox, roots: roots, skipping: loaded,
                                                            knownMessageIDs: &messageIDs, client: client)
+            }
+            if let local = self.localFolders {
+                // Its messages kept on this Mac, and replies in the Sent kept here.
+                for summary in kept {
+                    guard let message = try? await local.message(summary) else { continue }
+                    if let header = message.summary.messageIDHeader, !messageIDs.insert(header).inserted { continue }
+                    messages.append(message)
+                }
+                messages += await local.related(in: LocalFolders.sentID, roots: roots, knownMessageIDs: &messageIDs)
             }
             if messages.isEmpty { throw PMailError.notFound }
             return messages.sorted { $0.summary.date < $1.summary.date }
@@ -295,7 +321,10 @@ public actor IMAPMailService: MailService {
     }
 
     public func loadMessage(_ summary: MessageSummary) async throws -> MailMessage {
-        guard let id = IMAPMessageID(rawValue: summary.id) else { throw PMailError.notFound }
+        guard let id = IMAPMessageID(rawValue: summary.id) else {
+            if let local = localFolders { return try await local.message(summary) }
+            throw PMailError.notFound
+        }
         return try await withClient { client in
             let selected = try await self.ensureSelected(id.mailbox, writable: false, client: client)
             guard (selected.uidValidity ?? 0) == id.uidValidity, let response = try await client.fetchMessages([id.uid]).first,
@@ -308,7 +337,10 @@ public actor IMAPMailService: MailService {
 
     public func loadAttachment(_ attachment: Attachment, in message: MessageSummary) async throws -> Data {
         if let data = attachment.data { return data }
-        guard let id = IMAPMessageID(rawValue: message.id) else { throw PMailError.notFound }
+        guard let id = IMAPMessageID(rawValue: message.id) else {
+            if let local = localFolders { return try await local.attachment(attachment, in: message) }
+            throw PMailError.notFound
+        }
         return try await withClient { client in
             let selected = try await self.ensureSelected(id.mailbox, writable: false, client: client)
             guard (selected.uidValidity ?? 0) == id.uidValidity else { throw PMailError.notFound }
@@ -342,6 +374,8 @@ public actor IMAPMailService: MailService {
         default:
             break
         }
+        let kept = messages.filter { IMAPMessageID(rawValue: $0.id) == nil }
+        if let local = localFolders, !kept.isEmpty { try await performKept(action, on: kept, local: local) }
         let ids = messages.compactMap { IMAPMessageID(rawValue: $0.id) }
         guard !ids.isEmpty else { return }
         try await withClient { client in
@@ -368,10 +402,10 @@ public actor IMAPMailService: MailService {
             }
             return archive
         case .trash:
-            guard let trash = try await mailboxName(for: .trash, client: client) else {
-                throw PMailError.notSupported("This account has no Trash folder.")
-            }
-            return trash
+            if let trash = try await mailboxName(for: .trash, client: client) { return trash }
+            // A server without a Trash: deleted mail goes to the Trash kept on this Mac.
+            guard localFolders != nil else { throw PMailError.notSupported("This account has no Trash folder.") }
+            return LocalFolders.trashID
         case .markSpam:
             guard let junk = try await mailboxName(for: .spam, client: client) else {
                 throw PMailError.notSupported("This account has no Junk folder.")
@@ -398,6 +432,8 @@ public actor IMAPMailService: MailService {
             // Trashing what's already in the trash deletes it for good.
             if mailbox == destination {
                 try await client.deleteMessages(uids)
+            } else if let destination, LocalFolders.contains(destination) {
+                try await keepOnMac(uids, in: destination, client: client)
             } else if let destination {
                 try await client.uidMove(uids, to: destination)
             }
@@ -405,11 +441,103 @@ public actor IMAPMailService: MailService {
             guard let destination, destination != mailbox else { return }
             if destination == Self.starredFolderID {
                 try await client.uidStore(uids, adding: true, flags: ["\\Flagged"])
+            } else if LocalFolders.contains(destination), localFolders != nil {
+                try await keepOnMac(uids, in: destination, client: client)
             } else {
                 try await client.uidMove(uids, to: destination)
             }
         case .markImportant, .markNotImportant, .addLabel, .removeLabel:
             break
+        }
+    }
+
+    // MARK: Kept on this Mac
+
+    /// The server's mailbox with a role, from the last LIST when there's been one, so a folder kept on this Mac can be
+    /// used without connecting.
+    private func serverMailbox(for role: FolderRole) async throws -> String? {
+        if let mailboxes { return IMAPFolderRoles.assign(mailboxes).first { $0.value == role }?.key }
+        return try await withClient { client in try await self.mailboxName(for: role, client: client) }
+    }
+
+    /// Copies messages from the selected mailbox into a folder kept on this Mac, with their flags, then deletes them
+    /// from the server. Only what's safely on the Mac leaves the server.
+    private func keepOnMac(_ uids: [UInt32], in folderID: String, client: IMAPClient) async throws {
+        guard let store = localFolders?.store else { return }
+        var kept: [UInt32] = []
+        for response in try await client.fetchMessages(uids) {
+            guard let uid = response.uid, let raw = response.section("") else { continue }
+            var flags = MessageSummary(id: "")
+            Self.applyFlags(response.flags ?? [], to: &flags)
+            try await store.add(raw: raw, folderID: folderID, isUnread: flags.isUnread, isStarred: flags.isStarred)
+            kept.append(uid)
+        }
+        try await client.deleteMessages(kept)
+    }
+
+    /// Actions on messages kept on this Mac. Flags change here. Delete moves a message to the Trash (the server's, or
+    /// the one kept here), and deletes it for good from the Trash kept here. Moving one to a server folder, back to the
+    /// inbox say, uploads it there.
+    private func performKept(_ action: MailAction, on messages: [MessageSummary], local: LocalFolders) async throws {
+        let store = local.store
+        let ids = messages.map(\.id)
+        switch action {
+        case .markRead: try await store.setUnread(false, for: ids)
+        case .markUnread: try await store.setUnread(true, for: ids)
+        case .star: try await store.setStarred(true, for: ids)
+        case .unstar: try await store.setStarred(false, for: ids)
+        case .deleteForever: try await store.delete(ids: ids)
+        case .trash:
+            var inTrash: [String] = []
+            var elsewhere: [String] = []
+            for id in ids {
+                if await store.summary(for: id)?.folderID == LocalFolders.trashID { inTrash.append(id) } else { elsewhere.append(id) }
+            }
+            try await store.delete(ids: inTrash)
+            guard !elsewhere.isEmpty else { return }
+            if let trash = try await serverMailbox(for: .trash) {
+                try await upload(elsewhere, to: trash)
+            } else {
+                try await store.move(ids: elsewhere, to: LocalFolders.trashID)
+            }
+        case .moveToInbox, .notSpam:
+            try await upload(ids, to: "INBOX")
+        case .archive:
+            guard let archive = try await serverMailbox(for: .archive) else {
+                throw PMailError.notSupported("This account has no Archive folder.")
+            }
+            try await upload(ids, to: archive)
+        case .markSpam:
+            guard let junk = try await serverMailbox(for: .spam) else {
+                throw PMailError.notSupported("This account has no Junk folder.")
+            }
+            try await upload(ids, to: junk)
+        case let .move(folderID):
+            if LocalFolders.contains(folderID) {
+                try await store.move(ids: ids, to: folderID)
+            } else if folderID == Self.starredFolderID {
+                try await store.setStarred(true, for: ids)
+            } else {
+                try await upload(ids, to: folderID)
+            }
+        case .markImportant, .markNotImportant, .addLabel, .removeLabel:
+            break
+        }
+    }
+
+    /// Uploads messages kept on this Mac to a server mailbox, with their flags, letting each copy here go once it's
+    /// there.
+    private func upload(_ ids: [String], to mailbox: String) async throws {
+        guard let store = localFolders?.store else { return }
+        try await withClient { client in
+            for id in ids {
+                guard let raw = await store.raw(for: id), let summary = await store.summary(for: id) else { continue }
+                var flags: [String] = []
+                if !summary.isUnread { flags.append("\\Seen") }
+                if summary.isStarred { flags.append("\\Flagged") }
+                _ = try await client.append(raw, to: mailbox, flags: flags)
+                try await store.delete(ids: [id])
+            }
         }
     }
 
@@ -430,17 +558,28 @@ public actor IMAPMailService: MailService {
         // (which could make someone send it again).
         // The copy keeps its Bcc line, so Sent shows who else it went to.
         let copy = MIMEBuilder.buildForSaving(message)
-        _ = try? await withClient { client in
-            guard let sent = try await self.mailboxName(for: .sent, client: client) else { return }
-            try await client.append(copy, to: sent, flags: ["\\Seen"])
+        let filed = (try? await withClient { client -> Bool in
+            guard let sent = try await self.mailboxName(for: .sent, client: client) else { return false }
+            _ = try await client.append(copy, to: sent, flags: ["\\Seen"])
+            return true
+        }) ?? false
+        // Without a Sent on the server (or when filing it there failed), the copy is kept in the Sent on this Mac.
+        if !filed, let local = localFolders {
+            _ = try? await local.store.add(raw: copy, folderID: LocalFolders.sentID, isUnread: false)
         }
     }
 
     public func saveDraft(_ message: OutgoingMessage, replacing draft: MessageSummary?) async throws -> MessageSummary? {
         // A draft has to remember its Bcc recipients.
         let raw = MIMEBuilder.buildForSaving(message)
+        // Without a Drafts folder on the server, drafts are kept on this Mac.
+        if let local = localFolders, try await serverMailbox(for: .drafts) == nil {
+            return try await local.saveDraft(raw, replacing: draft)
+        }
         let replaced = draft.flatMap { IMAPMessageID(rawValue: $0.id) }
-        return try await withClient { client in
+        // An earlier version kept on this Mac (from before the server had Drafts) goes once this one is saved.
+        let keptVersion = draft.flatMap { IMAPMessageID(rawValue: $0.id) == nil ? $0.id : nil }
+        let saved = try await withClient { client -> MessageSummary? in
             guard let drafts = try await self.mailboxName(for: .drafts, client: client) else {
                 throw PMailError.notSupported("This account has no Drafts folder.")
             }
@@ -458,6 +597,8 @@ public actor IMAPMailService: MailService {
                                   hasAttachments: !message.attachments.isEmpty, messageIDHeader: message.messageID,
                                   inReplyTo: message.inReplyTo, references: message.references, size: raw.count)
         }
+        if let keptVersion { try? await localFolders?.store.delete(ids: [keptVersion]) }
+        return saved
     }
 
     /// Finds a just-saved draft by its Message-ID, for servers that don't say where APPEND put it.
@@ -468,7 +609,10 @@ public actor IMAPMailService: MailService {
     }
 
     public func deleteDraft(_ draft: MessageSummary) async throws {
-        guard let id = IMAPMessageID(rawValue: draft.id) else { throw PMailError.notFound }
+        guard let id = IMAPMessageID(rawValue: draft.id) else {
+            if let local = localFolders { return try await local.store.delete(ids: [draft.id]) }
+            throw PMailError.notFound
+        }
         try await withClient { client in try await self.delete([id], client: client) }
     }
 

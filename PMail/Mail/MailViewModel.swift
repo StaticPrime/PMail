@@ -87,7 +87,20 @@ final class MailViewModel {
         trustedImageSenders = Set(defaults.stringArray(forKey: "TrustedImageSenders") ?? [])
     }
 
-    var capabilities: MailCapabilities { service.capabilities }
+    /// What the account can do. An account with folders rather than labels can only archive into an Archive folder,
+    /// so without one (an iCloud account that only has an inbox) Archive and Snooze aren't offered.
+    var capabilities: MailCapabilities {
+        var capabilities = service.capabilities
+        if !capabilities.usesLabels, foldersLoaded, !serviceFolders.contains(where: { $0.role == .archive }) {
+            capabilities.canArchive = false
+        }
+        return capabilities
+    }
+
+    /// Whether Report spam has somewhere to put mail: labels, or a Junk folder.
+    var canReportSpam: Bool {
+        service.capabilities.usesLabels || !foldersLoaded || serviceFolders.contains { $0.role == .spam }
+    }
     var inboxTabs: [InboxTab] { service.inboxTabs }
 
     /// Whether the window should say it's offline: no network, or the server didn't answer.

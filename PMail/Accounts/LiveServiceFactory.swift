@@ -62,10 +62,12 @@ struct LiveServiceFactory: ServiceFactory {
             SMTPSender(settings: $0, credential: .password(username: $0.username, password: password))
         } ?? NoOutgoingServer()
         let mailCredential = Credential.password(username: incoming.username, password: password)
+        // Mail kept on this Mac: everything but the inbox for POP, and Sent, Drafts and Trash for an IMAP server
+        // without them.
+        let localMail = LocalMailStore(folder: place.appendingPathComponent("Mail", isDirectory: true))
         let mail: any MailService = incoming.mailProtocol == .pop3
-            ? POPMailService(account: account, incoming: incoming, credential: mailCredential,
-                             store: LocalMailStore(folder: place.appendingPathComponent("Mail", isDirectory: true)), sender: sender)
-            : IMAPMailService(account: account, incoming: incoming, credential: mailCredential, sender: sender)
+            ? POPMailService(account: account, incoming: incoming, credential: mailCredential, store: localMail, sender: sender)
+            : IMAPMailService(account: account, incoming: incoming, credential: mailCredential, sender: sender, localStore: localMail)
         // Calendars and contacts sign in with the Apple Account (iCloud) or the account's own user name.
         let serverCredential = Credential.password(username: account.serverLoginName ?? incoming.username, password: password)
         let calendar: any CalendarService = account.calendarServer.map {

@@ -154,6 +154,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         guard let mail = app.current?.mail else { return }
         let targets = mail.targetConversations
         guard !targets.isEmpty else { return }
+        // Not offered where the account has nowhere to put the mail (no Archive or Junk folder).
+        if case .archive = action, !mail.capabilities.canArchive { return }
+        if case .markSpam = action, !mail.canReportSpam { return }
         mail.perform(action, on: targets)
     }
 
@@ -296,8 +299,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             return app.module == .mail && mail?.openMessages.isEmpty == false
         case #selector(pmArchive(_:)):
             return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canArchive == true
-        case #selector(pmTrash(_:)), #selector(pmSpam(_:)):
+        case #selector(pmTrash(_:)):
             return !typing && app.module == .mail && !targets.isEmpty
+        case #selector(pmSpam(_:)):
+            return !typing && app.module == .mail && !targets.isEmpty && mail?.canReportSpam == true
         case #selector(pmToggleRead(_:)):
             menuItem.title = targets.contains(where: \.isUnread) ? "Mark as Read" : "Mark as Unread"
             return !typing && app.module == .mail && !targets.isEmpty

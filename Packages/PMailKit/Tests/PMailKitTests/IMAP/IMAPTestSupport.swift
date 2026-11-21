@@ -112,14 +112,15 @@ struct IMAPHarness {
     let connector: ScriptedConnector
 
     init(_ streams: [ScriptedByteStream], kind: AccountKind = .other, email: String = "pug@example.com",
-         username: String = "pug@example.com", host: String = "imap.example.com", password: String = "secret") {
+         username: String = "pug@example.com", host: String = "imap.example.com", password: String = "secret",
+         localStore: LocalMailStore? = nil) {
         let account = Account(kind: kind, name: "Pug Tester", email: email)
         let incoming = ServerSettings(mailProtocol: .imap, host: host, port: 993, security: .tls, username: username)
         sender = IMAPRecordingSender()
         connector = ScriptedConnector(streams)
         let credential = Credential.password(username: username, password: password)
         service = IMAPMailService(account: account, incoming: incoming, credential: credential, sender: sender,
-                                  connector: connector)
+                                  connector: connector, localStore: localStore)
     }
 }
 

@@ -33,6 +33,11 @@ public actor LocalMailStore {
     }
 
     private var indexURL: URL { folder.appendingPathComponent("index.json") }
+
+    /// Whether messages in a folder are drafts: a POP account's Drafts, or the Drafts kept for an IMAP account.
+    static func isDraftsFolder(_ folderID: String) -> Bool {
+        folderID == "Drafts" || folderID == LocalFolders.draftsID
+    }
     private var messagesURL: URL { folder.appendingPathComponent("messages", isDirectory: true) }
 
     // MARK: Reading
@@ -109,7 +114,7 @@ public actor LocalMailStore {
         let id = id ?? "local:\(UUID().uuidString.lowercased())"
         var summary = MIMEParser.parse(raw).summary(id: id, folderID: folderID, isUnread: isUnread, isStarred: isStarred,
                                                     size: raw.count)
-        summary.isDraft = folderID == "Drafts"
+        summary.isDraft = Self.isDraftsFolder(folderID)
         let file = entries[id]?.file ?? "\(UUID().uuidString.lowercased()).eml"
         do {
             try FileManager.default.createDirectory(at: messagesURL, withIntermediateDirectories: true)
@@ -134,7 +139,7 @@ public actor LocalMailStore {
     public func move(ids: [String], to folderID: String) throws {
         try update(ids) {
             $0.folderID = folderID
-            $0.isDraft = folderID == "Drafts"
+            $0.isDraft = Self.isDraftsFolder(folderID)
         }
     }
 
