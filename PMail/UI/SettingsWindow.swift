@@ -23,6 +23,8 @@ final class SettingsWindowController: NSWindowController {
         window.isReleasedWhenClosed = false
         window.isRestorable = false
         let host = NSHostingController(rootView: SettingsView(app: app))
+        // The window follows the form as it grows (someone blocked while it's open).
+        host.sizingOptions = .preferredContentSize
         window.contentViewController = host
         window.setContentSize(host.view.fittingSize)
         super.init(window: window)
@@ -40,6 +42,7 @@ struct SettingsView: View {
     @AppStorage("CheckMinutes") private var checkMinutes = 2
     @State private var opensAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
+    @State private var blockedAccountID: UUID?
 
     var body: some View {
         Form {
@@ -64,6 +67,7 @@ struct SettingsView: View {
                 Text("Pictures from the internet can tell senders when you read their mail, so PMail asks first unless this is on.")
                     .font(.pm(11.5)).foregroundStyle(.secondary)
             }
+            blockedSection
             Section("Keyboard") {
                 Toggle("Single-key shortcuts (C to compose, E to archive, J and K to move…)", isOn: $singleKeys)
                 Button("Show All Shortcuts") { app.sheet = .shortcuts }
@@ -78,6 +82,42 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 520)
         .fixedSize()
+    }
+
+    /// The account whose blocked senders show: the one picked, else the one showing in the window.
+    private var blockedAccount: UUID? {
+        blockedAccountID ?? app.accounts.currentID ?? app.accounts.accounts.first?.id
+    }
+
+    /// Senders blocked from Report spam, per account, each with Unblock.
+    private var blockedSection: some View {
+        let mail = blockedAccount.flatMap { app.accounts.session(for: $0) }?.mail
+        let blocked = mail?.blockedSenders ?? []
+        return Section("Blocked senders") {
+            if app.accounts.accounts.count > 1 {
+                Picker("Account", selection: Binding(get: { blockedAccount }, set: { blockedAccountID = $0 })) {
+                    ForEach(app.accounts.accounts) { account in Text(account.email).tag(Optional(account.id)) }
+                }
+            }
+            if blocked.isEmpty {
+                Text("No one is blocked. Report spam offers to block the sender, or everything from their domain, so their mail goes to Junk as it arrives.")
+                    .font(.pm(11.5)).foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(spacing: 6) {
+                        ForEach(blocked) { sender in
+                            HStack {
+                                Text(sender.kind == .domain ? "Everything from \(sender.value)" : sender.value).textSelection(.enabled)
+                                Spacer()
+                                Button("Unblock") { mail?.unblock(sender) }
+                            }
+                        }
+                    }
+                }
+                .frame(height: min(CGFloat(blocked.count) * 28, 168))
+            }
+        }
+        .task(id: blockedAccount) { await mail?.loadBlockedSenders() }
     }
 
     /// Adds PMail to (or takes it out of) the apps that open at login, so new mail and snoozes keep coming.

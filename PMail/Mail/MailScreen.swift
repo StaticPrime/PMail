@@ -27,6 +27,23 @@ struct MailScreen: View {
                 }
             }
         }
+        .confirmationDialog("Report spam", isPresented: Binding(get: { mail.spamReport != nil }, set: { if !$0 { mail.spamReport = nil } }),
+                            presenting: mail.spamReport) { report in
+            Button("Report Spam") { mail.finishSpamReport(report, block: .nobody) }
+            Button(report.addresses.count == 1 ? "Report and Block \(report.addresses[0])"
+                                               : "Report and Block These \(report.addresses.count) Senders") {
+                mail.finishSpamReport(report, block: .senders)
+            }
+            if !report.domains.isEmpty {
+                Button(report.domains.count == 1 ? "Report and Block Everything from \(report.domains[0])"
+                                                 : "Report and Block Everything from These \(report.domains.count) Domains") {
+                    mail.finishSpamReport(report, block: .domains)
+                }
+            }
+            Button("Cancel", role: .cancel) { mail.spamReport = nil }
+        } message: { _ in
+            Text("Mail from blocked senders goes to Junk as it arrives. You can unblock them in Settings.")
+        }
     }
 }
 

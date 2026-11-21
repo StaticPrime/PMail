@@ -157,6 +157,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // Not offered where the account has nowhere to put the mail (no Archive or Junk folder).
         if case .archive = action, !mail.capabilities.canArchive { return }
         if case .markSpam = action, !mail.canReportSpam { return }
+        // Report spam asks whether to block the sender too.
+        if case .markSpam = action { return mail.reportSpam(targets) }
         mail.perform(action, on: targets)
     }
 

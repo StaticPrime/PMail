@@ -616,6 +616,58 @@ enum SelfTest {
         }
         step {
             check(!mail.isOffline, "and the offline note goes once the server answers")
+            mail.select(folderID: mail.inbox?.id)
+            let service = sampleMail
+            let deals = MailAddress(name: "Great Deals", email: "deals@offers.example")
+            Task { await service?.deliver(from: deals, subject: "Self-test offer", text: "Buy now!", at: AppClock.now().addingTimeInterval(60)) }
+            let session = session
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { Task { await app.sync?.check(session) } }
+            wait("the offer to arrive") { mail.conversations.contains { $0.subject == "Self-test offer" } }
+        }
+
+        // MARK: Blocking senders
+        var spamMark = 0
+        var notifiedBefore = 0
+        step {
+            guard let offer = mail.conversations.first(where: { $0.subject == "Self-test offer" }) else {
+                return check(false, "the offer is in the inbox")
+            }
+            mail.undoDelay = 0.2
+            mail.reportSpam([offer])
+            check(mail.spamReport?.addresses == ["deals@offers.example"], "Report spam offers to block the sender")
+            check(mail.spamReport?.domains == ["offers.example"], "or everything from their domain")
+            guard let report = mail.spamReport else { return }
+            spamMark = actions().filter { $0 == "markSpam" }.count
+            mail.finishSpamReport(report, block: .senders)
+            check(!mail.conversations.contains { $0.id == offer.id }, "reporting takes the conversation out of the inbox")
+            check(app.toast?.text == "Blocked deals@offers.example. Their mail goes to Junk from now on.", "and says who's blocked",
+                  app.toast?.text ?? "")
+            wait("the block to be kept") {
+                mail.blockedSenders.map(\.id) == ["address:deals@offers.example"] && actions().filter { $0 == "markSpam" }.count > spamMark
+            }
+        }
+        step {
+            check(mail.blockedSenders.map(\.id) == ["address:deals@offers.example"], "the sender is blocked on this account")
+            check(actions().filter { $0 == "markSpam" }.count > spamMark, "and the conversation went to Junk on the server")
+            spamMark = actions().filter { $0 == "markSpam" }.count
+            notifiedBefore = notifier?.newMail.count ?? 0
+            let service = sampleMail
+            let deals = MailAddress(name: "Great Deals", email: "deals@offers.example")
+            Task { await service?.deliver(from: deals, subject: "Self-test offer again", text: "Last chance!", at: AppClock.now().addingTimeInterval(120)) }
+            let session = session
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { Task { await app.sync?.check(session) } }
+            wait("the blocked mail to go to Junk") { actions().filter { $0 == "markSpam" }.count > spamMark }
+        }
+        step {
+            check(actions().filter { $0 == "markSpam" }.count > spamMark, "new mail from a blocked sender goes straight to Junk")
+            check((notifier?.newMail.count ?? 0) == notifiedBefore, "without a notification")
+            check(!mail.conversations.contains { $0.subject == "Self-test offer again" }, "and never shows in the inbox's list")
+            guard let rule = mail.blockedSenders.first else { return check(false, "the block is listed") }
+            mail.unblock(rule)
+            wait("the sender to be unblocked") { mail.blockedSenders.isEmpty }
+        }
+        step {
+            check(mail.blockedSenders.isEmpty, "Settings can unblock a sender")
         }
 
         // MARK: Accounts, windows and menus

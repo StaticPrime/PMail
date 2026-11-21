@@ -208,6 +208,7 @@ final class MailViewModel {
                 }
             }
             await refreshLocalFolders()
+            await loadBlockedSenders()
             await loadFolders(thenList: true)
         }
     }
@@ -869,6 +870,95 @@ final class MailViewModel {
     /// Puts a sent message's conversation at the top if the list showing is where it belongs.
     func didSend() {
         if currentFolder?.role == .sent || openConversation != nil { refresh() }
+    }
+
+    // MARK: Spam and blocked senders
+
+    /// Who's blocked on this account, for Settings.
+    private(set) var blockedSenders: [BlockedSender] = []
+    /// A Report spam waiting for the person to say whether to block the senders too.
+    var spamReport: SpamReport?
+
+    /// Conversations being reported, with the addresses and domains blocking could cover.
+    struct SpamReport: Identifiable {
+        let id = UUID()
+        let conversations: [Conversation]
+        let addresses: [String]
+        let domains: [String]
+    }
+
+    enum SpamBlock {
+        case nobody, senders, domains
+    }
+
+    func loadBlockedSenders() async {
+        blockedSenders = await storage.blockedSenders.all()
+    }
+
+    /// Report spam, which first asks whether to block the senders as well: their addresses, or everything from their
+    /// domains.
+    func reportSpam(_ conversations: [Conversation]) {
+        guard canReportSpam, !conversations.isEmpty else { return }
+        let own = account.email.lowercased()
+        var addresses: [String] = []
+        for message in conversations.flatMap(\.messages) {
+            guard let email = message.from?.email.lowercased(), email != own, !addresses.contains(email) else { continue }
+            addresses.append(email)
+        }
+        guard !addresses.isEmpty else { return perform(.markSpam, on: conversations) }
+        // The account's own domain isn't offered: blocking it would send its own mail to Junk.
+        let ownDomain = BlockedSender.domain(ofAddress: own)
+        var domains: [String] = []
+        for domain in addresses.compactMap(BlockedSender.domain(ofAddress:)) where domain != ownDomain && !domains.contains(domain) {
+            domains.append(domain)
+        }
+        spamReport = SpamReport(conversations: conversations, addresses: addresses, domains: domains)
+    }
+
+    /// Moves reported conversations to Junk, blocking their senders first if asked. Blocking also takes the inbox's
+    /// other conversations from them along; Undo puts everything back and unblocks them.
+    func finishSpamReport(_ report: SpamReport, block: SpamBlock) {
+        spamReport = nil
+        let now = AppClock.now()
+        let rules: [BlockedSender]
+        switch block {
+        case .nobody: rules = []
+        case .senders: rules = report.addresses.map { BlockedSender.address($0, at: now) }
+        case .domains: rules = report.domains.map { BlockedSender(kind: .domain, value: $0, blockedAt: now) }
+        }
+        guard !rules.isEmpty else { return perform(.markSpam, on: report.conversations) }
+        var targets = report.conversations
+        if currentFolder?.role == .inbox {
+            let reported = Set(targets.map(\.id))
+            targets += conversations.filter { conversation in
+                !reported.contains(conversation.id) && conversation.messages.contains { message in
+                    guard let sender = message.from?.email else { return false }
+                    return rules.contains { $0.matches(sender) }
+                }
+            }
+        }
+        let book = storage.blockedSenders
+        Task {
+            try? await book.add(rules)
+            await loadBlockedSenders()
+        }
+        let who = rules.count == 1 ? rules[0].displayName : block == .domains ? "\(rules.count) domains" : "\(rules.count) senders"
+        fileAway(.markSpam, messages: targets.flatMap(\.messages), count: targets.count,
+                 note: "Blocked \(who). Their mail goes to Junk from now on.", onUndo: { [weak self] in
+                     Task {
+                         for rule in rules { try? await book.remove(id: rule.id) }
+                         await self?.loadBlockedSenders()
+                     }
+                 })
+    }
+
+    /// Unblocks a sender (Settings ▸ Blocked senders).
+    func unblock(_ sender: BlockedSender) {
+        let book = storage.blockedSenders
+        Task {
+            try? await book.remove(id: sender.id)
+            await loadBlockedSenders()
+        }
     }
 
     // MARK: Snoozing

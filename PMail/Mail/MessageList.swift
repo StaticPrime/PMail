@@ -117,7 +117,7 @@ struct ConversationActions: View {
                 IconButton(symbol: "exclamationmark.octagon", help: "Not spam") { mail.perform(.notSpam, on: targets) }
             } else {
                 if mail.canReportSpam {
-                    IconButton(symbol: "exclamationmark.octagon", help: "Report spam (!)") { mail.perform(.markSpam, on: targets) }
+                    IconButton(symbol: "exclamationmark.octagon", help: "Report spam (!)") { mail.reportSpam(targets) }
                 }
             }
             if role == .trash || role == .spam {
@@ -450,7 +450,7 @@ private struct RowMenu: View {
             }
         }
         Divider()
-        if mail.canReportSpam { Button("Report spam") { mail.perform(.markSpam, on: targets) } }
+        if mail.canReportSpam { Button("Report spam…") { mail.reportSpam(targets) } }
     }
 }
 

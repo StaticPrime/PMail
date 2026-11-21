@@ -106,9 +106,13 @@ final class SyncController {
         do {
             let result = try await session.services.mail.checkForNewMail(since: state)
             await storage.cache.save(syncState: result.state)
-            if let unread = result.inboxUnread { unreadCounts[id] = unread }
-            let fresh = result.messages.filter(\.isUnread)
-            if session.isActivated, pushed || !result.messages.isEmpty { session.mail.serverChanged() }
+            // Mail from blocked senders goes straight to Junk, unannounced.
+            let blocked = await storage.blockedSenders.blocked(among: result.messages)
+            if !blocked.isEmpty { try? await session.services.mail.perform(.markSpam, on: blocked) }
+            let blockedIDs = Set(blocked.map(\.id))
+            if let unread = result.inboxUnread { unreadCounts[id] = max(0, unread - blocked.filter(\.isUnread).count) }
+            let fresh = result.messages.filter { $0.isUnread && !blockedIDs.contains($0.id) }
+            if session.isActivated, pushed || !result.messages.isEmpty || !blocked.isEmpty { session.mail.serverChanged() }
             // The first check only learns where the inbox is; announcing it would announce the whole inbox.
             if state != nil, !fresh.isEmpty, UserDefaults.standard.bool(forKey: "NotifyNewMail"), !isShowingInbox(of: session) {
                 notifier.notify(newMail: fresh, in: session.account)
@@ -215,8 +219,9 @@ final class SyncController {
                 let service = session.services.mail
                 let found = try await service.findMessages(withMessageIDs: snooze.messageIDs)
                 if !found.isEmpty {
-                    try await service.perform(.moveToInbox, on: found)
+                    // Unread first: a message kept on the Mac is uploaded as it is when it moves back.
                     if let latest = found.max(by: { $0.date < $1.date }) { try await service.perform(.markUnread, on: [latest]) }
+                    try await service.perform(.moveToInbox, on: found)
                 }
                 await book.remove(snooze.id)
                 session.mail.snoozesChanged()
