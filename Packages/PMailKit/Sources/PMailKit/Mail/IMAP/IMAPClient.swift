@@ -1,0 +1,630 @@
+import Foundation
+
+/// An IMAP4rev1 client (RFC 3501, with the extensions mail servers commonly offer): it connects, protects the
+/// connection, signs in, and runs commands one at a time on a single connection.
+///
+/// Mailbox names go in and come out decoded ("Projects/Café"); the client spells them in modified UTF-7 for the
+/// server. Commands on messages work in the mailbox chosen with `select(_:readOnly:)`. Untagged responses the
+/// server sends unasked (new mail, another device's flag changes) are taken in along the way and never derail a
+/// command. Failures are `PMailError`s: a NO or BAD is `.server`, a broken connection `.connectionFailed`, after
+/// which the client is disconnected and `connect` has to be called again.
+public actor IMAPClient {
+    /// What a finished command left behind: its tagged status, and the untagged responses that came with it.
+    struct CommandResult {
+        var status: IMAPStatusResponse
+        var untagged: [IMAPUntaggedResponse]
+    }
+
+    /// The fetch items for a message list row: flags, dates, size, envelope, structure, and the threading headers.
+    public static let summaryItems = "UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE "
+        + "BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE)]"
+
+    private let connector: any ByteStreamConnector
+    private var connection: LineConnection?
+    private var security: ConnectionSecurity = .tls
+    private var isEncrypted = false
+    private var tagNumber = 0
+    private var byeText: String?
+    private var sawCapabilities = false
+    /// How the server spelled each mailbox in its last LIST, for servers that don't round-trip modified UTF-7.
+    private var serverNames: [String: String] = [:]
+    private var isBusy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// What the server says it can do, in capitals ("IMAP4REV1", "AUTH=PLAIN", "MOVE").
+    public private(set) var capabilities: Set<String> = []
+    public private(set) var isAuthenticated = false
+    /// The mailbox commands work in, with its message count kept up to date.
+    public private(set) var selectedMailbox: IMAPSelectedMailbox?
+    /// Messages from `[ALERT]` responses, which the server wants shown to the person (the latest 20).
+    public private(set) var alerts: [String] = []
+
+    public init(connector: any ByteStreamConnector = URLSessionConnector()) {
+        self.connector = connector
+    }
+
+    /// Whether the client has a connection (it may still find out it has dropped on the next command).
+    public var isConnected: Bool { connection != nil }
+
+    public func hasCapability(_ name: String) -> Bool { capabilities.contains(name.uppercased()) }
+
+    // MARK: Connecting and signing in
+
+    /// Connects and reads the server's greeting. With `.startTLS` the connection is upgraded before anything else
+    /// happens, and a server that doesn't offer STARTTLS is refused rather than used unprotected.
+    public func connect(host: String, port: Int, security: ConnectionSecurity) async throws {
+        try await exclusively {
+            self.disconnectNow()
+            let stream: any ByteStream
+            do {
+                stream = try await self.connector.connect(host: host, port: port, security: security)
+            } catch let error as PMailError {
+                throw error
+            } catch {
+                throw PMailError.connectionFailed(error.localizedDescription)
+            }
+            self.connection = LineConnection(stream: stream)
+            self.security = security
+            self.isEncrypted = security == .tls
+            do {
+                try await self.greet()
+            } catch {
+                self.disconnectNow()
+                throw error
+            }
+        }
+    }
+
+    private func greet() async throws {
+        guard let connection else { throw PMailError.connectionFailed("") }
+        let greeting: IMAPResponse
+        do {
+            greeting = try await readResponse(from: connection)
+        } catch {
+            throw translate(error)
+        }
+        guard case let .untagged(.condition(status)) = greeting else {
+            throw PMailError.protocolError("the server didn’t greet PMail the way an IMAP server does")
+        }
+        switch status.status {
+        case .bye: throw PMailError.connectionFailed(status.text)
+        case .preauth: isAuthenticated = true
+        case .ok: break
+        case .no, .bad: throw PMailError.server(status.text)
+        }
+        if case let .capability(names)? = status.code { setCapabilities(names) }
+        if security == .startTLS {
+            // A server that signs PMail in before encryption could be anyone in between.
+            if isAuthenticated {
+                throw PMailError.notSupported("The server skipped signing in, so the connection can’t be protected.")
+            }
+            if capabilities.isEmpty { try await refreshCapabilities() }
+            guard capabilities.contains("STARTTLS") else {
+                throw PMailError.notSupported("This server doesn’t offer STARTTLS, so PMail won’t send your password to it.")
+            }
+            let result = try await run([.text("STARTTLS")])
+            guard result.status.status == .ok else { throw PMailError.server(result.status.text) }
+            do {
+                try await connection.startTLS()
+            } catch {
+                let failure = translate(error)
+                disconnectNow()
+                throw failure
+            }
+            isEncrypted = true
+            // What the server said before encryption can't be trusted (RFC 3501 §6.2.1).
+            capabilities = []
+            try await refreshCapabilities()
+        } else if capabilities.isEmpty {
+            try await refreshCapabilities()
+        }
+    }
+
+    /// Signs in: a password with AUTHENTICATE PLAIN (or LOGIN when PLAIN isn't offered), a token with XOAUTH2. A
+    /// token the server turns down is invalidated and a fresh one tried once. A password is never sent over an
+    /// unprotected connection unless the account's security is `.none`.
+    public func signIn(_ credential: Credential) async throws {
+        try await exclusively {
+            guard self.connection != nil else { throw PMailError.connectionFailed("the connection to the server was closed") }
+            if self.isAuthenticated { return }
+            guard self.isEncrypted || self.security == .none else {
+                throw PMailError.notSupported("The connection isn’t protected, so PMail won’t send your password.")
+            }
+            self.sawCapabilities = false
+            switch credential {
+            case let .password(username, password):
+                if self.capabilities.contains("AUTH=PLAIN") {
+                    let result = try await self.authenticate(mechanism: "PLAIN",
+                                                             initialResponse: SASL.plain(username: username, password: password))
+                    try self.checkSignIn(result)
+                } else if !self.capabilities.contains("LOGINDISABLED") {
+                    let result = try await self.run([.text("LOGIN "), IMAPArgument.string(username), .text(" "),
+                                                     IMAPArgument.secret(password)])
+                    try self.checkSignIn(result)
+                } else {
+                    throw PMailError.notSupported("This server doesn’t accept a password on this connection.")
+                }
+            case let .oauth(username, tokens):
+                try await self.signIn(username: username, tokens: tokens)
+            }
+            self.isAuthenticated = true
+            // Servers often offer more once someone has signed in; most say so in the sign-in's answer.
+            if !self.sawCapabilities { try await self.refreshCapabilities() }
+        }
+    }
+
+    private func signIn(username: String, tokens: any AccessTokenProvider) async throws {
+        var attempt = 0
+        while true {
+            let token: String
+            do {
+                token = try await tokens.accessToken()
+            } catch let error as PMailError {
+                throw error
+            } catch {
+                throw PMailError.authenticationFailed(error.localizedDescription)
+            }
+            let result = try await authenticate(mechanism: "XOAUTH2",
+                                                initialResponse: SASL.xoauth2(username: username, accessToken: token))
+            if result.status.status == .ok { return }
+            guard attempt == 0 else { throw PMailError.authenticationFailed(result.status.text) }
+            // The token may have run out or been revoked: get a fresh one and try once more.
+            attempt += 1
+            await tokens.invalidateAccessToken()
+        }
+    }
+
+    /// Runs AUTHENTICATE, sending the initial response inline when the server offers SASL-IR, else after its `+`.
+    private func authenticate(mechanism: String, initialResponse: String) async throws -> CommandResult {
+        let inline = capabilities.contains("SASL-IR")
+        var sentResponse = inline
+        let parts: [IMAPCommandPart] = inline
+            ? [.text("AUTHENTICATE \(mechanism) "), .secret(initialResponse, shownAs: "…")]
+            : [.text("AUTHENTICATE \(mechanism)")]
+        return try await run(parts) { _ in
+            if !sentResponse {
+                sentResponse = true
+                return .secret(initialResponse, shownAs: "…")
+            }
+            // A further challenge explains a failure (XOAUTH2 sends its error this way): an empty line acknowledges
+            // it, and "*" cancels any other mechanism.
+            return .text(mechanism == "XOAUTH2" ? "" : "*")
+        }
+    }
+
+    private func checkSignIn(_ result: CommandResult) throws {
+        guard result.status.status == .ok else { throw PMailError.authenticationFailed(result.status.text) }
+    }
+
+    /// Asks the server what it can do.
+    @discardableResult
+    public func capability() async throws -> Set<String> {
+        try await exclusively {
+            try await self.refreshCapabilities()
+            return self.capabilities
+        }
+    }
+
+    private func refreshCapabilities() async throws {
+        try check(try await run([.text("CAPABILITY")]))
+    }
+
+    // MARK: Mailboxes
+
+    /// Every mailbox, with special-use attributes (\Sent, \Trash…) when the server offers them.
+    public func listMailboxes() async throws -> [IMAPMailbox] {
+        try await exclusively {
+            var result: CommandResult
+            if self.capabilities.contains("SPECIAL-USE") {
+                result = try await self.run([.text("LIST \"\" \"*\" RETURN (SPECIAL-USE)")])
+                // A server can offer special-use attributes without extended LIST, and turn the RETURN option down.
+                if result.status.status != .ok { result = try await self.run([.text("LIST \"\" \"*\"")]) }
+            } else {
+                result = try await self.run([.text("LIST \"\" \"*\"")])
+            }
+            try self.check(result)
+            var seen = Set<String>()
+            var mailboxes: [IMAPMailbox] = []
+            for case let .list(mailbox) in result.untagged where seen.insert(mailbox.name).inserted {
+                mailboxes.append(mailbox)
+                self.serverNames[mailbox.name] = mailbox.rawName
+            }
+            return mailboxes
+        }
+    }
+
+    /// How many messages a mailbox has, how many are unread, and its UIDNEXT and UIDVALIDITY.
+    public func status(_ mailbox: String) async throws -> IMAPMailboxStatus {
+        try await exclusively {
+            let result = try await self.run([.text("STATUS "), self.mailboxArgument(mailbox),
+                                             .text(" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)")])
+            try self.check(result)
+            var answers: [(name: String, attributes: [String: Int])] = []
+            for case let .status(name, attributes) in result.untagged { answers.append((name, attributes)) }
+            let attributes = (answers.first { $0.name == mailbox } ?? answers.first)?.attributes ?? [:]
+            return IMAPMailboxStatus(mailbox: mailbox, messages: attributes["MESSAGES"], unseen: attributes["UNSEEN"],
+                                     uidNext: attributes["UIDNEXT"].flatMap { UInt32(exactly: $0) },
+                                     uidValidity: attributes["UIDVALIDITY"].flatMap { UInt32(exactly: $0) })
+        }
+    }
+
+    /// Opens a mailbox for the commands that follow: SELECT, or EXAMINE when `readOnly`.
+    @discardableResult
+    public func select(_ mailbox: String, readOnly: Bool = false) async throws -> IMAPSelectedMailbox {
+        try await exclusively {
+            // A failed SELECT leaves no mailbox selected.
+            self.selectedMailbox = nil
+            let result = try await self.run([.text(readOnly ? "EXAMINE " : "SELECT "), self.mailboxArgument(mailbox)])
+            try self.check(result)
+            var selected = IMAPSelectedMailbox(name: mailbox, isReadOnly: readOnly)
+            for response in result.untagged {
+                switch response {
+                case let .exists(count): selected.exists = count
+                case let .recent(count): selected.recent = count
+                case let .flags(flags): selected.flags = flags
+                case let .condition(status):
+                    switch status.code {
+                    case let .uidValidity(value)?: selected.uidValidity = value
+                    case let .uidNext(value)?: selected.uidNext = value
+                    case let .permanentFlags(flags)?: selected.permanentFlags = flags
+                    default: break
+                    }
+                default: break
+                }
+            }
+            if case .readOnly? = result.status.code { selected.isReadOnly = true }
+            self.selectedMailbox = selected
+            return selected
+        }
+    }
+
+    // MARK: Messages in the selected mailbox
+
+    /// The UIDs of the messages that match every key. Strings beyond ASCII go as literals with `CHARSET UTF-8`.
+    public func uidSearch(_ keys: [IMAPSearchKey]) async throws -> [UInt32] {
+        try await exclusively {
+            var builder = IMAPCommandBuilder()
+            for (index, key) in (keys.isEmpty ? [.all] : keys).enumerated() {
+                if index > 0 { builder.text(" ") }
+                key.write(into: &builder)
+            }
+            var parts: [IMAPCommandPart] = [.text(builder.hasNonASCII ? "UID SEARCH CHARSET UTF-8 " : "UID SEARCH ")]
+            parts += builder.parts
+            let result = try await self.run(parts)
+            try self.check(result)
+            var uids: [UInt32] = []
+            for case let .search(found) in result.untagged { uids += found }
+            return uids
+        }
+    }
+
+    /// Fetches items (`"UID FLAGS ENVELOPE"`) for messages, one answer per message in the order they came. Answers
+    /// a server splits are joined, and unasked-for updates about other messages are left out.
+    public func uidFetch(_ uids: [UInt32], items: String) async throws -> [IMAPFetchResponse] {
+        let wanted = Set(uids)
+        guard !wanted.isEmpty else { return [] }
+        return try await exclusively {
+            let result = try await self.run([.text("UID FETCH \(IMAPSequenceSet.string(uids)) (\(items))")])
+            try self.check(result)
+            var byUID: [UInt32: IMAPFetchResponse] = [:]
+            var order: [UInt32] = []
+            for case let .fetch(response) in result.untagged {
+                guard let uid = response.uid, wanted.contains(uid) else { continue }
+                if byUID[uid] == nil {
+                    order.append(uid)
+                    byUID[uid] = response
+                } else {
+                    byUID[uid]?.merge(response)
+                }
+            }
+            return order.compactMap { byUID[$0] }
+        }
+    }
+
+    /// What a message list shows for each message (`summaryItems`, plus the server's conversation ID when it
+    /// offers X-GM-EXT-1), optionally with the whole message too.
+    public func fetchSummaries(_ uids: [UInt32], withMessage: Bool = false) async throws -> [IMAPFetchResponse] {
+        var items = Self.summaryItems
+        if capabilities.contains("X-GM-EXT-1") { items += " X-GM-THRID" }
+        if withMessage { items += " BODY.PEEK[]" }
+        return try await uidFetch(uids, items: items)
+    }
+
+    /// One body section of each message, or just its first `length` bytes, without marking anything read.
+    public func fetchSection(_ section: String, of uids: [UInt32], length: Int? = nil) async throws -> [IMAPFetchResponse] {
+        try await uidFetch(uids, items: "UID BODY.PEEK[\(section)]" + (length.map { "<0.\($0)>" } ?? ""))
+    }
+
+    /// Whole messages and their flags, without marking them read.
+    public func fetchMessages(_ uids: [UInt32]) async throws -> [IMAPFetchResponse] {
+        try await uidFetch(uids, items: "UID FLAGS BODY.PEEK[]")
+    }
+
+    /// Adds or removes flags ("\Seen", "\Flagged") without asking for the new flags back.
+    public func uidStore(_ uids: [UInt32], adding: Bool, flags: [String]) async throws {
+        guard !uids.isEmpty, !flags.isEmpty else { return }
+        try await exclusively {
+            try await self.store(uids, adding: adding, flags: flags)
+        }
+    }
+
+    /// Copies messages to another mailbox; returns the COPYUID code when the server gives one.
+    @discardableResult
+    public func uidCopy(_ uids: [UInt32], to mailbox: String) async throws -> IMAPResponseCode? {
+        guard !uids.isEmpty else { return nil }
+        return try await exclusively {
+            let result = try await self.run([.text("UID COPY \(IMAPSequenceSet.string(uids)) "), self.mailboxArgument(mailbox)])
+            try self.check(result)
+            return result.status.code
+        }
+    }
+
+    /// Moves messages to another mailbox: with MOVE when the server offers it, else by copying, marking the
+    /// originals deleted and expunging them.
+    public func uidMove(_ uids: [UInt32], to mailbox: String) async throws {
+        guard !uids.isEmpty else { return }
+        try await exclusively {
+            let set = IMAPSequenceSet.string(uids)
+            if self.capabilities.contains("MOVE") {
+                try self.check(try await self.run([.text("UID MOVE \(set) "), self.mailboxArgument(mailbox)]))
+            } else {
+                try self.check(try await self.run([.text("UID COPY \(set) "), self.mailboxArgument(mailbox)]))
+                try await self.store(uids, adding: true, flags: ["\\Deleted"])
+                try await self.expungeNow(uids)
+            }
+        }
+    }
+
+    /// Deletes messages for good: marks them \Deleted and expunges them (just them with UIDPLUS; without it,
+    /// EXPUNGE removes every message marked deleted).
+    public func deleteMessages(_ uids: [UInt32]) async throws {
+        guard !uids.isEmpty else { return }
+        try await exclusively {
+            try await self.store(uids, adding: true, flags: ["\\Deleted"])
+            try await self.expungeNow(uids)
+        }
+    }
+
+    private func store(_ uids: [UInt32], adding: Bool, flags: [String]) async throws {
+        let change = (adding ? "+" : "-") + "FLAGS.SILENT (\(flags.joined(separator: " ")))"
+        let command = "UID STORE \(IMAPSequenceSet.string(uids)) \(change)"
+        try check(try await run([.text(command)]))
+    }
+
+    private func expungeNow(_ uids: [UInt32]) async throws {
+        if capabilities.contains("UIDPLUS") {
+            try check(try await run([.text("UID EXPUNGE \(IMAPSequenceSet.string(uids))")]))
+        } else {
+            try check(try await run([.text("EXPUNGE")]))
+        }
+    }
+
+    /// Removes every message marked \Deleted from the selected mailbox.
+    public func expunge() async throws {
+        try await exclusively { try self.check(try await self.run([.text("EXPUNGE")])) }
+    }
+
+    /// Adds a message to a mailbox, with flags ("\Seen", "\Draft"). Returns where it went when the server says
+    /// (APPENDUID).
+    @discardableResult
+    public func append(_ message: Data, to mailbox: String, flags: [String] = [],
+                       date: Date? = nil) async throws -> IMAPAppendResult? {
+        try await exclusively {
+            var parts: [IMAPCommandPart] = [.text("APPEND "), self.mailboxArgument(mailbox)]
+            if !flags.isEmpty { parts.append(.text(" (\(flags.joined(separator: " ")))")) }
+            if let date { parts.append(.text(" \"\(IMAPDate.format(date))\"")) }
+            parts.append(.text(" "))
+            parts.append(.literal(message))
+            let result = try await self.run(parts)
+            try self.check(result)
+            if case let .appendUID(uidValidity, uid)? = result.status.code {
+                return IMAPAppendResult(uidValidity: uidValidity, uid: uid)
+            }
+            return nil
+        }
+    }
+
+    /// Closes the selected mailbox (expunging messages marked deleted).
+    public func closeMailbox() async throws {
+        try await exclusively {
+            try self.check(try await self.run([.text("CLOSE")]))
+            self.selectedMailbox = nil
+        }
+    }
+
+    /// Does nothing, which gives the server a chance to report new mail and changes.
+    public func noop() async throws {
+        try await exclusively { try self.check(try await self.run([.text("NOOP")])) }
+    }
+
+    /// Signs out politely and disconnects. Never fails: a connection that's already gone is simply closed.
+    public func logout() async {
+        guard connection != nil else { return }
+        _ = try? await exclusively { _ = try await self.run([.text("LOGOUT")]) }
+        disconnectNow()
+    }
+
+    /// Drops the connection at once.
+    public func disconnect() {
+        disconnectNow()
+    }
+
+    // MARK: Running commands
+
+    /// Writes a command and reads until its tagged answer, taking in every untagged response along the way.
+    /// Continuation requests go to `onContinuation`, which returns the line to answer with.
+    private func run(_ parts: [IMAPCommandPart],
+                     onContinuation: (String) async throws -> IMAPCommandPart? = { _ in nil }) async throws -> CommandResult {
+        guard let connection else { throw PMailError.connectionFailed("the connection to the server was closed") }
+        tagNumber += 1
+        let tag = "A\(tagNumber)"
+        var untagged: [IMAPUntaggedResponse] = []
+        do {
+            if let refusal = try await send(parts, tag: tag, on: connection, untagged: &untagged) {
+                return CommandResult(status: refusal, untagged: untagged)
+            }
+            while true {
+                switch try await readResponse(from: connection) {
+                case let .untagged(response):
+                    note(response)
+                    untagged.append(response)
+                case let .continuation(text):
+                    guard let reply = try await onContinuation(text) else {
+                        throw PMailError.protocolError("the server asked for more than PMail had to send")
+                    }
+                    try await writeReply(reply, on: connection)
+                case let .tagged(responseTag, status):
+                    guard responseTag == tag else { continue }
+                    if case let .capability(names)? = status.code { setCapabilities(names) }
+                    return CommandResult(status: status, untagged: untagged)
+                }
+            }
+        } catch {
+            let failure = translate(error)
+            disconnectNow()
+            throw failure
+        }
+    }
+
+    /// Writes a command, stopping at each synchronizing literal for the server's go-ahead. Returns the tagged
+    /// answer if the server refused before the command was complete.
+    private func send(_ parts: [IMAPCommandPart], tag: String, on connection: LineConnection,
+                      untagged: inout [IMAPUntaggedResponse]) async throws -> IMAPStatusResponse? {
+        var line = tag + " "
+        var shown = line
+        var isSecret = false
+        for part in parts {
+            switch part {
+            case let .text(text):
+                line += text
+                shown += text
+            case let .secret(text, placeholder):
+                line += text
+                shown += placeholder
+                isSecret = true
+            case let .literal(data), let .secretLiteral(data):
+                let waits = !canSendLiteralAtOnce(data.count)
+                let marker = "{\(data.count)\(waits ? "" : "+")}"
+                try await writeLine(line + marker, shown: isSecret ? shown + marker : nil, on: connection)
+                if waits, let refusal = try await waitForGoAhead(tag: tag, on: connection, untagged: &untagged) {
+                    return refusal
+                }
+                if case .secretLiteral = part {
+                    try await connection.stream.write(data)  // Straight to the stream, so it stays out of transcripts.
+                } else {
+                    try await connection.write(data)
+                }
+                line = ""
+                shown = ""
+                isSecret = false
+            }
+        }
+        try await writeLine(line, shown: isSecret ? shown : nil, on: connection)
+        return nil
+    }
+
+    /// Whether a literal can follow its `{n+}` at once (LITERAL+, or LITERAL- for small ones) instead of waiting
+    /// for the server's `+`.
+    private func canSendLiteralAtOnce(_ count: Int) -> Bool {
+        capabilities.contains("LITERAL+") || (capabilities.contains("LITERAL-") && count <= 4096)
+    }
+
+    private func waitForGoAhead(tag: String, on connection: LineConnection,
+                                untagged: inout [IMAPUntaggedResponse]) async throws -> IMAPStatusResponse? {
+        while true {
+            switch try await readResponse(from: connection) {
+            case .continuation:
+                return nil
+            case let .untagged(response):
+                note(response)
+                untagged.append(response)
+            case let .tagged(responseTag, status):
+                if responseTag == tag { return status }
+            }
+        }
+    }
+
+    private func writeLine(_ line: String, shown: String?, on connection: LineConnection) async throws {
+        if let shown {
+            try await connection.writeSecretLine(line, shownAs: shown)
+        } else {
+            try await connection.writeLine(line)
+        }
+    }
+
+    private func writeReply(_ reply: IMAPCommandPart, on connection: LineConnection) async throws {
+        switch reply {
+        case let .text(text): try await connection.writeLine(text)
+        case let .secret(text, placeholder): try await connection.writeSecretLine(text, shownAs: placeholder)
+        case let .literal(data): try await connection.write(data + Data("\r\n".utf8))
+        case let .secretLiteral(data): try await connection.stream.write(data + Data("\r\n".utf8))
+        }
+    }
+
+    private func readResponse(from connection: LineConnection) async throws -> IMAPResponse {
+        try IMAPParser.parse(try await IMAPParser.readResponseData(from: connection))
+    }
+
+    /// Keeps track of what untagged responses say about the session.
+    private func note(_ response: IMAPUntaggedResponse) {
+        switch response {
+        case let .capability(names):
+            setCapabilities(names)
+        case let .condition(status):
+            if status.status == .bye { byeText = status.text.isEmpty ? "the server closed the connection" : status.text }
+            if case let .capability(names)? = status.code { setCapabilities(names) }
+            if case .alert? = status.code, !status.text.isEmpty { alerts = Array((alerts + [status.text]).suffix(20)) }
+        case let .exists(count):
+            selectedMailbox?.exists = count
+        case .expunge:
+            if let count = selectedMailbox?.exists, count > 0 { selectedMailbox?.exists = count - 1 }
+        default:
+            break
+        }
+    }
+
+    private func setCapabilities(_ names: [String]) {
+        capabilities = Set(names.map { $0.uppercased() })
+        sawCapabilities = true
+    }
+
+    private func check(_ result: CommandResult) throws {
+        guard result.status.status == .ok else { throw PMailError.server(result.status.text) }
+    }
+
+    private func mailboxArgument(_ name: String) -> IMAPCommandPart {
+        IMAPArgument.string(serverNames[name] ?? IMAPMailboxName.encode(name))
+    }
+
+    /// The error to report for a failure mid-command: the server's goodbye, if it said one, for a dropped
+    /// connection, and `connectionFailed` for anything that isn't already a `PMailError`.
+    private func translate(_ error: Error) -> PMailError {
+        guard let error = error as? PMailError else { return .connectionFailed(error.localizedDescription) }
+        if case .connectionFailed = error, let byeText { return .connectionFailed(byeText) }
+        return error
+    }
+
+    private func disconnectNow() {
+        connection?.stream.close()
+        connection = nil
+        isAuthenticated = false
+        isEncrypted = false
+        selectedMailbox = nil
+        capabilities = []
+        tagNumber = 0
+        byeText = nil
+    }
+
+    /// Runs `body` with no other command in flight, so commands from different tasks never interleave.
+    private func exclusively<T: Sendable>(_ body: () async throws -> T) async throws -> T {
+        if isBusy {
+            await withCheckedContinuation { waiters.append($0) }
+        } else {
+            isBusy = true
+        }
+        defer {
+            if waiters.isEmpty { isBusy = false } else { waiters.removeFirst().resume() }
+        }
+        return try await body()
+    }
+}

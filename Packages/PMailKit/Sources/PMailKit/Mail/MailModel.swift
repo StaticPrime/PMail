@@ -369,7 +369,7 @@ public struct OutgoingMessage: Sendable, Hashable {
 
     /// A new, unique Message-ID on the sender's domain.
     public static func newMessageID(for email: String) -> String {
-        let domain = ServerPresets.domain(of: email) ?? "pmail.local"
+        let domain = ServerPresets.domain(of: email) ?? "localhost"
         return "<\(UUID().uuidString.lowercased())@\(domain)>"
     }
 }
