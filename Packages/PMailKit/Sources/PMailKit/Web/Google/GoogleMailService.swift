@@ -13,6 +13,8 @@ public actor GoogleMailService: MailService {
 
     /// The headers a message list needs, asked for when listing conversations.
     static let listHeaders = ["From", "To", "Cc", "Subject", "Date", "Message-ID", "References", "In-Reply-To"]
+    /// The query that fetches a thread or message with only what a list row needs.
+    static let metadataQuery: [(String, String)] = [("format", "metadata")] + listHeaders.map { ("metadataHeaders", $0) }
 
     /// The inbox's category tabs. Their IDs are the category labels.
     static let tabs: [InboxTab] = [
@@ -131,11 +133,10 @@ public actor GoogleMailService: MailService {
         let list = try await client.get(Self.url("threads", query))
 
         let threadIDs = WebClient.unique(list["threads"].array.compactMap { $0["id"].nonEmpty })
-        let metadata = [("format", "metadata")] + Self.listHeaders.map { ("metadataHeaders", $0) }
         let client = self.client
         let threads = try await WebClient.concurrentMap(threadIDs) { id -> JSONValue? in
             do {
-                return try await client.get(Self.url("threads/\(WebURL.segment(id))", metadata))
+                return try await client.get(Self.url("threads/\(WebURL.segment(id))", Self.metadataQuery))
             } catch PMailError.notFound {
                 return nil  // Deleted since the list was made.
             }
@@ -194,6 +195,109 @@ public actor GoogleMailService: MailService {
     private static func nonEmpty(_ text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// List rows for messages, fetched a few at a time with the headers listing asks for. Messages deleted in the
+    /// meantime are left out.
+    static func summaries(ofMessages ids: [String], client: WebClient) async throws -> [MessageSummary] {
+        try await WebClient.concurrentMap(ids) { id -> MessageSummary? in
+            do {
+                let message = try await client.get(Self.url("messages/\(WebURL.segment(id))", Self.metadataQuery))
+                return Self.summary(fromMetadata: message)
+            } catch PMailError.notFound {
+                return nil
+            }
+        }.compactMap { $0 }
+    }
+
+    // MARK: New mail
+
+    /// The most new messages one check returns.
+    static let newMailLimit = 50
+    /// How many pages of history (500 changes each) a check reads before it starts again from now instead.
+    static let historyPageLimit = 20
+
+    /// New mail from the mailbox's history: the state is the history ID the last check got to. Messages added since
+    /// then count while they're still in the inbox, unless they were sent or saved as drafts from the account itself.
+    public func checkForNewMail(since state: MailSyncState?) async throws -> NewMail {
+        let client = self.client
+        async let unread = Self.inboxUnread(client)
+        // The first check (or one with a state from something else) starts from now.
+        guard let start = state.flatMap({ UInt64($0.value) }) else {
+            return NewMail(messages: [], state: try await Self.currentHistory(client), inboxUnread: await unread)
+        }
+        let pages: [JSONValue]
+        do {
+            pages = try await client.pages(maxPages: Self.historyPageLimit) { token in
+                var query = [("startHistoryId", String(start)), ("historyTypes", "messageAdded"), ("labelId", "INBOX"),
+                             ("maxResults", "500")]
+                if let token { query.append(("pageToken", token)) }
+                return try Self.url("history", query)
+            }
+        } catch PMailError.notFound {
+            // The history isn't kept that far back (it lasts about a week): start again from now.
+            return NewMail(messages: [], state: try await Self.currentHistory(client), inboxUnread: await unread)
+        }
+        if pages.last?["nextPageToken"].nonEmpty != nil {
+            // More happened than one check reads: start again from now rather than announce only the oldest of it.
+            return NewMail(messages: [], state: try await Self.currentHistory(client), inboxUnread: await unread)
+        }
+        let records = pages.flatMap { $0["history"].array }
+        // History runs oldest first. A message its labels there already rule out (mail sent from the account) isn't fetched.
+        var seen = Set<String>()
+        var candidates: [String] = []
+        for record in records.reversed() {
+            for added in record["messagesAdded"].array.reversed() {
+                guard let id = added["message"]["id"].nonEmpty, seen.insert(id).inserted else { continue }
+                let labels = added["message"]["labelIds"].strings
+                if labels.isEmpty || Self.isNewInInbox(labels) { candidates.append(id) }
+            }
+        }
+        // The labels as they are now decide: a message archived since it came isn't new mail any more.
+        let messages = try await Self.summaries(ofMessages: Array(candidates.prefix(Self.newMailLimit)), client: client)
+            .filter { Self.isNewInInbox($0.labelIDs) }
+        let latest = (pages.map { $0["historyId"] } + records.map { $0["id"] }).compactMap(Self.historyID).max() ?? start
+        return NewMail(messages: messages, state: MailSyncState(String(max(latest, start))), inboxUnread: await unread)
+    }
+
+    /// Whether a message with these labels is new mail: in the inbox, and not sent or drafted from the account (nor in
+    /// Trash or Spam).
+    static func isNewInInbox(_ labels: [String]) -> Bool {
+        labels.contains("INBOX") && !labels.contains { ["DRAFT", "SENT", "TRASH", "SPAM"].contains($0) }
+    }
+
+    /// A history ID, which Google sends as a string of digits.
+    static func historyID(_ json: JSONValue) -> UInt64? {
+        if let text = json.string { return UInt64(text.trimmingCharacters(in: .whitespaces)) }
+        return json.int.flatMap { $0 >= 0 ? UInt64($0) : nil }
+    }
+
+    /// The mailbox's history ID now, for a check that starts from now.
+    static func currentHistory(_ client: WebClient) async throws -> MailSyncState {
+        let profile = try await client.get(Self.url("profile"))
+        guard let id = historyID(profile["historyId"]) else { throw PMailError.protocolError("the mailbox had no history ID") }
+        return MailSyncState(String(id))
+    }
+
+    /// How many messages in the inbox are unread, or nil when that can't be had (a check doesn't need it).
+    static func inboxUnread(_ client: WebClient) async -> Int? {
+        guard let address = try? Self.url("labels/INBOX") else { return nil }
+        return try? await client.get(address)["messagesUnread"].int
+    }
+
+    // MARK: Finding messages
+
+    /// Searches for each Message-ID with `rfc822msgid:`. The search leaves Trash and Spam out, and so does a check of
+    /// the labels after it.
+    public func findMessages(withMessageIDs messageIDs: [String]) async throws -> [MessageSummary] {
+        let searches = WebClient.unique(messageIDs.compactMap(WebAddresses.bareMessageID))
+        let client = self.client
+        let found = try await WebClient.concurrentMap(searches) { messageID -> [String] in
+            let list = try await client.get(Self.url("messages", [("q", "rfc822msgid:\(messageID)")]))
+            return list["messages"].array.compactMap { $0["id"].nonEmpty }
+        }
+        return try await Self.summaries(ofMessages: WebClient.unique(found.flatMap { $0 }), client: client)
+            .filter { Self.isShown($0.labelIDs, listing: nil) }
     }
 
     // MARK: Reading

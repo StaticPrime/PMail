@@ -200,6 +200,224 @@ import Testing
         #expect(allMail.queryValues(named: "labelIds").isEmpty)
     }
 
+    // MARK: New mail
+
+    static let inboxLabel = #"""
+    {"id": "INBOX", "name": "INBOX", "messageListVisibility": "hide", "labelListVisibility": "labelShow", "type": "system",
+     "messagesTotal": 1200, "messagesUnread": 14, "threadsTotal": 900, "threadsUnread": 12}
+    """#
+
+    /// The profile, with the mailbox's history ID now, and the inbox's counts.
+    private func stubProfile(_ transport: StubTransport, historyID: String = "4001") {
+        transport.on("GET", "\(Self.api)/profile") { _ in
+            .json(#"{"emailAddress": "jamie@gmail.com", "messagesTotal": 1200, "threadsTotal": 900, "historyId": "\#(historyID)"}"#)
+        }
+        transport.on("GET", "\(Self.api)/labels/INBOX") { _ in .json(Self.inboxLabel) }
+    }
+
+    /// A message as `format=metadata` gives it.
+    private static func metadata(_ id: String, thread: String? = nil, labels: [String], internalDate: String = "1795449600000",
+                                 from: String = "Alex Kim <alex@example.com>", subject: String = "Pug meetup",
+                                 messageID: String? = nil) -> String {
+        let labelList = labels.map { "\"\($0)\"" }.joined(separator: ", ")
+        return #"""
+        {"id": "\#(id)", "threadId": "\#(thread ?? "t-" + id)", "labelIds": [\#(labelList)], "snippet": "See you at the park",
+         "sizeEstimate": 3100, "historyId": "4007", "internalDate": "\#(internalDate)",
+         "payload": {"partId": "", "mimeType": "multipart/alternative", "filename": "", "headers": [
+            {"name": "From", "value": "\#(from)"},
+            {"name": "To", "value": "Jamie Rivera <jamie@gmail.com>"},
+            {"name": "Subject", "value": "\#(subject)"},
+            {"name": "Date", "value": "Mon, 23 Nov 2026 11:00:00 -0500"},
+            {"name": "Message-ID", "value": "\#(messageID ?? "<\(id)@example.com>")"}]}}
+        """#
+    }
+
+    @Test func theFirstCheckOnlyNotesWhereTheHistoryIsUpTo() async throws {
+        let transport = StubTransport()
+        stubProfile(transport)
+        let new = try await service(transport).checkForNewMail(since: nil)
+        #expect(new.messages.isEmpty)
+        #expect(new.state == MailSyncState("4001"))
+        #expect(new.inboxUnread == 14)
+        #expect(transport.requests.compactMap { $0.url?.path }.sorted() == ["\(Self.api)/labels/INBOX", "\(Self.api)/profile"])
+    }
+
+    static let history = #"""
+    {"history": [
+        {"id": "4002", "messages": [{"id": "m11", "threadId": "t11"}],
+         "messagesAdded": [{"message": {"id": "m11", "threadId": "t11", "labelIds": ["UNREAD", "CATEGORY_UPDATES", "INBOX"]}}]},
+        {"id": "4005", "messages": [{"id": "m12", "threadId": "t12"}],
+         "messagesAdded": [{"message": {"id": "m12", "threadId": "t12", "labelIds": ["SENT", "INBOX", "IMPORTANT"]}}]},
+        {"id": "4007", "messages": [{"id": "m10", "threadId": "t10"}],
+         "messagesAdded": [{"message": {"id": "m10", "threadId": "t10",
+                                        "labelIds": ["UNREAD", "IMPORTANT", "CATEGORY_PERSONAL", "INBOX"]}}]},
+        {"id": "4008", "messages": [{"id": "m13", "threadId": "t10"}],
+         "messagesAdded": [{"message": {"id": "m13", "threadId": "t10", "labelIds": ["UNREAD", "CATEGORY_PERSONAL", "INBOX"]}}]}
+     ],
+     "historyId": "4010"}
+    """#
+
+    @Test func laterChecksListAddedMessagesStillInTheInboxNewestFirst() async throws {
+        let transport = StubTransport()
+        stubProfile(transport)
+        transport.on("GET", "\(Self.api)/history") { _ in .json(Self.history) }
+        transport.on("GET", "\(Self.api)/messages/m10") { _ in
+            .json(Self.metadata("m10", thread: "t10", labels: ["UNREAD", "IMPORTANT", "CATEGORY_PERSONAL", "INBOX"]))
+        }
+        transport.on("GET", "\(Self.api)/messages/m11") { _ in  // Archived since it came.
+            .json(Self.metadata("m11", thread: "t11", labels: ["CATEGORY_UPDATES"], from: "Pug Club <club@example.org>"))
+        }
+        transport.on("GET", "\(Self.api)/messages/m13") { _ in
+            .json(Self.metadata("m13", thread: "t10", labels: ["UNREAD", "CATEGORY_PERSONAL", "INBOX"],
+                                internalDate: "1795450200000", from: "Sam Lee <sam@example.com>", subject: "Re: Pug meetup"))
+        }
+        let new = try await service(transport).checkForNewMail(since: MailSyncState("4001"))
+
+        let history = try #require(transport.sent("GET", "\(Self.api)/history").first)
+        #expect(history.query("startHistoryId") == "4001")
+        #expect(history.queryValues(named: "historyTypes") == ["messageAdded"])
+        #expect(history.query("labelId") == "INBOX" && history.query("maxResults") == "500" && history.query("pageToken") == nil)
+        #expect(transport.sent("GET", "\(Self.api)/profile").isEmpty)
+        // Mail sent from the account isn't even fetched; the archived message is, and turns out to be out of the inbox.
+        let fetched = transport.sent("GET", "\(Self.api)/messages/")
+        #expect(Set(fetched.compactMap { $0.url?.lastPathComponent }) == ["m10", "m11", "m13"])
+        #expect(fetched.allSatisfy {
+            $0.query("format") == "metadata" && $0.queryValues(named: "metadataHeaders") == GoogleMailService.listHeaders
+        })
+
+        #expect(new.messages.map(\.id) == ["m13", "m10"])
+        #expect(new.state == MailSyncState("4010"))
+        #expect(new.inboxUnread == 14)
+        let reply = new.messages[0]
+        #expect(reply.threadID == "t10" && reply.isUnread && !reply.isImportant)
+        #expect(reply.from == MailAddress(name: "Sam Lee", email: "sam@example.com") && reply.subject == "Re: Pug meetup")
+        #expect(reply.date == WebFixtures.date("2026-11-23T16:10:00Z") && reply.messageIDHeader == "<m13@example.com>")
+    }
+
+    @Test func historyIsReadPageByPageAndOnlyTheFiftyNewestAreFetched() async throws {
+        let transport = StubTransport()
+        transport.on("GET", "\(Self.api)/history") { request in
+            // Page one adds m1…m30, page two m31…m60, with m50's record there twice.
+            let second = request.query("pageToken") == "page-2"
+            let numbers = second ? Array(31...50) + Array(50...60) : Array(1...30)
+            let records = numbers.map { number in
+                #"{"id": "\#(5000 + number)", "messagesAdded": [{"message": {"id": "m\#(number)", "labelIds": ["INBOX"]}}]}"#
+            }
+            let next = second ? "" : #""nextPageToken": "page-2", "#
+            return .json(#"{"history": [\#(records.joined(separator: ", "))], \#(next)"historyId": "\#(second ? 5070 : 5065)"}"#)
+        }
+        transport.on("GET", "\(Self.api)/messages/") { request in
+            .json(Self.metadata(request.url?.lastPathComponent ?? "", labels: ["UNREAD", "INBOX"]))
+        }
+        let new = try await service(transport).checkForNewMail(since: MailSyncState("5000"))
+
+        let pages = transport.sent("GET", "\(Self.api)/history")
+        #expect(pages.map { $0.query("pageToken") } == [nil, "page-2"])
+        #expect(pages.allSatisfy { $0.query("startHistoryId") == "5000" })
+        #expect(new.messages.map(\.id) == (11...60).reversed().map { "m\($0)" })
+        #expect(transport.sent("GET", "\(Self.api)/messages/").count == 50)
+        #expect(new.state == MailSyncState("5070"))
+    }
+
+    @Test func checksStartAgainFromNowWhenTheHistoryIsGoneOrTooLong() async throws {
+        let transport = StubTransport()
+        stubProfile(transport, historyID: "9100")
+        transport.on("GET", "\(Self.api)/history") { _ in
+            .json(#"""
+            {"error": {"code": 404, "message": "Requested entity was not found.",
+             "errors": [{"message": "Requested entity was not found.", "domain": "global", "reason": "notFound"}],
+             "status": "NOT_FOUND"}}
+            """#, status: 404)
+        }
+        let mail = service(transport)
+        let expired = try await mail.checkForNewMail(since: MailSyncState("12"))
+        #expect(expired.messages.isEmpty && expired.state == MailSyncState("9100") && expired.inboxUnread == 14)
+        #expect(transport.sent("GET", "\(Self.api)/history").first?.query("startHistoryId") == "12")
+
+        // History that runs on past the pages one check reads is skipped too, rather than half announced.
+        transport.on("GET", "\(Self.api)/history") { request in
+            let page = Int(request.query("pageToken") ?? "0") ?? 0
+            return .json(#"""
+            {"history": [{"id": "\#(8001 + page)", "messagesAdded": [{"message": {"id": "m\#(page)", "labelIds": ["INBOX"]}}]}],
+             "nextPageToken": "\#(page + 1)", "historyId": "9050"}
+            """#)
+        }
+        let flooded = try await mail.checkForNewMail(since: MailSyncState("8000"))
+        #expect(flooded.messages.isEmpty && flooded.state == MailSyncState("9100"))
+        #expect(transport.sent("GET", "\(Self.api)/history").count == 1 + GoogleMailService.historyPageLimit)
+        #expect(transport.sent("GET", "\(Self.api)/messages/").isEmpty)
+        #expect(transport.sent("GET", "\(Self.api)/profile").count == 2)
+    }
+
+    @Test func oddHistoryAnswersAndStatesNeverCrash() async throws {
+        let transport = StubTransport()
+        stubProfile(transport)
+        transport.on("GET", "\(Self.api)/history") { _ in
+            .json(#"""
+            {"history": [{"id": [1], "messagesAdded": "m1"}, 7,
+                         {"messagesAdded": [{"message": "m2"}, {"message": {"id": 3, "labelIds": "INBOX"}}, 5]}],
+             "historyId": 4020}
+            """#)
+        }
+        let mail = service(transport)
+        let odd = try await mail.checkForNewMail(since: MailSyncState("4001"))
+        #expect(odd.messages.isEmpty && odd.state == MailSyncState("4020"))
+        // A state this service didn't make starts again from now.
+        let foreign = try await mail.checkForNewMail(since: MailSyncState("2026-11-23T17:00:00Z"))
+        #expect(foreign.messages.isEmpty && foreign.state == MailSyncState("4001"))
+        #expect(transport.sent("GET", "\(Self.api)/history").count == 1)
+
+        // Nothing readable keeps the state where it was, and a count that can't be had is left out.
+        transport.on("GET", "\(Self.api)/history") { _ in .json(#"{"history": "lots", "historyId": "soon"}"#) }
+        transport.on("GET", "\(Self.api)/labels/INBOX") { _ in .status(500) }
+        let kept = try await mail.checkForNewMail(since: MailSyncState("4020"))
+        #expect(kept.messages.isEmpty && kept.state == MailSyncState("4020") && kept.inboxUnread == nil)
+
+        transport.on("GET", "\(Self.api)/profile") { _ in .json(#"{"emailAddress": "jamie@gmail.com"}"#) }
+        await #expect(throws: PMailError.protocolError("the mailbox had no history ID")) {
+            try await mail.checkForNewMail(since: nil)
+        }
+
+        transport.on("GET", "\(Self.api)/messages") { _ in .json(#"{"messages": "m1"}"#) }
+        #expect(try await mail.findMessages(withMessageIDs: ["<a@example.com>"]).isEmpty)
+        #expect(try await mail.findMessages(withMessageIDs: []).isEmpty)
+    }
+
+    // MARK: Finding messages
+
+    @Test func messagesAreFoundByMessageIDOutsideTrashAndSpam() async throws {
+        let transport = StubTransport()
+        transport.on("GET", "\(Self.api)/messages") { request in
+            switch request.query("q") {
+            case "rfc822msgid:CAKx+3=pug@mail.gmail.com":
+                .json(#"{"messages": [{"id": "m20", "threadId": "t20"}], "resultSizeEstimate": 1}"#)
+            case "rfc822msgid:plans@example.com":
+                .json(#"{"messages": [{"id": "m21", "threadId": "t21"}], "resultSizeEstimate": 1}"#)
+            default:
+                .json(#"{"resultSizeEstimate": 0}"#)
+            }
+        }
+        transport.on("GET", "\(Self.api)/messages/m20") { _ in
+            .json(Self.metadata("m20", labels: ["Label_1", "IMPORTANT"], messageID: "<CAKx+3=pug@mail.gmail.com>"))
+        }
+        transport.on("GET", "\(Self.api)/messages/m21") { _ in
+            .json(Self.metadata("m21", labels: ["TRASH"], messageID: "<plans@example.com>"))
+        }
+        let found = try await service(transport).findMessages(withMessageIDs: [
+            "<CAKx+3=pug@mail.gmail.com>", "<plans@example.com>", "<nobody@example.com>", "<CAKx+3=pug@mail.gmail.com>", "<>",
+        ])
+
+        #expect(found.map(\.id) == ["m20"])  // Filed under a label now, so found; the trashed one isn't.
+        #expect(found.first?.labelIDs == ["Label_1", "IMPORTANT"] && found.first?.messageIDHeader == "<CAKx+3=pug@mail.gmail.com>")
+        let searches = transport.requests.filter { $0.url?.path == "\(Self.api)/messages" }
+        #expect(searches.count == 3)  // Each Message-ID once, without its brackets.
+        #expect(Set(searches.compactMap { $0.query("q") })
+                == ["rfc822msgid:CAKx+3=pug@mail.gmail.com", "rfc822msgid:plans@example.com", "rfc822msgid:nobody@example.com"])
+        let escaped = "/messages?q=rfc822msgid:CAKx%2B3%3Dpug@mail.gmail.com"  // A "+" or "=" stays itself.
+        #expect(searches.contains { $0.url?.absoluteString.hasSuffix(escaped) == true })
+        #expect(transport.sent("GET", "\(Self.api)/messages/m20").first?.query("format") == "metadata")
+    }
+
     // MARK: Reading
 
     static let rawText = "From: Alex Kim <alex@example.com>\r\nTo: jamie@gmail.com\r\nSubject: Lunch? ~~~\r\n"

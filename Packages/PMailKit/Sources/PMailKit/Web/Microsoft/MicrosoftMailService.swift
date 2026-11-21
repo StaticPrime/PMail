@@ -187,6 +187,73 @@ public actor MicrosoftMailService: MailService {
                               messageIDHeader: json["internetMessageId"].nonEmpty)
     }
 
+    // MARK: New mail
+
+    /// The most new messages one check returns.
+    static let newMailLimit = 50
+
+    /// New mail by arrival time: the state is the newest `receivedDateTime` seen. Everything that arrived in the inbox
+    /// after it counts, whichever tab it's sorted into.
+    public func checkForNewMail(since state: MailSyncState?) async throws -> NewMail {
+        let client = self.client
+        async let unread = Self.inboxUnread(client)
+        guard let state, let since = WebDate.parse(state.value) else {
+            // The first check (or one with a state from something else) starts from the newest message in the inbox,
+            // or from now when the inbox is empty.
+            let query = [("$top", "1"), ("$orderby", "receivedDateTime desc"), ("$select", "receivedDateTime")]
+            let newest = try await client.get(Self.url("mailFolders/inbox/messages", query), headers: Self.headers)
+            let start = Self.arrival(of: newest["value"][0])?.text ?? WebDate.utcString(Date())
+            return NewMail(messages: [], state: MailSyncState(start), inboxUnread: await unread)
+        }
+        let query = [("$filter", "receivedDateTime gt \(WebDate.utcString(since))"), ("$orderby", "receivedDateTime desc"),
+                     ("$top", String(Self.newMailLimit)), ("$select", Self.messageFields)]
+        let items = try await client.get(Self.url("mailFolders/inbox/messages", query), headers: Self.headers)["value"].array
+        var newest: (time: Date, text: String)?
+        var messages: [MessageSummary] = []
+        for item in items {
+            // Graph shows whole seconds but compares finer ones, so the newest message from last time can come back:
+            // anything from the state's own second (or before) was already seen.
+            guard let summary = Self.summary(from: item), let arrival = Self.arrival(of: item), arrival.time > since else {
+                continue
+            }
+            if arrival.time > (newest?.time ?? .distantPast) { newest = arrival }
+            if !summary.isDraft { messages.append(summary) }
+        }
+        return NewMail(messages: messages, state: MailSyncState(newest?.text ?? state.value), inboxUnread: await unread)
+    }
+
+    /// When a message arrived, with the text Graph wrote it as (kept as the state, so no precision is lost).
+    static func arrival(of message: JSONValue) -> (time: Date, text: String)? {
+        guard let text = message["receivedDateTime"].nonEmpty?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let time = WebDate.parse(text) else { return nil }
+        return (time, text)
+    }
+
+    /// How many messages in the inbox are unread, or nil when that can't be had (a check doesn't need it).
+    static func inboxUnread(_ client: WebClient) async -> Int? {
+        guard let address = try? Self.url("mailFolders/inbox", [("$select", "unreadItemCount")]) else { return nil }
+        return try? await client.get(address, headers: Self.headers)["unreadItemCount"].int
+    }
+
+    // MARK: Finding messages
+
+    /// Looks each Message-ID up as `internetMessageId` (angle brackets and all), leaving out messages in Deleted Items
+    /// and Junk Email.
+    public func findMessages(withMessageIDs messageIDs: [String]) async throws -> [MessageSummary] {
+        let wanted = WebClient.unique(messageIDs.compactMap { WebAddresses.bareMessageID($0).map { "<\($0)>" } })
+        guard !wanted.isEmpty else { return [] }
+        let hidden = Set(await wellKnownFolders().filter { $0.value == .trash || $0.value == .spam }.map(\.key))
+        let client = self.client
+        let found = try await WebClient.concurrentMap(wanted) { messageID -> [JSONValue] in
+            let query = [("$filter", "internetMessageId eq \(Graph.literal(messageID))"), ("$select", Self.messageFields)]
+            return try await client.get(Self.url("messages", query), headers: Self.headers)["value"].array
+        }
+        var seen = Set<String>()
+        return found.flatMap { $0 }.compactMap(Self.summary(from:)).filter {
+            !hidden.contains($0.folderID ?? "") && seen.insert($0.id).inserted
+        }
+    }
+
     // MARK: Reading
 
     public func loadConversation(id: String, hint: Conversation?) async throws -> [MailMessage] {

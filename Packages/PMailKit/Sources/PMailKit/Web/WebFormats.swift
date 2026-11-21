@@ -260,6 +260,15 @@ enum WebAddresses {
         }
         return ids
     }
+
+    /// A Message-ID without its angle brackets ("<abc@example.com>" as "abc@example.com"), or nil when nothing's left.
+    static func bareMessageID(_ value: String) -> String? {
+        var text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("<") { text.removeFirst() }
+        if text.hasSuffix(">") { text.removeLast() }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
 }
 
 /// Text from event descriptions and notes, which may or may not be HTML.

@@ -195,6 +195,184 @@ import Testing
         #expect(request.query("$filter") == "receivedDateTime ge 1900-01-01T00:00:00Z and flag/flagStatus eq 'flagged'")
     }
 
+    // MARK: New mail
+
+    static let inboxCount = #"""
+    {"@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('jamie%40outlook.com')/mailFolders/$entity",
+     "id": "AAMkInbox=", "unreadItemCount": 7}
+    """#
+
+    @Test func theFirstCheckStartsFromTheNewestMessageInTheInbox() async throws {
+        let transport = StubTransport()
+        transport.on("GET", "\(Self.api)/mailFolders/inbox") { _ in .json(Self.inboxCount) }
+        transport.on("GET", "\(Self.api)/mailFolders/inbox/messages") { _ in
+            .json(#"""
+            {"@odata.context":
+                "https://graph.microsoft.com/v1.0/$metadata#users('jamie%40outlook.com')/mailFolders('inbox')/messages",
+             "value": [{"@odata.etag": "W/\"CQAAABYAAAA3\"", "id": "AAMkMsg3=", "receivedDateTime": "2026-11-23T17:00:00Z"}],
+             "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?%24top=1&%24skip=1"}
+            """#)
+        }
+        let new = try await service(transport).checkForNewMail(since: nil)
+
+        #expect(new.messages.isEmpty)
+        #expect(new.state == MailSyncState("2026-11-23T17:00:00Z"))
+        #expect(new.inboxUnread == 7)
+        let newest = try #require(transport.sent("GET", "\(Self.api)/mailFolders/inbox/messages").first)
+        #expect(newest.query("$top") == "1" && newest.query("$orderby") == "receivedDateTime desc")
+        #expect(newest.query("$select") == "receivedDateTime" && newest.query("$filter") == nil)
+        let count = try #require(transport.requests.first { $0.url?.path == "\(Self.api)/mailFolders/inbox" })
+        #expect(count.query("$select") == "unreadItemCount")
+        #expect(transport.requests.count == 2)
+        #expect(transport.requests.allSatisfy { $0.value(forHTTPHeaderField: "Prefer") == "IdType=\"ImmutableId\"" })
+    }
+
+    @Test func laterChecksListWhatArrivedAfterTheNewestSeenButNeverItAgain() async throws {
+        let transport = StubTransport()
+        transport.on("GET", "\(Self.api)/mailFolders/inbox") { _ in .json(Self.inboxCount) }
+        transport.on("GET", "\(Self.api)/mailFolders/inbox/messages") { request in
+            // Graph compares finer than the whole seconds it shows, so last time's newest message comes back as well.
+            request.query("$filter") == "receivedDateTime gt 2026-11-23T17:00:00Z" ? .json(#"""
+            {"value": [
+                {"id": "AAMkMsg5=", "conversationId": "AAQkConv5=", "subject": "Pug meetup moved", "bodyPreview": "Now Sunday",
+                 "importance": "normal", "isRead": false, "isDraft": false, "hasAttachments": false, "toRecipients": [],
+                 "internetMessageId": "<msg5@example.org>", "parentFolderId": "AAMkInbox=", "ccRecipients": [],
+                 "receivedDateTime": "2026-11-23T17:20:00Z", "flag": {"flagStatus": "notFlagged"},
+                 "from": {"emailAddress": {"name": "Pug Club", "address": "club@example.org"}}},
+                {"id": "AAMkMsg4=", "conversationId": "AAQkConv1=", "subject": "RE: Lunch?", "bodyPreview": "Tacos it is",
+                 "importance": "normal", "isRead": true, "isDraft": false, "hasAttachments": false,
+                 "internetMessageId": "<msg4@example.com>", "parentFolderId": "AAMkInbox=",
+                 "receivedDateTime": "2026-11-23T17:05:00Z", "flag": {"flagStatus": "notFlagged"},
+                 "from": {"emailAddress": {"name": "Alex Kim", "address": "alex@example.com"}}},
+                {"id": "AAMkMsg3=", "conversationId": "AAQkConv1=", "subject": "RE: Lunch?", "isRead": true,
+                 "parentFolderId": "AAMkInbox=", "receivedDateTime": "2026-11-23T17:00:00Z"}
+            ]}
+            """#) : .json(#"""
+            {"value": [{"id": "AAMkMsg5=", "conversationId": "AAQkConv5=", "subject": "Pug meetup moved", "isRead": false,
+                        "parentFolderId": "AAMkInbox=", "receivedDateTime": "2026-11-23T17:20:00Z"}]}
+            """#)
+        }
+        let mail = service(transport)
+        let new = try await mail.checkForNewMail(since: MailSyncState("2026-11-23T17:00:00Z"))
+
+        let request = try #require(transport.sent("GET", "\(Self.api)/mailFolders/inbox/messages").first)
+        #expect(request.query("$filter") == "receivedDateTime gt 2026-11-23T17:00:00Z")
+        #expect(request.query("$orderby") == "receivedDateTime desc" && request.query("$top") == "50")
+        #expect(request.query("$select") == MicrosoftMailService.messageFields)
+        #expect(request.value(forHTTPHeaderField: "Prefer") == "IdType=\"ImmutableId\"")
+        #expect(new.messages.map(\.id) == ["AAMkMsg5=", "AAMkMsg4="])  // Read or not, but not the one from the state's second.
+        #expect(new.state == MailSyncState("2026-11-23T17:20:00Z"))
+        #expect(new.inboxUnread == 7)
+        let moved = new.messages[0]
+        #expect(moved.isUnread && moved.threadID == "AAQkConv5=" && moved.folderID == "AAMkInbox=")
+        #expect(moved.from == MailAddress(name: "Pug Club", email: "club@example.org"))
+        #expect(moved.messageIDHeader == "<msg5@example.org>")
+        #expect(moved.date == WebFixtures.date("2026-11-23T17:20:00Z") && moved.snippet == "Now Sunday")
+
+        // Only the newest message from last time comes back: nothing new, and the state stays put.
+        let again = try await mail.checkForNewMail(since: new.state)
+        #expect(transport.sent("GET", "\(Self.api)/mailFolders/inbox/messages").last?.query("$filter")
+                == "receivedDateTime gt 2026-11-23T17:20:00Z")
+        #expect(again.messages.isEmpty && again.state == new.state)
+    }
+
+    @Test func anEmptyInboxStartsFromNow() async throws {
+        let transport = StubTransport()
+        let later = WebDate.utcString(Date().addingTimeInterval(90))
+        transport.on("GET", "\(Self.api)/mailFolders/inbox") { _ in .json(#"{"id": "AAMkInbox=", "unreadItemCount": 0}"#) }
+        transport.on("GET", "\(Self.api)/mailFolders/inbox/messages") { request in
+            request.query("$filter") == nil ? .json(#"{"value": []}"#) : .json(#"""
+            {"value": [{"id": "AAMkFirst=", "conversationId": "AAQkConv8=", "subject": "Welcome back", "isRead": false,
+                        "parentFolderId": "AAMkInbox=", "receivedDateTime": "\#(later)"}]}
+            """#)
+        }
+        let mail = service(transport)
+        let before = Date().addingTimeInterval(-1)
+        let new = try await mail.checkForNewMail(since: nil)
+        let start = try #require(WebDate.parse(new.state.value))
+        #expect(start >= before && start <= Date())
+        #expect(new.state.value.hasSuffix("Z") && new.messages.isEmpty && new.inboxUnread == 0)
+
+        let next = try await mail.checkForNewMail(since: new.state)
+        #expect(transport.sent("GET", "\(Self.api)/mailFolders/inbox/messages").last?.query("$filter")
+                == "receivedDateTime gt \(new.state.value)")
+        #expect(next.messages.map(\.id) == ["AAMkFirst="] && next.state == MailSyncState(later))
+    }
+
+    @Test func oddNewMailAnswersAndStatesNeverCrash() async throws {
+        let transport = StubTransport()
+        transport.on("GET", "\(Self.api)/mailFolders/inbox") { _ in .json(#"{"unreadItemCount": "lots"}"#) }
+        transport.on("GET", "\(Self.api)/mailFolders/inbox/messages") { request in
+            request.query("$filter") == nil ? .json(#"{"value": [{"id": "AAMkOld=", "receivedDateTime": "a while ago"}]}"#)
+                : .json(#"""
+                {"value": [{"id": "AAMk1=", "receivedDateTime": 5}, {"id": "AAMk2="}, "x",
+                           {"receivedDateTime": "2026-11-24T09:00:00Z"},
+                           {"id": "AAMkDraft=", "isDraft": true, "receivedDateTime": "2026-11-24T08:00:00Z"}]}
+                """#)
+        }
+        let mail = service(transport)
+        // A state this service didn't make starts again: from now, since the newest time can't be read.
+        let fresh = try await mail.checkForNewMail(since: MailSyncState("4001"))
+        #expect(fresh.messages.isEmpty && WebDate.parse(fresh.state.value) != nil && fresh.inboxUnread == nil)
+        #expect(transport.sent("GET", "\(Self.api)/mailFolders/inbox/messages").first?.query("$filter") == nil)
+
+        // Nothing readable is announced, and neither is a draft in the inbox, though the state moves past it.
+        let odd = try await mail.checkForNewMail(since: MailSyncState("2026-11-23T17:00:00Z"))
+        #expect(odd.messages.isEmpty && odd.state == MailSyncState("2026-11-24T08:00:00Z"))
+
+        transport.on("GET", "\(Self.api)/messages") { _ in .json(#"{"value": {"id": "AAMk1="}}"#) }
+        #expect(try await mail.findMessages(withMessageIDs: ["<a@example.com>", " ", "<>"]).isEmpty)
+        #expect(try await mail.findMessages(withMessageIDs: []).isEmpty)
+    }
+
+    // MARK: Finding messages
+
+    @Test func messagesAreFoundByInternetMessageIDOutsideDeletedItemsAndJunk() async throws {
+        let transport = StubTransport()
+        stubFolders(transport)
+        transport.on("GET", "\(Self.api)/messages") { request in
+            switch request.query("$filter") {
+            case "internetMessageId eq '<walk''s+1@example.com>'":
+                .json(#"""
+                {"value": [{"id": "AAMkMoved=", "conversationId": "AAQkConv7=", "subject": "Walk at 4?", "isRead": true,
+                            "parentFolderId": "AAMkArchive=", "receivedDateTime": "2026-11-22T21:00:00Z",
+                            "internetMessageId": "<walk's+1@example.com>",
+                            "from": {"emailAddress": {"name": "Alex Kim", "address": "alex@example.com"}}}]}
+                """#)
+            case "internetMessageId eq '<plans@example.com>'":
+                .json(#"""
+                {"value": [{"id": "AAMkBinned=", "conversationId": "AAQkConv8=", "subject": "Plans",
+                            "parentFolderId": "AAMkDeleted=", "receivedDateTime": "2026-11-20T09:00:00Z",
+                            "internetMessageId": "<plans@example.com>"}]}
+                """#)
+            case "internetMessageId eq '<offer@example.net>'":
+                .json(#"""
+                {"value": [{"id": "AAMkJunked=", "conversationId": "AAQkConv9=", "subject": "You won",
+                            "parentFolderId": "AAMkJunk=", "receivedDateTime": "2026-11-21T09:00:00Z",
+                            "internetMessageId": "<offer@example.net>"}]}
+                """#)
+            default:
+                .json(#"{"value": []}"#)
+            }
+        }
+        let found = try await service(transport).findMessages(withMessageIDs: [
+            "<walk's+1@example.com>", "<plans@example.com>", "offer@example.net", "<nobody@example.com>", "<walk's+1@example.com>",
+        ])
+
+        #expect(found.map(\.id) == ["AAMkMoved="])  // Archived, so found; the deleted and junk ones aren't.
+        #expect(found.first?.folderID == "AAMkArchive=" && found.first?.messageIDHeader == "<walk's+1@example.com>")
+        let lookups = transport.requests.filter { $0.url?.path == "\(Self.api)/messages" }
+        #expect(lookups.count == 4)  // Each Message-ID once, with brackets added where they were missing.
+        #expect(Set(lookups.compactMap { $0.query("$filter") }) == [
+            "internetMessageId eq '<walk''s+1@example.com>'", "internetMessageId eq '<plans@example.com>'",
+            "internetMessageId eq '<offer@example.net>'", "internetMessageId eq '<nobody@example.com>'",
+        ])
+        #expect(lookups.allSatisfy { $0.query("$select") == MicrosoftMailService.messageFields })
+        #expect(lookups.allSatisfy { $0.value(forHTTPHeaderField: "Prefer") == "IdType=\"ImmutableId\"" })
+        let walk = lookups.compactMap { $0.url?.absoluteString }.first { $0.contains("walk") } ?? ""
+        #expect(walk.contains("?$filter=internetMessageId%20eq%20'%3Cwalk''s%2B1@example.com%3E'&$select="))
+    }
+
     // MARK: Reading
 
     @Test func conversationsLoadEachMessagesMIME() async throws {
