@@ -1,0 +1,306 @@
+#if DEBUG
+import Foundation
+import PMailKit
+
+/// Made-up services for the sample accounts: everything happens in memory, a moment later, as if from a server.
+struct SampleServiceFactory: ServiceFactory {
+    var today: @Sendable () -> Date = { AppClock.now() }
+
+    func services(for account: Account, secrets: any SecretStore) -> AccountServices {
+        let now = today()
+        let mail = SampleData.mail(for: account, today: now)
+        return AccountServices(
+            mail: SampleMailService(account: account, folders: mail.folders, messages: mail.messages),
+            calendar: SampleCalendarService(account: account, calendars: SampleData.calendars(for: account),
+                                            events: SampleData.events(for: account, today: now)),
+            contacts: SampleContactsService(contacts: SampleData.contacts(for: account)))
+    }
+}
+
+/// A short pause, as a real server would take.
+private func pause() async { try? await Task.sleep(for: .milliseconds(40)) }
+
+actor SampleMailService: MailService {
+    let account: Account
+    private var folders: [MailFolder]
+    private var messages: [SampleData.Message]
+    private var counter = 0
+    /// Every message sent, for the self-test.
+    private(set) var sent: [OutgoingMessage] = []
+    /// Every action asked for, for the self-test.
+    private(set) var actions: [(MailAction, [String])] = []
+
+    nonisolated let capabilities: MailCapabilities
+    nonisolated let inboxTabs: [InboxTab]
+
+    init(account: Account, folders: [MailFolder], messages: [SampleData.Message]) {
+        self.account = account
+        self.folders = folders
+        self.messages = messages
+        switch account.kind {
+        case .google:
+            capabilities = MailCapabilities(usesLabels: true, canStar: true, canMarkImportant: true, hasInboxTabs: true)
+            inboxTabs = [InboxTab(id: "CATEGORY_PERSONAL", name: "Primary", symbol: "tray"),
+                         InboxTab(id: "CATEGORY_PROMOTIONS", name: "Promotions", symbol: "tag"),
+                         InboxTab(id: "CATEGORY_SOCIAL", name: "Social", symbol: "person.2"),
+                         InboxTab(id: "CATEGORY_UPDATES", name: "Updates", symbol: "info.circle")]
+        case .microsoft:
+            capabilities = MailCapabilities(canMarkImportant: true, hasInboxTabs: true)
+            inboxTabs = [InboxTab(id: "focused", name: "Focused", symbol: "scope"), InboxTab(id: "other", name: "Other", symbol: "tray.full")]
+        default:
+            capabilities = MailCapabilities()
+            inboxTabs = []
+        }
+    }
+
+    var sentMessages: [OutgoingMessage] { sent }
+    var actionLog: [(MailAction, [String])] { actions }
+
+    private func role(_ id: String?) -> FolderRole? { folders.first { $0.id == id }?.role }
+
+    /// Whether a message is in a folder or label.
+    private func isIn(_ message: SampleData.Message, folder id: String?) -> Bool {
+        let summary = message.summary
+        guard let id else { return !summary.labelIDs.contains("SPAM") && !summary.labelIDs.contains("TRASH") && !summary.isDraft }
+        switch role(id) {
+        case .starred?: return summary.isStarred && summary.folderID != role(.trash) && !summary.labelIDs.contains("TRASH")
+        case .important?: return summary.isImportant
+        default: return capabilities.usesLabels ? summary.labelIDs.contains(id) : summary.folderID == id
+        }
+    }
+
+    private func role(_ role: FolderRole) -> String? { folders.first { $0.role == role }?.id }
+
+    func loadFolders() async throws -> [MailFolder] {
+        await pause()
+        return folders.map { folder in
+            var folder = folder
+            let inside = messages.filter { isIn($0, folder: folder.id) }
+            folder.unreadCount = inside.filter(\.summary.isUnread).count
+            folder.totalCount = inside.count
+            return folder
+        }
+    }
+
+    func listConversations(_ request: ListRequest) async throws -> ConversationPage {
+        await pause()
+        var matching = messages.filter { isIn($0, folder: request.folderID) }
+        if let tab = request.tabID { matching = matching.filter { $0.summary.labelIDs.contains(tab) } }
+        if let query = request.query?.lowercased(), !query.isEmpty {
+            let words = query.split(separator: " ").map(String.init)
+            matching = matching.filter { message in
+                let text = [message.summary.subject, message.summary.snippet, message.summary.from?.displayName ?? "", message.summary.from?.email ?? "",
+                            message.text ?? message.html ?? ""].joined(separator: " ").lowercased()
+                return words.allSatisfy { text.contains($0) }
+            }
+        }
+        // A conversation shows every message it has (your replies too), apart from Trash and Spam.
+        let threads = Set(matching.map(\.summary.threadID))
+        let shown = messages.filter { threads.contains($0.summary.threadID) && (isIn($0, folder: request.folderID) || role(request.folderID) == .inbox
+            && !$0.summary.labelIDs.contains("TRASH") && $0.summary.folderID != role(.trash)) }
+        let conversations = Conversation.group(shown.map(\.summary))
+        let start = request.pageIndex * request.pageSize
+        let page = Array(conversations.dropFirst(start).prefix(request.pageSize))
+        let hasMore = start + request.pageSize < conversations.count
+        return ConversationPage(conversations: page, totalCount: conversations.count, nextPageToken: hasMore ? "\(request.pageIndex + 1)" : nil)
+    }
+
+    func loadConversation(id: String, hint: Conversation?) async throws -> [MailMessage] {
+        await pause()
+        return messages.filter { $0.summary.threadID == id }.sorted { $0.summary.date < $1.summary.date }.map(mailMessage)
+    }
+
+    private func mailMessage(_ message: SampleData.Message) -> MailMessage {
+        MailMessage(summary: message.summary, htmlBody: message.html, textBody: message.text, attachments: message.attachments,
+                    inlineParts: message.inline, rawSource: Data("Subject: \(message.summary.subject)\r\n\r\n\(message.text ?? "")".utf8))
+    }
+
+    func loadMessage(_ summary: MessageSummary) async throws -> MailMessage {
+        guard let message = messages.first(where: { $0.summary.id == summary.id }) else { throw PMailError.notFound }
+        return mailMessage(message)
+    }
+
+    func loadAttachment(_ attachment: Attachment, in message: MessageSummary) async throws -> Data {
+        guard let data = messages.first(where: { $0.summary.id == message.id })?.attachments.first(where: { $0.id == attachment.id })?.data
+        else { throw PMailError.notFound }
+        return data
+    }
+
+    func perform(_ action: MailAction, on summaries: [MessageSummary]) async throws {
+        await pause()
+        actions.append((action, summaries.map(\.id)))
+        let ids = Set(summaries.map(\.id))
+        let labels = capabilities.usesLabels
+        for index in messages.indices where ids.contains(messages[index].summary.id) {
+            var summary = messages[index].summary
+            func move(to role: FolderRole) {
+                if labels {
+                    summary.labelIDs.removeAll { ["INBOX", "SPAM", "TRASH"].contains($0) }
+                    if let id = self.role(role) { summary.labelIDs.append(id) }
+                } else {
+                    summary.folderID = self.role(role) ?? summary.folderID
+                }
+            }
+            switch action {
+            case .markRead: summary.isUnread = false; summary.labelIDs.removeAll { $0 == "UNREAD" }
+            case .markUnread: summary.isUnread = true
+            case .star: summary.isStarred = true
+            case .unstar: summary.isStarred = false
+            case .markImportant: summary.isImportant = true
+            case .markNotImportant: summary.isImportant = false
+            case .archive:
+                if labels { summary.labelIDs.removeAll { $0 == "INBOX" } } else { summary.folderID = role(.archive) ?? summary.folderID }
+            case .moveToInbox, .notSpam: move(to: .inbox)
+            case .trash: move(to: .trash)
+            case .markSpam: move(to: .spam)
+            case .deleteForever: summary.id = "deleted-" + summary.id
+            case let .move(target):
+                if labels {
+                    summary.labelIDs.removeAll { $0 == "INBOX" }
+                    summary.labelIDs.append(target)
+                } else {
+                    summary.folderID = target
+                }
+            case let .addLabel(label): if !summary.labelIDs.contains(label) { summary.labelIDs.append(label) }
+            case let .removeLabel(label): summary.labelIDs.removeAll { $0 == label }
+            }
+            messages[index].summary = summary
+        }
+        messages.removeAll { $0.summary.id.hasPrefix("deleted-") }
+    }
+
+    func send(_ message: OutgoingMessage) async throws {
+        await pause()
+        sent.append(message)
+        counter += 1
+        let id = "sent-\(counter)"
+        let summary = MessageSummary(id: id, threadID: message.threadID ?? id, folderID: role(.sent), labelIDs: capabilities.usesLabels ? ["SENT"] : [],
+                                     from: message.from, to: message.to, cc: message.cc, subject: message.subject,
+                                     snippet: HTMLText.snippet(from: message.textBody), date: AppClock.now(), messageIDHeader: message.messageID,
+                                     inReplyTo: message.inReplyTo, references: message.references)
+        messages.append(SampleData.Message(summary: summary, html: nil, text: message.textBody))
+    }
+
+    func saveDraft(_ message: OutgoingMessage, replacing draft: MessageSummary?) async throws -> MessageSummary? {
+        if let draft { messages.removeAll { $0.summary.id == draft.id } }
+        counter += 1
+        let id = "draft-\(counter)"
+        let summary = MessageSummary(id: id, threadID: message.threadID ?? id, folderID: role(.drafts), labelIDs: capabilities.usesLabels ? ["DRAFT"] : [],
+                                     from: message.from, to: message.to, subject: message.subject, snippet: HTMLText.snippet(from: message.textBody),
+                                     date: AppClock.now(), isDraft: true)
+        messages.append(SampleData.Message(summary: summary, html: nil, text: message.textBody))
+        return summary
+    }
+
+    func deleteDraft(_ draft: MessageSummary) async throws {
+        messages.removeAll { $0.summary.id == draft.id }
+    }
+
+    func close() async {}
+}
+
+actor SampleCalendarService: CalendarService {
+    let account: Account
+    private var calendars: [CalendarInfo]
+    private var events: [CalendarEvent]
+    private var counter = 0
+
+    init(account: Account, calendars: [CalendarInfo], events: [CalendarEvent]) {
+        self.account = account
+        self.calendars = calendars
+        self.events = events
+    }
+
+    func loadCalendars() async throws -> [CalendarInfo] {
+        await pause()
+        return calendars
+    }
+
+    func loadEvents(in calendarIDs: [String], from start: Date, to end: Date) async throws -> [CalendarEvent] {
+        await pause()
+        return events.filter { calendarIDs.contains($0.calendarID) && $0.start < end && $0.end > start }
+    }
+
+    /// A made-up meeting link of the calendar's own kind.
+    private func meeting(for calendarID: String) -> Conference? {
+        let letters = "abcdefghijkmnopqrstuvwxyz"
+        func code(_ count: Int) -> String { String((0..<count).map { _ in letters.randomElement()! }) }
+        switch calendars.first(where: { $0.id == calendarID })?.nativeConference {
+        case .meet?:
+            let meetingCode = "\(code(3))-\(code(4))-\(code(3))"
+            return Conference(kind: .meet, joinURL: URL(string: "https://meet.google.com/\(meetingCode)")!, meetingCode: meetingCode)
+        case .teams?:
+            return Conference(kind: .teams, joinURL: URL(string: "https://teams.microsoft.com/l/meetup-join/19%3ameeting_\(code(12))%40thread.v2/0")!)
+        default:
+            return nil
+        }
+    }
+
+    func create(_ event: CalendarEvent, addingConference: Bool) async throws -> CalendarEvent {
+        await pause()
+        counter += 1
+        var saved = event
+        saved.id = "created-\(counter)"
+        if addingConference, let meeting = meeting(for: event.calendarID) { saved.conference = meeting }
+        events.append(saved)
+        return saved
+    }
+
+    func update(_ event: CalendarEvent, scope: RecurrenceScope, addingConference: Bool) async throws -> CalendarEvent {
+        await pause()
+        var saved = event
+        if addingConference, saved.conference == nil, let meeting = meeting(for: event.calendarID) { saved.conference = meeting }
+        events.removeAll { $0.id == event.id }
+        events.append(saved)
+        return saved
+    }
+
+    func delete(_ event: CalendarEvent, scope: RecurrenceScope) async throws {
+        await pause()
+        if scope == .allEvents, let series = event.seriesID { events.removeAll { $0.seriesID == series } }
+        events.removeAll { $0.id == event.id }
+    }
+
+    func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
+        await pause()
+        if let index = events.firstIndex(where: { $0.id == event.id }) { events[index].myResponse = response }
+    }
+
+    var allEvents: [CalendarEvent] { events }
+}
+
+actor SampleContactsService: ContactsService {
+    private var contacts: [Contact]
+    private var counter = 0
+
+    init(contacts: [Contact]) {
+        self.contacts = contacts
+    }
+
+    func loadContacts() async throws -> [Contact] {
+        await pause()
+        return contacts
+    }
+
+    func create(_ contact: Contact) async throws -> Contact {
+        await pause()
+        counter += 1
+        var saved = contact
+        saved.id = "sample-created-\(counter)"
+        contacts.append(saved)
+        return saved
+    }
+
+    func update(_ contact: Contact) async throws -> Contact {
+        await pause()
+        guard let index = contacts.firstIndex(where: { $0.id == contact.id }) else { throw PMailError.notFound }
+        contacts[index] = contact
+        return contact
+    }
+
+    func delete(_ contact: Contact) async throws {
+        await pause()
+        contacts.removeAll { $0.id == contact.id }
+    }
+}
+#endif

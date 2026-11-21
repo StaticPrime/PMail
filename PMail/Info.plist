@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Email Address URL</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>mailto</string>
+			</array>
+		</dict>
+	</array>
+	<key>PMailGoogleClientID</key>
+	<string>$(PMAIL_GOOGLE_CLIENT_ID)</string>
+	<key>PMailGoogleClientSecret</key>
+	<string>$(PMAIL_GOOGLE_CLIENT_SECRET)</string>
+	<key>PMailGoogleRedirectURI</key>
+	<string>$(PMAIL_GOOGLE_REDIRECT_URI)</string>
+	<key>PMailMicrosoftClientID</key>
+	<string>$(PMAIL_MICROSOFT_CLIENT_ID)</string>
+	<key>PMailMicrosoftTenant</key>
+	<string>$(PMAIL_MICROSOFT_TENANT)</string>
+	<key>PMailMicrosoftRedirectURI</key>
+	<string>$(PMAIL_MICROSOFT_REDIRECT_URI)</string>
+</dict>
+</plist>

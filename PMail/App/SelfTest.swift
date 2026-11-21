@@ -1,0 +1,488 @@
+#if DEBUG
+import AppKit
+import PMailKit
+
+/// `-PMSelfTest YES`: drives the main window on the sample accounts and prints SELFTEST PASS/FAIL lines. Each step
+/// runs in its own turn of the run loop; `wait` holds the next step until something finishes.
+enum SelfTest {
+    nonisolated(unsafe) static var isRunning = false
+    private static var failures = 0
+    private static var passes = 0
+    private static var steps: [() -> Void] = []
+    private static var holding: (condition: () -> Bool, deadline: Date, name: String)?
+
+    static func runIfRequested(_ delegate: AppDelegate) {
+        guard UserDefaults.standard.bool(forKey: "PMSelfTest") else { return }
+        isRunning = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { run(delegate) }
+    }
+
+    static func check(_ condition: Bool, _ name: String, _ detail: @autoclosure () -> String = "") {
+        if condition {
+            passes += 1
+            print("SELFTEST PASS: \(name)")
+        } else {
+            failures += 1
+            print("SELFTEST FAIL: \(name) — \(detail())")
+        }
+        fflush(stdout)
+    }
+
+    static func step(_ body: @escaping () -> Void) { steps.append(body) }
+
+    /// Holds the next step until `condition` holds or `timeout` seconds pass (then the step after it fails its checks).
+    static func wait(_ name: String = "", upTo timeout: Double = 5, until condition: @escaping () -> Bool) {
+        holding = (condition, Date().addingTimeInterval(timeout), name)
+    }
+
+    private static func continueSteps(from index: Int) {
+        if let hold = holding, !hold.condition(), Date() < hold.deadline {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { continueSteps(from: index) }
+            return
+        }
+        if let hold = holding, !hold.condition(), !hold.name.isEmpty { print("SELFTEST NOTE: gave up waiting for \(hold.name)") }
+        holding = nil
+        runSteps(from: index)
+    }
+
+    private static func runSteps(from index: Int = 0) {
+        guard index < steps.count else {
+            print(failures == 0 ? "SELFTEST DONE: all \(passes) passed" : "SELFTEST DONE: \(failures) failed, \(passes) passed")
+            fflush(stdout)
+            exit(failures == 0 ? 0 : 1)
+        }
+        steps[index]()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { continueSteps(from: index + 1) }
+    }
+
+    /// Asks the window about every menu bar item it answers for, as macOS does for every menu at once whenever it
+    /// likes. Returns how many it asked about.
+    @discardableResult
+    static func validateEveryMenuItem(_ controller: MainWindowController) -> Int {
+        var count = 0
+        func validate(_ menu: NSMenu) {
+            DynamicMenus.shared.menuNeedsUpdate(menu)
+            for item in menu.items {
+                if item.target == nil, let action = item.action, controller.responds(to: action) {
+                    _ = controller.validateMenuItem(item)
+                    count += 1
+                }
+                if let submenu = item.submenu { validate(submenu) }
+            }
+        }
+        if let menu = NSApp.mainMenu { validate(menu) }
+        return count
+    }
+
+    /// A key press as the window's key monitor sees it.
+    static func key(_ characters: String, shift: Bool = false, window: NSWindow) -> NSEvent? {
+        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shift ? [.shift] : [], timestamp: 0, windowNumber: window.windowNumber,
+                         context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: 0)
+    }
+
+    /// Reads a value from one of the sample services (they're actors), blocking until it arrives.
+    static func read<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T? {
+        let box = ResultBox<T>()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            box.value = await body()
+            semaphore.signal()
+        }
+        // The services never need the main thread, so waiting here is safe.
+        guard semaphore.wait(timeout: .now() + 5) == .success else { return nil }
+        return box.value
+    }
+
+    private nonisolated final class ResultBox<T>: @unchecked Sendable { var value: T? }
+
+    // swiftlint:disable:next function_body_length
+    private static func run(_ delegate: AppDelegate) {
+        guard let controller = delegate.windowController, let window = controller.window else {
+            print("SELFTEST FAIL: no main window")
+            exit(1)
+        }
+        let app = delegate.app!
+        window.makeKeyAndOrderFront(nil)
+        var session: AccountSession { app.current! }
+        var mail: MailViewModel { session.mail }
+        var sampleMail: SampleMailService? { session.services.mail as? SampleMailService }
+        func actions() -> [String] {
+            guard let service = sampleMail else { return [] }
+            return read { await service.actionLog.map { "\($0.0)" } } ?? []
+        }
+        func sentCount() -> Int {
+            guard let service = sampleMail else { return -1 }
+            return read { await service.sentMessages.count } ?? -1
+        }
+
+        // MARK: Starting up
+        step { wait("the first account's inbox", upTo: 8) { app.current?.mail.conversations.isEmpty == false } }
+        step {
+            check(app.accounts.accounts.count == 3, "three sample accounts", "\(app.accounts.accounts.count)")
+            check(session.account.kind == .google, "the first account shows first", "\(session.account.kind)")
+            check(app.module == .mail, "PMail opens on mail")
+            let count = validateEveryMenuItem(controller)
+            check(count >= 30, "every menu item can be checked right after launch", "\(count) items")
+            check(mail.currentFolder?.role == .inbox, "the inbox is chosen")
+            check(mail.selectedTabID == mail.inboxTabs.first?.id, "the first inbox tab is chosen")
+            check(mail.conversations.count == 50, "fifty conversations to a page", "\(mail.conversations.count)")
+            check(mail.rangeText.hasPrefix("1–50 of "), "the page says which conversations it shows", mail.rangeText)
+            check(mail.canGoForward && !mail.canGoBack, "there's an older page and no newer one")
+            check(mail.unreadInbox == 6, "the inbox counts its unread messages", "\(mail.unreadInbox)")
+            check(window.firstResponder === window || !(window.firstResponder is NSTextView), "nothing is typed into at first")
+        }
+
+        // MARK: Pages and tabs
+        step {
+            mail.nextPage()
+            wait("the second page") { mail.pageIndex == 1 && !mail.isLoadingList && !mail.conversations.isEmpty }
+        }
+        step {
+            check(mail.rangeText.hasPrefix("51–"), "the second page follows the first", mail.rangeText)
+            check(!mail.canGoForward && mail.canGoBack, "the last page has no older page")
+            mail.previousPage()
+            wait("the first page again") { mail.pageIndex == 0 && !mail.isLoadingList && mail.conversations.count == 50 }
+        }
+        step {
+            mail.select(tabID: "CATEGORY_PROMOTIONS")
+            wait("the Promotions tab") { !mail.isLoadingList && mail.conversations.contains { $0.subject.contains("winter dog jackets") } }
+        }
+        step {
+            check(mail.conversations.allSatisfy { $0.labelIDs.contains("CATEGORY_PROMOTIONS") }, "a tab lists only its own kind of mail")
+            mail.select(tabID: "CATEGORY_PERSONAL")
+            wait("the Primary tab") { !mail.isLoadingList && mail.conversations.count == 50 }
+        }
+
+        // MARK: Reading
+        step {
+            guard let roadmap = mail.conversations.first(where: { $0.subject == "Q4 roadmap draft" }) else {
+                return check(false, "the roadmap conversation is listed")
+            }
+            check(roadmap.messageCount == 3 && roadmap.isUnread, "a conversation counts its messages and is unread", "\(roadmap.messageCount)")
+            mail.open(roadmap)
+            wait("the conversation to open") { mail.openMessages.count == 3 }
+        }
+        step {
+            check(mail.openMessages.map(\.summary.from?.shortName) == ["Priya", "Jamie", "Priya"], "a conversation shows its messages oldest first",
+                  "\(mail.openMessages.map(\.summary.from?.shortName))")
+            check(mail.expandedMessageIDs.contains(mail.openMessages.last!.id), "the newest message starts open")
+            check(!mail.expandedMessageIDs.contains(mail.openMessages[1].id), "read older messages start folded")
+            check(mail.positionText.hasSuffix("of 57"), "the reading toolbar says where it is", mail.positionText)
+            wait("reading to mark it read") { actions().contains("markRead") }
+        }
+        step {
+            check(actions().contains("markRead"), "opening a conversation marks it read on the server")
+            check(mail.unreadInbox == 5, "and the inbox count goes down", "\(mail.unreadInbox)")
+            check(mail.openConversation?.isUnread == false, "and the conversation is read")
+            let message = mail.openMessages.last!
+            check(!mail.showsImages(for: message) || UserDefaults.standard.bool(forKey: "AlwaysShowPictures"), "pictures from the internet don't load by themselves")
+            let html = MessageHTML.document(for: MailMessage(summary: message.summary, htmlBody: "<p>Hi<img src=\"https://tracker.example/p.gif\"></p>"))
+            check(html.contains("Content-Security-Policy") && html.contains("img-src cid: data:;"), "message pages refuse anything from the internet")
+            check(MessageHTML.document(for: message, allowsRemote: true).contains("img-src cid: data: https: http:"), "until pictures are asked for")
+        }
+        step {
+            // Single-key shortcuts: S stars the open conversation, U goes back to the list.
+            let starred = mail.openConversation?.isStarred ?? false
+            if let event = key("s", window: window) { _ = controller.handleKey(event) }
+            check(mail.openConversation?.isStarred == !starred, "S stars or unstars the conversation")
+            if let event = key("s", window: window) { _ = controller.handleKey(event) }
+            check(mail.openConversation?.isStarred == starred, "and S again turns it back")
+            // ⌘⌫ deletes text while typing, never the conversation behind it.
+            let trash = NSMenuItem(title: "Move to Trash", action: #selector(MainWindowController.pmTrash(_:)), keyEquivalent: "\u{8}")
+            check(controller.validateMenuItem(trash), "Move to Trash works on the open conversation")
+            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 100, height: 20))
+            window.contentView?.addSubview(field)
+            window.makeFirstResponder(field)
+            check(!controller.validateMenuItem(trash), "but not while text is being typed")
+            field.removeFromSuperview()
+            window.makeFirstResponder(nil)
+            if let event = key("u", window: window) { _ = controller.handleKey(event) }
+            check(mail.openConversation == nil, "U goes back to the list")
+        }
+
+        // MARK: Archiving, with and without Undo
+        step {
+            mail.undoDelay = 30
+            guard let target = mail.conversations.first(where: { $0.subject == "Thanksgiving pie plans 🥧" }) else {
+                return check(false, "Grandma's message is listed")
+            }
+            let before = mail.conversations.count
+            mail.perform(.archive, on: [target])
+            check(mail.conversations.count == before - 1 && !mail.conversations.contains { $0.id == target.id }, "archiving takes a conversation out of the inbox at once")
+            check(app.toast?.text == "Conversation archived." && app.toast?.actionTitle == "Undo", "and offers Undo", app.toast?.text ?? "no note")
+            app.toast?.action?()
+            check(mail.conversations.contains { $0.id == target.id }, "Undo puts it back")
+            check(!actions().contains("archive"), "and nothing reached the server")
+        }
+        step {
+            mail.undoDelay = 0.2
+            guard let target = mail.conversations.first(where: { $0.subject == "Thanksgiving pie plans 🥧" }) else { return }
+            mail.perform(.archive, on: [target])
+            wait("the archive to reach the server") { actions().contains("archive") }
+        }
+        step {
+            check(actions().contains("archive"), "without Undo, the archive reaches the server a moment later")
+            mail.select(folderID: nil)
+            wait("All Mail") { mail.selectedFolderID == nil && !mail.isLoadingList && !mail.conversations.isEmpty }
+        }
+        step {
+            check(mail.conversations.contains { $0.subject == "Thanksgiving pie plans 🥧" }, "an archived conversation is still in All Mail")
+            check(mail.listTitle == "All Mail", "the list says it's All Mail", mail.listTitle)
+            mail.select(folderID: mail.folder(role: .sent)?.id)
+            wait("Sent") { mail.currentFolder?.role == .sent && !mail.isLoadingList && !mail.conversations.isEmpty }
+        }
+        step {
+            check(mail.listShowsRecipients, "Sent lists who messages went to")
+            mail.search("waffles")
+            wait("the search") { mail.activeSearch == "waffles" && !mail.isLoadingList }
+        }
+        step {
+            check(!mail.conversations.isEmpty && mail.listTitle.contains("waffles"), "search finds messages", "\(mail.conversations.count)")
+            mail.clearSearch()
+            mail.select(folderID: mail.inbox?.id)
+            wait("the inbox again") { mail.currentFolder?.role == .inbox && !mail.isLoadingList && !mail.conversations.isEmpty }
+        }
+
+        // MARK: Writing and sending
+        step {
+            let before = sentCount()
+            guard let composer = app.compose(to: [MailAddress(name: "Alex Kim", email: "alex.kim@example.com")], subject: "Self-test hello",
+                                             body: "Hello from the self-test.") else { return check(false, "a compose window opens") }
+            check(app.composers.count == 1, "a compose window opens")
+            composer.undoSendDelay = 0.2
+            composer.send()
+            check(app.composers.isEmpty && app.toast?.actionTitle == "Undo", "sending closes the window and offers Undo")
+            wait("the message to go") { sentCount() == before + 1 }
+        }
+        step {
+            check(sentCount() >= 1, "the message is sent a moment later")
+            if let service = sampleMail, let last = read({ await service.sentMessages.last }) ?? nil {
+                check(last.subject == "Self-test hello" && last.to.first?.email == "alex.kim@example.com", "with its subject and recipient")
+                check(last.htmlBody?.contains("Hello from the self-test.") == true && last.textBody.contains("Hello from the self-test."),
+                      "in both formatted and plain text")
+                check(last.messageID.hasPrefix("<") && last.messageID.hasSuffix("@example.com>"), "with a Message-ID on the sender's domain", last.messageID)
+            }
+            let before = sentCount()
+            guard let composer = app.compose(to: [MailAddress(email: "sam.rivera@example.net")], subject: "Never mind") else { return }
+            composer.undoSendDelay = 30
+            composer.send()
+            composer.undoSend()
+            check(app.composers.contains { $0 === composer }, "Undo Send opens the message again")
+            check(sentCount() == before, "and doesn't send it")
+            composer.to = []
+            composer.send()
+            check(composer.error == "Add at least one recipient.", "a message with nobody to send to isn't sent", composer.error ?? "")
+            composer.to = [MailAddress(email: "not-an-address")]
+            composer.send()
+            check(composer.error?.contains("isn’t a complete email address") == true, "nor one to something that isn't an address")
+            composer.discard()
+            check(app.composers.isEmpty, "Discard closes it")
+        }
+        step {
+            guard let roadmap = mail.conversations.first(where: { $0.subject == "Q4 roadmap draft" }) else { return }
+            mail.open(roadmap)
+            wait("the conversation") { mail.openMessages.count == 3 }
+        }
+        step {
+            if let event = key("r", window: window) { _ = controller.handleKey(event) }
+            guard let reply = app.composers.last else { return check(false, "R starts a reply") }
+            check(reply.subject == "Re: Q4 roadmap draft", "a reply's subject starts with Re:", reply.subject)
+            check(reply.to.map(\.email) == ["priya@example.com"], "a reply goes to the sender", "\(reply.to.map(\.email))")
+            check(reply.inReplyTo == mail.openMessages.last?.summary.messageIDHeader, "and threads under the message")
+            check(reply.quotedText?.contains("> Good call") == true, "and quotes it")
+            reply.discard()
+            if let event = key("a", window: window) { _ = controller.handleKey(event) }
+            if let all = app.composers.last {
+                check(Set(all.to.map(\.email)) == ["priya@example.com", "alex.kim@example.com"], "reply all adds everyone else",
+                      "\(all.to.map(\.email))")
+                all.discard()
+            }
+            app.handleMailto(URL(string: "mailto:waffles@example.com?subject=Woof&body=Hi%20there&cc=sam@example.com")!)
+            if let link = app.composers.last {
+                check(link.to.first?.email == "waffles@example.com" && link.subject == "Woof" && link.cc.first?.email == "sam@example.com"
+                      && link.body.string == "Hi there", "a mailto: link opens a filled-in message")
+                link.discard()
+            }
+            mail.closeConversation()
+        }
+
+        // MARK: Calendar, with each provider's meetings
+        step {
+            app.show(.calendar)
+            session.calendar.mode = .week
+            session.calendar.goToday()
+            wait("this week's events") { !session.calendar.events.isEmpty }
+        }
+        step {
+            let calendar = session.calendar
+            check(calendar.calendars.count == 4, "the account's calendars load", "\(calendar.calendars.count)")
+            check(calendar.defaultCalendar?.nativeConference == .meet, "its main calendar makes Meet meetings")
+            check(calendar.visibleDays.count == 7, "the week shows seven days")
+            let standups = calendar.shownEvents().filter { $0.title == "Team standup" }
+            check(standups.count == 5 && standups.allSatisfy { $0.conference?.kind == .meet }, "this week's standups have their meeting links", "\(standups.count)")
+            check(calendar.title == "November 2026", "the week's title", calendar.title)
+            calendar.toggle(calendar.calendars.first { $0.id == "family" }!)
+            check(!calendar.shownEvents().contains { $0.calendarID == "family" }, "turning a calendar off hides its events")
+            calendar.toggle(calendar.calendars.first { $0.id == "family" }!)
+            guard var draft = calendar.newDraft() else { return check(false, "a new event can be started") }
+            draft.title = "Self-test sync"
+            draft.addsNativeConference = true
+            draft.guests = [SampleData.person("Alex Kim")]
+            Task {
+                do { try await calendar.save(draft) } catch { check(false, "saving an event", "\(error)") }
+            }
+            wait("the new event") { calendar.events.contains { $0.title == "Self-test sync" } }
+        }
+        step {
+            let calendar = session.calendar
+            let created = calendar.events.first { $0.title == "Self-test sync" }
+            check(created?.conference?.kind == .meet && created?.conference?.joinURL.host == "meet.google.com", "a new event gets its Meet meeting",
+                  created?.conference?.joinURL.absoluteString ?? "none")
+            check(created?.attendees.count == 2 && created?.attendees.first?.isOrganizer == true, "with its guest and its organizer")
+            calendar.mode = .month
+            check(calendar.visibleInterval.duration >= 28 * 86_400, "the month view shows the whole month")
+            calendar.step(1)
+            check(calendar.title == "December 2026", "the next month", calendar.title)
+            calendar.goToday()
+            calendar.mode = .week
+            if let created { calendar.delete(created, scope: .thisEvent) }
+            wait("the event to go") { !calendar.events.contains { $0.title == "Self-test sync" } }
+        }
+        step {
+            check(!session.calendar.events.contains { $0.title == "Self-test sync" }, "deleting an event")
+            // Microsoft: the same account switch changes mail, calendar and contacts together.
+            app.switchAccount(to: SampleData.microsoftID)
+            wait("the second account", upTo: 8) {
+                app.current?.account.kind == .microsoft && app.current?.calendar.calendars.isEmpty == false && app.current?.mail.conversations.isEmpty == false
+                    && app.current?.contacts.loaded == true
+            }
+        }
+        step {
+            check(session.account.kind == .microsoft, "switching accounts")
+            check(app.module == .calendar, "keeps the part of the app showing")
+            check(mail.inboxTabs.map(\.name) == ["Focused", "Other"], "the second account's inbox has its own tabs", "\(mail.inboxTabs.map(\.name))")
+            check(session.calendar.defaultCalendar?.nativeConference == .teams, "its calendar makes Teams meetings")
+            check(session.contacts.savedContacts.contains { $0.displayName == "Marcus Lee" }, "and its own contacts")
+            guard var draft = session.calendar.newDraft() else { return }
+            draft.title = "Self-test Teams call"
+            draft.addsNativeConference = true
+            let calendar = session.calendar
+            Task { try? await calendar.save(draft) }
+            wait("the Teams event") { calendar.events.contains { $0.title == "Self-test Teams call" } }
+        }
+        step {
+            let created = session.calendar.events.first { $0.title == "Self-test Teams call" }
+            check(created?.conference?.kind == .teams && created?.conference?.joinURL.host == "teams.microsoft.com", "a new event gets its Teams meeting",
+                  created?.conference?.joinURL.absoluteString ?? "none")
+            app.switchAccount(to: SampleData.iCloudID)
+            wait("the third account", upTo: 8) { app.current?.account.kind == .icloud && app.current?.calendar.events.isEmpty == false }
+        }
+        step {
+            check(session.calendar.defaultCalendar?.nativeConference == nil, "an iCloud calendar has no meetings of its own")
+            check(session.calendar.shownEvents().contains { $0.conference?.kind == .faceTime }, "but shows FaceTime links on its events")
+            guard var draft = session.calendar.newDraft() else { return }
+            draft.title = "Self-test FaceTime"
+            draft.faceTimeLink = "https://facetime.apple.com/join#v=1&p=selftest&k=key"
+            let calendar = session.calendar
+            Task { try? await calendar.save(draft) }
+            wait("the FaceTime event") { calendar.events.contains { $0.title == "Self-test FaceTime" } }
+        }
+        step {
+            let created = session.calendar.events.first { $0.title == "Self-test FaceTime" }
+            check(created?.conference?.kind == .faceTime && created?.conference?.joinURL.host == "facetime.apple.com", "a pasted FaceTime link joins the event")
+            check(mail.inboxTabs.isEmpty && mail.capabilities.usesLabels == false, "iCloud mail has folders, no tabs")
+            app.switchAccount(to: SampleData.googleID)
+            app.show(.contacts)
+            wait("the first account's contacts") { app.current?.account.kind == .google && app.current?.contacts.loaded == true }
+        }
+
+        // MARK: Contacts
+        step {
+            let contacts = session.contacts
+            check(contacts.count(in: .contacts) == 20, "the contacts load", "\(contacts.count(in: .contacts))")
+            check(contacts.count(in: .other) == 3, "and the other contacts")
+            check(contacts.labels == ["Family", "Puppy School", "Work"], "labels come from the contacts", "\(contacts.labels)")
+            check(contacts.contacts(in: .contacts, matching: "").first?.displayName == "Aisha Rahman", "contacts sort by name")
+            check(contacts.contacts(in: .contacts, matching: "bakery").map(\.displayName) == ["Olivia Chen"], "search finds a contact by company")
+            check(contacts.suggestions(for: "ale").first?.email == "alex.kim@example.com", "typing a name suggests addresses")
+            let new = Contact(id: "new-selftest", givenName: "Biscuit", familyName: "Pug", emails: [LabeledValue(label: "home", value: "biscuit@example.com")])
+            Task { await contacts.save(new, isNew: true) }
+            wait("the new contact") { contacts.savedContacts.contains { $0.givenName == "Biscuit" } }
+        }
+        step {
+            let contacts = session.contacts
+            guard let biscuit = contacts.savedContacts.first(where: { $0.givenName == "Biscuit" }) else { return check(false, "creating a contact") }
+            check(!biscuit.id.hasPrefix("new-"), "creating a contact gives it the server's ID")
+            contacts.toggleStar(biscuit)
+            check(contacts.contact(biscuit.id)?.isStarred == true, "starring a contact")
+            contacts.delete(biscuit)
+            check(contacts.contact(biscuit.id) == nil, "deleting a contact")
+        }
+
+        // MARK: The real services, made for each kind of account (nothing connects)
+        step {
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("PMail Factory Check \(UUID().uuidString)")
+            let factory = LiveServiceFactory(oauth: OAuthConfiguration(google: .google(clientID: "selftest.apps.googleusercontent.com"),
+                                                                       microsoft: .microsoft(clientID: "selftest")), folder: folder)
+            let secrets = MemorySecretStore()
+            let tokens = OAuthTokens(accessToken: "a", refreshToken: "r", expiresAt: Date().addingTimeInterval(3600))
+            let google = Account(kind: .google, name: "G", email: "g@example.com")
+            let microsoft = Account(kind: .microsoft, name: "M", email: "m@example.com")
+            let presets = ServerPresets.iCloud(email: "i@icloud.com")
+            let iCloud = Account(kind: .icloud, name: "I", email: "i@icloud.com", incoming: presets.incoming, outgoing: presets.outgoing,
+                                 calendarServer: presets.calendar, contactsServer: presets.contacts, serverLoginName: presets.login)
+            let guess = ServerPresets.guess(forEmail: "p@example.org", incoming: .pop3)
+            let pop = Account(kind: .other, name: "P", email: "p@example.org", incoming: guess.incoming, outgoing: guess.outgoing)
+            try? secrets.setSecret(.oauth(tokens), for: google.id)
+            try? secrets.setSecret(.oauth(tokens), for: microsoft.id)
+            try? secrets.setSecret(.password("x"), for: iCloud.id)
+            try? secrets.setSecret(.password("x"), for: pop.id)
+            let g = factory.services(for: google, secrets: secrets)
+            check(g.mail is GoogleMailService && g.calendar is GoogleCalendarService && g.contacts is GoogleContactsService,
+                  "a Google account uses Google's mail, calendar and contacts services")
+            let m = factory.services(for: microsoft, secrets: secrets)
+            check(m.mail is MicrosoftMailService && m.calendar is MicrosoftCalendarService && m.contacts is MicrosoftContactsService,
+                  "a Microsoft account uses Microsoft's")
+            let i = factory.services(for: iCloud, secrets: secrets)
+            check(i.mail is IMAPMailService && i.calendar is CalDAVCalendarService && i.contacts is CardDAVContactsService,
+                  "an iCloud account uses IMAP, CalDAV and CardDAV")
+            let p = factory.services(for: pop, secrets: secrets)
+            check(p.mail is POPMailService && p.calendar is LocalCalendarService && p.contacts is LocalContactsService,
+                  "a POP account without servers keeps its calendar and contacts on the Mac")
+            let unsigned = factory.services(for: Account(kind: .icloud, name: "", email: "x@icloud.com", incoming: presets.incoming), secrets: secrets)
+            check(unsigned.mail is UnavailableService, "an account without its password can't connect")
+            let unconfigured = LiveServiceFactory(oauth: OAuthConfiguration(), folder: folder).services(for: google, secrets: secrets)
+            check(unconfigured.mail is UnavailableService, "and neither can a Google account in a copy without Google sign-in")
+            try? FileManager.default.removeItem(at: folder)
+        }
+
+        // MARK: Accounts, windows and menus
+        step {
+            check(app.oauth.google == nil || ProcessInfo.processInfo.environment["PMAIL_GOOGLE_CLIENT_ID"] != nil, "sign-in setup comes from the environment")
+            app.sheet = .addAccount(nil)
+            check(app.sheet?.id == "add-any", "Add Account opens the sheet")
+            app.sheet = nil
+            app.show(.mail)
+            check(validateEveryMenuItem(controller) >= 30, "every menu item can be checked on mail")
+            app.show(.calendar)
+            check(validateEveryMenuItem(controller) >= 30, "and on the calendar")
+            app.show(.contacts)
+            check(validateEveryMenuItem(controller) >= 30, "and on contacts")
+            delegate.showAboutWindow(nil)
+            check(NSImage(named: "AboutLogo") != nil, "the About window has the logo")
+            check(AboutView.version.hasPrefix("Version "), "and the version", AboutView.version)
+            check(AboutView.copyright.contains("GNU General Public License"), "and the license")
+            NSApp.windows.first { $0.windowController is AboutWindowController }?.close()
+            app.removeAccount(SampleData.iCloudID)
+            check(app.accounts.accounts.count == 2 && app.accounts.session(for: SampleData.iCloudID) == nil, "removing an account")
+            check(app.current?.account.kind == .google, "keeps the account showing")
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+        step {
+            app.show(.mail)
+            check(validateEveryMenuItem(controller) >= 30, "nothing breaks in Dark Mode")
+        }
+        runSteps()
+    }
+}
+#endif

@@ -1,0 +1,12 @@
+// Settings for release builds (Tools/make-installer.sh, and the Release workflow on GitHub).
+//
+// The sign-in client IDs come from environment variables of these names when the build runs (the Release workflow
+// sets them from repository secrets), or from Config/Secrets.xcconfig on this Mac:
+//
+//     PMAIL_GOOGLE_CLIENT_ID, PMAIL_GOOGLE_CLIENT_SECRET, PMAIL_GOOGLE_REDIRECT_URI,
+//     PMAIL_MICROSOFT_CLIENT_ID, PMAIL_MICROSOFT_TENANT, PMAIL_MICROSOFT_REDIRECT_URI
+//
+// Without them the app still builds and works with iCloud and other accounts; its Google and Microsoft choices say
+// that sign-in isn't set up in that copy.
+
+#include? "Secrets.xcconfig"

@@ -1,0 +1,22 @@
+// Settings for debug builds, the ones run from Xcode.
+//
+// Out of the box a debug build is signed to run on this Mac only. To sign it with a team instead, put these lines,
+// with the team's ID, in Config/Signing.xcconfig, which Git ignores:
+//
+//     DEVELOPMENT_TEAM = ABCDE12345
+//     CODE_SIGN_IDENTITY = Apple Development
+//
+// Sign-in with Google and Microsoft needs PMail's client IDs from each provider. Put them in Config/Secrets.xcconfig,
+// which Git ignores (README ▸ Signing in with Google and Microsoft says how to get them):
+//
+//     PMAIL_GOOGLE_CLIENT_ID = 1234567890-abcdefg.apps.googleusercontent.com
+//     PMAIL_MICROSOFT_CLIENT_ID = 00000000-0000-0000-0000-000000000000
+//
+// or set environment variables of the same names, either in the shell that runs xcodebuild or in the scheme's
+// Run ▸ Arguments ▸ Environment Variables (PMail reads those when it starts).
+
+CODE_SIGN_IDENTITY = -
+CODE_SIGN_ENTITLEMENTS = PMail/PMail.entitlements
+
+#include? "Signing.xcconfig"
+#include? "Secrets.xcconfig"
