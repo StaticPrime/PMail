@@ -280,6 +280,52 @@ private final class RecordingSender: MailSending, @unchecked Sendable {
         #expect(messages.map(\.textBody) == ["Body of message 1", "Body of message 2"])
     }
 
+    @Test func checkingForNewMailStartsSilentlyThenReportsWhatArrived() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let first = session(uids: ["a", "b"], retrieving: [(2, message(2, day: 2)), (1, message(1, day: 1))])
+        let second = session(uids: ["a", "b", "c", "d"], retrieving: [(4, message(4, day: 4)), (3, message(3, day: 3))])
+        let third = session(uids: ["a", "b", "c", "d"], retrieving: [])
+        let pop = service(folder, [first, second, third])
+        let start = try await pop.checkForNewMail(since: nil)
+        #expect(start.messages.isEmpty && start.inboxUnread == 2)
+        #expect(await LocalMailStore(folder: folder).summaries(in: POPMailService.inboxID).count == 2)
+        let later = try await pop.checkForNewMail(since: start.state)
+        #expect(later.messages.map(\.id) == ["pop:d", "pop:c"])
+        #expect(later.messages.map(\.subject) == ["Message 4", "Message 3"] && later.messages.allSatisfy(\.isUnread))
+        #expect(later.inboxUnread == 4)
+        let quiet = try await pop.checkForNewMail(since: later.state)
+        #expect(quiet.messages.isEmpty && quiet.inboxUnread == 4)
+        for stream in [first, second, third] { #expect(stream.mismatches.isEmpty && stream.isFinished) }
+
+        // POP servers can't say when mail arrives.
+        #expect(!pop.pushesChanges)
+        #expect(try await pop.waitForChange(timeout: 30) == false)
+
+        // On a Mac that never downloaded this account's mail, a check starts silently even with a state.
+        let elsewhere = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: elsewhere) }
+        let fresh = session(uids: ["a"], retrieving: [(1, message(1, day: 1))])
+        let news = try await service(elsewhere, [fresh]).checkForNewMail(since: later.state)
+        #expect(news.messages.isEmpty && news.inboxUnread == 1)
+        #expect(fresh.mismatches.isEmpty && fresh.isFinished)
+    }
+
+    @Test func findingMessagesByMessageIDLooksOnThisMac() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = LocalMailStore(folder: folder)
+        try await store.add(raw: Data(message(1, day: 1).utf8), folderID: POPMailService.inboxID, id: "pop:a")
+        try await store.add(raw: Data(message(2, day: 2).utf8), folderID: POPMailService.sentID, id: "local:2")
+        try await store.add(raw: Data(message(3, day: 3).utf8), folderID: POPMailService.trashID, id: "pop:c")
+        let pop = POPMailService(account: account, incoming: incoming, credential: credential, store: store,
+                                 sender: RecordingSender(), connector: ScriptedConnector([]))
+        let found = try await pop.findMessages(withMessageIDs: ["<m1@example.com>", "<M2@EXAMPLE.COM>", "<m3@example.com>",
+                                                                "<unknown@example.com>"])
+        #expect(found.map(\.id) == ["local:2", "pop:a"])
+        #expect(try await pop.findMessages(withMessageIDs: ["", "<>"]).isEmpty)
+    }
+
     @Test func syncFailuresReachTheCaller() async {
         let folder = temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }

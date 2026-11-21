@@ -15,6 +15,19 @@ public actor IMAPClient {
         var untagged: [IMAPUntaggedResponse]
     }
 
+    /// Where an IDLE is up to.
+    private struct IdleSession {
+        var number: Int
+        /// The server answered "+", so DONE may be sent.
+        var isIdling = false
+        /// New mail, the deadline or cancellation asked for the IDLE to end.
+        var endRequested = false
+        var doneSent = false
+        var sawChange = false
+        /// Drops the connection if the server doesn't finish the IDLE once asked to.
+        var graceTimer: Task<Void, Never>?
+    }
+
     /// The fetch items for a message list row: flags, dates, size, envelope, structure, and the threading headers.
     public static let summaryItems = "UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE "
         + "BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE)]"
@@ -30,6 +43,12 @@ public actor IMAPClient {
     private var serverNames: [String: String] = [:]
     private var isBusy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// The IDLE in progress, if any.
+    private var idleSession: IdleSession?
+    /// How many IDLEs have run, so a late timer can tell whether its IDLE is still the one in progress.
+    private var idleCount = 0
+    /// How many seconds the server gets to finish an IDLE once asked to before its connection is given up for dead.
+    private(set) var idleEndGrace: TimeInterval = 15
 
     /// What the server says it can do, in capitals ("IMAP4REV1", "AUTH=PLAIN", "MOVE").
     public private(set) var capabilities: Set<String> = []
@@ -233,11 +252,18 @@ public actor IMAPClient {
         }
     }
 
-    /// How many messages a mailbox has, how many are unread, and its UIDNEXT and UIDVALIDITY.
-    public func status(_ mailbox: String) async throws -> IMAPMailboxStatus {
-        try await exclusively {
-            let result = try await self.run([.text("STATUS "), self.mailboxArgument(mailbox),
-                                             .text(" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)")])
+    /// How many messages a mailbox has, how many are unread, and its UIDNEXT and UIDVALIDITY, or just the `items` asked
+    /// for ("UIDNEXT", "UNSEEN"…).
+    public func status(_ mailbox: String,
+                       items: [String] = ["MESSAGES", "UNSEEN", "UIDNEXT", "UIDVALIDITY"]) async throws -> IMAPMailboxStatus {
+        // Item names are plain words; anything else would let a caller slip more onto the command line.
+        let names = items.filter { item in
+            !item.isEmpty && item.unicodeScalars.allSatisfy { ("A"..."Z").contains($0) || ("a"..."z").contains($0)
+                || ("0"..."9").contains($0) || $0 == "-" }
+        }
+        let asked = names.isEmpty ? "MESSAGES UNSEEN UIDNEXT UIDVALIDITY" : names.joined(separator: " ")
+        return try await exclusively {
+            let result = try await self.run([.text("STATUS "), self.mailboxArgument(mailbox), .text(" (\(asked))")])
             try self.check(result)
             var answers: [(name: String, attributes: [String: Int])] = []
             for case let .status(name, attributes) in result.untagged { answers.append((name, attributes)) }
@@ -432,9 +458,15 @@ public actor IMAPClient {
         }
     }
 
-    /// Does nothing, which gives the server a chance to report new mail and changes.
-    public func noop() async throws {
-        try await exclusively { try self.check(try await self.run([.text("NOOP")])) }
+    /// Does nothing, which gives the server a chance to report new mail and changes. Returns the untagged responses
+    /// that came with it (EXISTS, EXPUNGE, FETCH with new flags…).
+    @discardableResult
+    public func noop() async throws -> [IMAPUntaggedResponse] {
+        try await exclusively {
+            let result = try await self.run([.text("NOOP")])
+            try self.check(result)
+            return result.untagged
+        }
     }
 
     /// Signs out politely and disconnects. Never fails: a connection that's already gone is simply closed.
@@ -447,6 +479,124 @@ public actor IMAPClient {
     /// Drops the connection at once.
     public func disconnect() {
         disconnectNow()
+    }
+
+    // MARK: Waiting for changes
+
+    /// Listens with IDLE (RFC 2177) until `deadline` for the server to report a change to the selected mailbox. Returns
+    /// true as soon as new mail, an expunge or a flag change arrives (an untagged EXISTS, EXPUNGE or FETCH), and false
+    /// when the deadline passes or the server ends the IDLE on its own. Either way the IDLE is ended with DONE and its
+    /// tagged answer read, so the connection is ready for the next command.
+    ///
+    /// Cancelling the task ends the IDLE the same way and throws `.cancelled`. A server that hasn't finished the IDLE
+    /// `idleEndGrace` seconds after being asked to has its connection dropped; the answer is still returned when it was
+    /// already known (the deadline had passed, or a change had arrived), and the next command finds the client
+    /// disconnected.
+    public func idle(until deadline: ContinuousClock.Instant) async throws -> Bool {
+        try await exclusively {
+            if Task.isCancelled { throw PMailError.cancelled }
+            guard let connection = self.connection else {
+                throw PMailError.connectionFailed("the connection to the server was closed")
+            }
+            guard self.capabilities.contains("IDLE") else {
+                throw PMailError.notSupported("This server can’t tell PMail about changes as they happen.")
+            }
+            guard ContinuousClock.now < deadline else { return false }
+            self.tagNumber += 1
+            let tag = "A\(self.tagNumber)"
+            self.idleCount += 1
+            let number = self.idleCount
+            self.idleSession = IdleSession(number: number)
+            let timer = Task {
+                do { try await Task.sleep(until: deadline, clock: .continuous) } catch { return }
+                await self.endIdle(number)
+            }
+            defer {
+                timer.cancel()
+                self.idleSession?.graceTimer?.cancel()
+                self.idleSession = nil
+            }
+            let refusal: String?
+            do {
+                refusal = try await withTaskCancellationHandler {
+                    try await self.runIdle(tag: tag, number: number, on: connection)
+                } onCancel: {
+                    Task { await self.endIdle(number) }
+                }
+            } catch {
+                let failure = self.translate(error)
+                let session = self.idleSession
+                self.disconnectNow()
+                if Task.isCancelled { throw PMailError.cancelled }
+                if let session, session.endRequested { return session.sawChange }
+                throw failure
+            }
+            if let refusal { throw PMailError.server(refusal) }
+            if Task.isCancelled { throw PMailError.cancelled }
+            return self.idleSession?.sawChange ?? false
+        }
+    }
+
+    /// Sends IDLE and reads until its tagged answer. Returns the server's reason when it refused to IDLE.
+    private func runIdle(tag: String, number: Int, on connection: LineConnection) async throws -> String? {
+        try await connection.writeLine("\(tag) IDLE")
+        while true {
+            switch try await readResponse(from: connection) {
+            case let .untagged(response):
+                note(response)
+                if Self.isChange(response) {
+                    idleSession?.sawChange = true
+                    await endIdle(number)
+                }
+            case .continuation:
+                idleSession?.isIdling = true
+                if idleSession?.endRequested == true { await sendDone(number) }
+            case let .tagged(responseTag, status):
+                guard responseTag == tag else { continue }
+                if status.status != .ok, idleSession?.isIdling != true { return status.text }
+                return nil
+            }
+        }
+    }
+
+    /// Asks for an IDLE to end: DONE straight away if the server is idling, else as soon as it says it is. If the
+    /// server hasn't finished `idleEndGrace` seconds later, the connection has likely died quietly and is dropped.
+    private func endIdle(_ number: Int) async {
+        guard var session = idleSession, session.number == number, !session.endRequested else { return }
+        session.endRequested = true
+        let grace = idleEndGrace
+        session.graceTimer = Task {
+            do { try await Task.sleep(for: .seconds(grace)) } catch { return }
+            self.giveUpOnIdle(number)
+        }
+        idleSession = session
+        if session.isIdling { await sendDone(number) }
+    }
+
+    private func sendDone(_ number: Int) async {
+        guard let session = idleSession, session.number == number, !session.doneSent, let connection else { return }
+        idleSession?.doneSent = true
+        // A write that fails shows up as a failed read in the IDLE.
+        try? await connection.writeLine("DONE")
+    }
+
+    private func giveUpOnIdle(_ number: Int) {
+        guard idleSession?.number == number else { return }
+        connection?.stream.close()
+    }
+
+    /// Whether an untagged response during IDLE says the mailbox changed: new mail (or a new count), an expunge, or
+    /// changed flags.
+    static func isChange(_ response: IMAPUntaggedResponse) -> Bool {
+        switch response {
+        case .exists, .expunge, .fetch: true
+        default: false
+        }
+    }
+
+    /// Sets how long the server gets to finish an IDLE, for tests.
+    func setIdleEndGrace(_ seconds: TimeInterval) {
+        idleEndGrace = max(0, seconds)
     }
 
     // MARK: Running commands

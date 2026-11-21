@@ -36,6 +36,9 @@ final class ScriptedByteStream: ByteStream, @unchecked Sendable {
     /// Everything the client wrote, as text.
     var writtenText: String { lock.withLock { String(decoding: written, as: UTF8.self) } }
 
+    /// The lines written so far, safe to read while the client is still busy on another task.
+    var linesSoFar: [String] { lock.withLock { lines } }
+
     var isFinished: Bool { lock.withLock { steps.isEmpty } }
 
     func read() async throws -> Data {

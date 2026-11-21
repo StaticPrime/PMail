@@ -260,4 +260,80 @@ import Testing
         #expect(!(await client.isConnected))
         await #expect(throws: PMailError.self) { try await client.noop() }
     }
+
+    // MARK: IDLE
+
+    private static let idleCapabilities = IMAPScript.capabilities + " IDLE"
+
+    private func idlingClient(_ script: [ScriptedByteStream.Step]) async throws -> (IMAPClient, ScriptedByteStream) {
+        let stream = ScriptedByteStream(greeting: IMAPScript.greeting(Self.idleCapabilities),
+                                        script: [IMAPScript.signIn("A1", capabilities: Self.idleCapabilities)] + script)
+        let client = try await connectedClient(stream)
+        try await client.signIn(.password(username: "pug@example.com", password: "secret"))
+        return (client, stream)
+    }
+
+    @Test func aChangeThatArrivesWhileIDLEEndsStillCounts() async throws {
+        let (client, stream) = try await idlingClient([
+            IMAPScript.select("A2", exists: 3, readOnly: true),
+            .expect("A3 IDLE", reply: "+ idling\r\n"),
+            .expect("DONE", reply: IMAPScript.lines("* 4 EXISTS", "A3 OK IDLE terminated")),
+            .expect("A4 NOOP", reply: "A4 OK Done\r\n"),
+        ])
+        try await client.select("INBOX", readOnly: true)
+        #expect(try await client.idle(until: .now + .milliseconds(50)))
+        #expect(await client.selectedMailbox?.exists == 4)
+        // The connection is ready for the next command, and a deadline that has passed doesn't IDLE at all.
+        try await client.noop()
+        #expect(try await client.idle(until: .now - .seconds(1)) == false)
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
+
+    @Test func idleGivesUpOnAServerThatNeverAnswersDONE() async throws {
+        let (client, stream) = try await idlingClient([
+            .expect("A2 IDLE", reply: "+ idling\r\n"),
+            .expect("DONE", reply: ""),
+        ])
+        await client.setIdleEndGrace(0.05)
+        #expect(try await client.idle(until: .now + .milliseconds(50)) == false)
+        #expect(!(await client.isConnected) && stream.closed)
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
+
+    @Test func idleThatTheServerTurnsDown() async throws {
+        let (client, stream) = try await idlingClient([
+            .expect("A2 IDLE", reply: "A2 NO IDLE isn’t allowed here\r\n"),
+            .expect("A3 NOOP", reply: "A3 OK Done\r\n"),
+        ])
+        await #expect(throws: PMailError.server("IDLE isn’t allowed here")) { try await client.idle(until: .now + .seconds(5)) }
+        #expect(await client.isConnected)
+        try await client.noop()
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+
+        let plain = ScriptedByteStream(greeting: IMAPScript.greeting(), script: [IMAPScript.signIn("A1")])
+        let withoutIdle = try await connectedClient(plain)
+        try await withoutIdle.signIn(.password(username: "pug@example.com", password: "secret"))
+        await #expect(throws: PMailError.self) { try await withoutIdle.idle(until: .now + .seconds(5)) }
+        #expect(plain.lines.count == 1 && plain.isFinished)
+    }
+
+    @Test func noopAndStatusReportWhatTheServerSaid() async throws {
+        let stream = ScriptedByteStream(greeting: IMAPScript.greeting(), script: [
+            IMAPScript.signIn("A1"),
+            .expect(#"A2 STATUS "INBOX" (UIDNEXT UNSEEN)"#,
+                    reply: IMAPScript.lines(#"* STATUS "INBOX" (UIDNEXT 44 UNSEEN 2)"#, "A2 OK Done")),
+            .expect(#"A3 STATUS "INBOX" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)"#,
+                    reply: IMAPScript.lines(#"* STATUS "INBOX" (MESSAGES 9 UNSEEN 2 UIDNEXT 44 UIDVALIDITY 3)"#, "A3 OK Done")),
+            .expect("A4 NOOP", reply: IMAPScript.lines("* 10 EXISTS", #"* 9 FETCH (FLAGS (\Seen))"#, "A4 OK Done")),
+        ])
+        let client = try await connectedClient(stream)
+        try await client.signIn(.password(username: "pug@example.com", password: "secret"))
+        #expect(try await client.status("INBOX", items: ["UIDNEXT", "UNSEEN"])
+            == IMAPMailboxStatus(mailbox: "INBOX", unseen: 2, uidNext: 44))
+        // Only plain item names go on the command line.
+        #expect(try await client.status("INBOX", items: ["UIDNEXT)\r\nA9 LOGOUT"]).uidValidity == 3)
+        let responses = try await client.noop()
+        #expect(responses == [.exists(10), .fetch(IMAPFetchResponse(sequenceNumber: 9, flags: ["\\Seen"]))])
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
 }

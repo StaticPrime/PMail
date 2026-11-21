@@ -210,6 +210,9 @@ public indirect enum IMAPSearchKey: Sendable, Hashable {
     /// A header field containing the text (an empty text matches every message that has the field).
     case header(String, String)
     case uids([UInt32])
+    /// Messages with this UID or a higher one (`UID n:*`). The newest message always matches, even when its UID is
+    /// lower, so callers check what comes back.
+    case uidsFrom(UInt32)
     case since(Date)
     case before(Date)
     case not(IMAPSearchKey)
@@ -251,6 +254,7 @@ public indirect enum IMAPSearchKey: Sendable, Hashable {
             builder.text(" ")
             builder.string(value)
         case let .uids(uids): builder.text("UID " + (uids.isEmpty ? "0" : IMAPSequenceSet.string(uids)))
+        case let .uidsFrom(first): builder.text("UID \(max(first, 1)):*")
         case let .since(date): builder.text("SINCE " + IMAPDate.day(date))
         case let .before(date): builder.text("BEFORE " + IMAPDate.day(date))
         case let .not(key):

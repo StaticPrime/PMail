@@ -16,6 +16,8 @@ public actor POPMailService: MailService {
     /// The folders messages can be moved between (Starred only shows messages, it doesn't hold them).
     private static let localFolderIDs: Set<String> = [inboxID, sentID, draftsID, trashID]
     private static let firstSyncKey = "pop.firstSyncDone"
+    /// The most messages one check for new mail returns (the newest).
+    static let newMailLimit = 50
 
     public let account: Account
     private let incoming: ServerSettings
@@ -23,7 +25,8 @@ public actor POPMailService: MailService {
     private let store: LocalMailStore
     private let sender: any MailSending
     private let connector: any ByteStreamConnector
-    private var syncTask: Task<Int, Error>?
+    /// The sync in progress, which hands back the IDs it downloaded, newest first.
+    private var syncTask: Task<[String], Error>?
     /// How many of the newest messages the first sync downloads; older ones stay on the server only.
     var firstSyncLimit = 300
 
@@ -98,6 +101,11 @@ public actor POPMailService: MailService {
     /// takes only the newest `firstSyncLimit`. Returns how many arrived. Calls made while a sync runs wait for it.
     @discardableResult
     public func syncInbox() async throws -> Int {
+        try await sync().count
+    }
+
+    /// Runs a sync, or joins the one in progress, and returns the IDs of the messages it downloaded, newest first.
+    private func sync() async throws -> [String] {
         if let running = syncTask { return try await running.value }
         let task = Task { try await self.downloadNewMessages() }
         syncTask = task
@@ -105,7 +113,7 @@ public actor POPMailService: MailService {
         return try await task.value
     }
 
-    private func downloadNewMessages() async throws -> Int {
+    private func downloadNewMessages() async throws -> [String] {
         let client = POPClient(settings: incoming, credential: credential, connector: connector)
         try await client.connect()
         do {
@@ -123,7 +131,7 @@ public actor POPMailService: MailService {
                 }
                 try await store.setValue("1", forKey: Self.firstSyncKey)
             }
-            var downloaded = 0
+            var downloaded: [String] = []
             for message in fresh {
                 let raw: Data
                 do {
@@ -132,7 +140,7 @@ public actor POPMailService: MailService {
                     continue  // gone since UIDL (another program deleted it)
                 }
                 try await store.add(raw: raw, folderID: Self.inboxID, id: "pop:\(message.uid)", isUnread: true)
-                downloaded += 1
+                downloaded.append("pop:\(message.uid)")
             }
             await client.quit()
             return downloaded
@@ -140,6 +148,42 @@ public actor POPMailService: MailService {
             await client.close()
             throw error
         }
+    }
+
+    // MARK: New mail
+
+    /// Brings the inbox up to date and returns what this sync downloaded, newest first (at most `newMailLimit`). The
+    /// first check, and the first sync this Mac ever makes for the account, download silently: they only bring the
+    /// inbox up to date. The store keeps track of what's been downloaded, so the state only marks that a check has
+    /// happened.
+    public func checkForNewMail(since state: MailSyncState?) async throws -> NewMail {
+        let hasSyncedBefore = await store.value(forKey: Self.firstSyncKey) != nil
+        let downloaded = try await sync()
+        var messages: [MessageSummary] = []
+        if state != nil, hasSyncedBefore {
+            for id in downloaded.prefix(Self.newMailLimit) {
+                if let summary = await store.summary(for: id), summary.folderID == Self.inboxID { messages.append(summary) }
+            }
+        }
+        return NewMail(messages: messages, state: MailSyncState("pop"), inboxUnread: await store.counts(in: Self.inboxID).unread)
+    }
+
+    /// Looks the Message-IDs up among the messages on this Mac, leaving out Trash.
+    public func findMessages(withMessageIDs messageIDs: [String]) async throws -> [MessageSummary] {
+        let wanted = Set(messageIDs.map(Self.messageIDKey).filter { !$0.isEmpty })
+        guard !wanted.isEmpty else { return [] }
+        return await store.allSummaries().filter { summary in
+            guard summary.folderID != Self.trashID, let header = summary.messageIDHeader else { return false }
+            return wanted.contains(Self.messageIDKey(header))
+        }
+    }
+
+    /// POP servers can't say when mail arrives; the inbox is checked now and then instead.
+    public nonisolated var pushesChanges: Bool { false }
+
+    /// A Message-ID in a form for comparing: without angle brackets or space around it, in lowercase.
+    private static func messageIDKey(_ id: String) -> String {
+        id.trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n")).lowercased()
     }
 
     // MARK: Reading

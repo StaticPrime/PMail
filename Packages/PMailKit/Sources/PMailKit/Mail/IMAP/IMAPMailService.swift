@@ -30,7 +30,8 @@ public struct IMAPMessageID: RawRepresentable, Sendable, Hashable {
 /// connection, with sending handed to an outgoing (SMTP) server.
 ///
 /// The service keeps a single connection and runs one operation at a time on it. When the connection turns out
-/// to have dropped (the server timed it out, the network changed), it connects again and tries once more.
+/// to have dropped (the server timed it out, the network changed), it connects again and tries once more. Waiting
+/// for changes (IMAP IDLE) happens on a second connection of its own, so it never holds the other calls up.
 public actor IMAPMailService: MailService {
     /// The ID of the virtual folder that lists the inbox's starred (\Flagged) messages.
     public static let starredFolderID = "pmail:starred"
@@ -40,6 +41,14 @@ public actor IMAPMailService: MailService {
     /// How much of an HTML part to fetch for its snippet: more than for plain text, since a style sheet often
     /// comes before the first words.
     static let htmlSnippetLength = 8192
+    /// The most messages one check for new mail returns (the newest).
+    static let newMailLimit = 50
+    /// The most mailboxes one lookup by Message-ID opens.
+    static let lookupMailboxLimit = 40
+    /// The longest one IDLE runs before it's renewed: servers may drop a connection that has been quiet for 30 minutes.
+    static let longestIdle: TimeInterval = 25 * 60
+    /// The longest one wait for a change lasts, however long the caller asked for.
+    static let longestWait: TimeInterval = 24 * 60 * 60
 
     public nonisolated let account: Account
     private let incoming: ServerSettings
@@ -54,6 +63,16 @@ public actor IMAPMailService: MailService {
     private var mailboxes: [IMAPMailbox]?
     private var isBusy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// The second connection, which waits for changes in the inbox.
+    private var changeClient: IMAPClient?
+    /// How long each read on `changeClient` may take, when the connector is the network's.
+    private var changeStreamTimeout: TimeInterval = 0
+    private var isWaitingForChange = false
+    private var changeWaiters: [CheckedContinuation<Void, Never>] = []
+    /// How many times `close()` has run, so a wait can tell it was cut short.
+    private var closeCount = 0
+    /// How often a server without IDLE is asked about the inbox while waiting for a change, in seconds.
+    var pollInterval: TimeInterval = 60
 
     public init(account: Account, incoming: ServerSettings, credential: Credential, sender: any MailSending,
                 connector: any ByteStreamConnector = URLSessionConnector()) {
@@ -463,11 +482,259 @@ public actor IMAPMailService: MailService {
     }
 
     public func close() async {
+        closeCount += 1
+        // The connection that waits for changes goes at once, which ends a wait in progress.
+        if let waiting = changeClient {
+            changeClient = nil
+            if isWaitingForChange { await waiting.disconnect() } else { await waiting.logout() }
+        }
         try? await exclusively {
             await self.client?.logout()
             self.client = nil
             self.mailboxes = nil
         }
+    }
+
+    // MARK: New mail
+
+    /// Checks the inbox with STATUS (UIDNEXT, UIDVALIDITY and UNSEEN), and fetches the messages from the stored UIDNEXT
+    /// up when there are any, newest first, at most `newMailLimit`. When the inbox is the mailbox selected on the
+    /// connection, where STATUS isn't reliable on every server, UID SEARCH finds them instead (and the unread count
+    /// is left out). The state is "<uidvalidity>:<uidnext>"; when UIDVALIDITY changes, what's new can't be told, so the
+    /// check starts over from a fresh state without any messages.
+    public func checkForNewMail(since state: MailSyncState?) async throws -> NewMail {
+        let known = state.flatMap { IMAPInboxState($0) }
+        return try await withClient { client in
+            if let selected = await client.selectedMailbox, selected.name == "INBOX" {
+                return try await self.newMail(inSelectedInbox: selected, since: known, client: client)
+            }
+            let status = try await client.status("INBOX", items: ["UIDNEXT", "UIDVALIDITY", "UNSEEN"])
+            guard let uidValidity = status.uidValidity, let uidNext = status.uidNext else {
+                // A server that leaves them out: look in the inbox itself.
+                let selected = try await client.select("INBOX", readOnly: true)
+                return try await self.newMail(inSelectedInbox: selected, since: known, client: client)
+            }
+            guard let known, known.uidValidity == uidValidity, uidNext > known.uidNext else {
+                // The first check, nothing new, or UIDs that started over.
+                let current = IMAPInboxState(uidValidity: uidValidity, uidNext: uidNext)
+                return NewMail(messages: [], state: current.syncState, inboxUnread: status.unseen)
+            }
+            let selected = try await client.select("INBOX", readOnly: true)
+            var news = try await self.newMail(inSelectedInbox: selected, since: known, atLeast: uidNext, client: client)
+            news.inboxUnread = status.unseen
+            return news
+        }
+    }
+
+    /// What's new in the inbox while it's the selected mailbox: the messages from the stored UIDNEXT up, found with
+    /// UID SEARCH. `uidNext` is a UIDNEXT the server gave meanwhile, for the next state.
+    private func newMail(inSelectedInbox selected: IMAPSelectedMailbox, since known: IMAPInboxState?, atLeast uidNext: UInt32 = 0,
+                         client: IMAPClient) async throws -> NewMail {
+        let uidValidity = selected.uidValidity ?? 0
+        let continuing = known?.uidValidity == uidValidity
+        let first = max(1, (continuing ? known?.uidNext : selected.uidNext) ?? 1)
+        // `UID n:*` always takes in the newest message, even when its UID is below n.
+        let newestFirst = Set(try await client.uidSearch([.uidsFrom(first)])).filter { $0 >= first }.sorted(by: >)
+        // Past everything found, so a message that arrived since STATUS isn't announced twice.
+        let next = max(first, uidNext, selected.uidNext ?? 0, newestFirst.first.map(Self.uid(after:)) ?? 0)
+        let state = IMAPInboxState(uidValidity: uidValidity, uidNext: next).syncState
+        guard continuing, !newestFirst.isEmpty else { return NewMail(messages: [], state: state) }
+        let picked = Array(newestFirst.prefix(Self.newMailLimit))
+        let found = try await summaries(of: picked, in: "INBOX", uidValidity: uidValidity, client: client)
+        return NewMail(messages: found.sorted { Self.uid(of: $0) > Self.uid(of: $1) }, state: state)
+    }
+
+    // MARK: Finding messages
+
+    /// Searches the inbox, the archive and All Mail, Sent, Drafts and then the account's own folders (never Trash or
+    /// Junk), at most `lookupMailboxLimit` of them, with UID SEARCH on the Message-ID header, and stops once every ID
+    /// has turned up.
+    public func findMessages(withMessageIDs messageIDs: [String]) async throws -> [MessageSummary] {
+        var wanted: [(key: String, id: String)] = []
+        for id in messageIDs {
+            let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = Self.messageIDKey(trimmed)
+            let isRepeat = wanted.contains { $0.key == key }
+            guard !key.isEmpty, !isRepeat, !trimmed.contains(where: \.isNewline) else { continue }
+            wanted.append((key, trimmed))
+        }
+        guard !wanted.isEmpty else { return [] }
+        return try await withClient { client in
+            let boxes = try await self.knownMailboxes(client: client)
+            var missing = wanted
+            var found: [MessageSummary] = []
+            for mailbox in Self.lookupOrder(boxes, limit: Self.lookupMailboxLimit) {
+                if missing.isEmpty { break }
+                let selected: IMAPSelectedMailbox
+                do {
+                    selected = try await client.select(mailbox, readOnly: true)
+                } catch PMailError.server {
+                    continue  // Gone since the last LIST, or not open to this account.
+                }
+                guard selected.exists > 0 else { continue }
+                var uids = Set<UInt32>()
+                for start in stride(from: 0, to: missing.count, by: 20) {
+                    let batch = missing[start..<min(start + 20, missing.count)]
+                    guard let search = IMAPSearchKey.any(batch.map { .header("Message-ID", $0.id) }) else { continue }
+                    uids.formUnion(try await client.uidSearch([search]))
+                }
+                guard !uids.isEmpty else { continue }
+                let summaries = try await self.summaries(of: uids.sorted(), in: mailbox, uidValidity: selected.uidValidity ?? 0,
+                                                         client: client)
+                // A HEADER search matches part of the field, so each message's own Message-ID decides.
+                let keys = Set(missing.map(\.key))
+                let matched = summaries.filter { $0.messageIDHeader.map { keys.contains(Self.messageIDKey($0)) } ?? false }
+                let foundKeys = Set(matched.compactMap { $0.messageIDHeader.map(Self.messageIDKey) })
+                found += matched
+                missing.removeAll { foundKeys.contains($0.key) }
+            }
+            return found
+        }
+    }
+
+    /// Where `findMessages` looks, in order: the inbox, the archive and All Mail, Sent, Drafts, then the account's own
+    /// folders as LIST gave them. Never Trash or Junk or the folders inside them, nor virtual folders of flagged or
+    /// important mail, which only repeat messages from elsewhere.
+    static func lookupOrder(_ boxes: [IMAPMailbox], limit: Int) -> [String] {
+        let roles = IMAPFolderRoles.assign(boxes)
+        let skipped = boxes.filter { roles[$0.name] == .trash || roles[$0.name] == .spam }
+        func isInsideSkipped(_ box: IMAPMailbox) -> Bool {
+            skipped.contains { other in
+                guard let delimiter = other.delimiter else { return false }
+                return box.name.hasPrefix(other.name + delimiter)
+            }
+        }
+        let selectable = boxes.filter(\.isSelectable)
+        var order = ["INBOX"]
+        for role in [FolderRole.archive, .allMail, .sent, .drafts] {
+            for box in selectable where roles[box.name] == role && !order.contains(box.name) { order.append(box.name) }
+        }
+        for box in selectable where roles[box.name] == nil && !order.contains(box.name) && !isInsideSkipped(box)
+            && !box.hasAttribute("\\Flagged") && !box.hasAttribute("\\Important") {
+            order.append(box.name)
+        }
+        return Array(order.prefix(max(1, limit)))
+    }
+
+    // MARK: Waiting for changes
+
+    /// True for IMAP: `waitForChange` listens with IDLE, and asks every minute on servers without it.
+    public nonisolated var pushesChanges: Bool { true }
+
+    /// Waits on a second connection of its own with the inbox open read-only, so other calls carry on meanwhile. With
+    /// IDLE (renewed every 25 minutes) it returns true as soon as the server reports new mail, an expunge or a flag
+    /// change; on a server without IDLE it asks with NOOP every `pollInterval` seconds and returns true when the
+    /// message count or flags change. Cancelling the task ends the wait and throws `.cancelled`. A connection that broke
+    /// is made again on the next call. Waits run one at a time.
+    public func waitForChange(timeout: TimeInterval) async throws -> Bool {
+        guard timeout > 0 else { return false }
+        let wait = min(timeout, Self.longestWait)
+        return try await oneWaitAtATime {
+            let deadline = ContinuousClock.now + .seconds(wait)
+            let closes = self.closeCount
+            // Each read may take as long as one IDLE, with time to spare.
+            let streamTimeout = min(wait, Self.longestIdle) + 120
+            do {
+                while true {
+                    if Task.isCancelled { throw PMailError.cancelled }
+                    // Made again here when the last one broke.
+                    let client = try await self.changeConnection(streamTimeout: streamTimeout)
+                    guard await client.hasCapability("IDLE") else {
+                        return try await self.pollForChange(on: client, until: deadline)
+                    }
+                    let start = ContinuousClock.now
+                    let roundEnd = min(deadline, start + .seconds(Self.longestIdle))
+                    if try await client.idle(until: roundEnd) { return true }
+                    let now = ContinuousClock.now
+                    if now >= deadline { return false }
+                    if now < roundEnd, now - start < .seconds(self.pollInterval) {
+                        // The server ended the IDLE straight away: ask now and then rather than again and again.
+                        return try await self.pollForChange(on: client, until: deadline)
+                    }
+                }
+            } catch {
+                // close() dropped the connection while it waited.
+                if self.closeCount != closes { throw PMailError.cancelled }
+                throw error
+            }
+        }
+    }
+
+    /// Waits for a change on a server without IDLE by asking with NOOP every `pollInterval` seconds: true once the
+    /// inbox's message count or a message's flags change, false at the deadline.
+    private func pollForChange(on client: IMAPClient, until deadline: ContinuousClock.Instant) async throws -> Bool {
+        var count = await client.selectedMailbox?.exists
+        while ContinuousClock.now < deadline {
+            let next = min(deadline, ContinuousClock.now + .seconds(max(pollInterval, 0.01)))
+            do {
+                try await Task.sleep(until: next, clock: .continuous)
+            } catch {
+                throw PMailError.cancelled
+            }
+            let responses = try await client.noop()
+            if responses.contains(where: { Self.reportsChange($0, knownCount: count) }) { return true }
+            count = await client.selectedMailbox?.exists
+        }
+        return false
+    }
+
+    /// Whether a response to NOOP says the inbox changed: a different message count, an expunge, or new flags.
+    static func reportsChange(_ response: IMAPUntaggedResponse, knownCount: Int?) -> Bool {
+        switch response {
+        case let .exists(count): count != knownCount
+        case .expunge, .fetch: true
+        default: false
+        }
+    }
+
+    /// The connection that waits for changes, signed in and with the inbox open read-only. It's made when there's none
+    /// or it has dropped, and made again when its reads can't wait as long as needed.
+    private func changeConnection(streamTimeout: TimeInterval) async throws -> IMAPClient {
+        let client: IMAPClient
+        if let current = changeClient, await current.isConnected,
+           !(connector is URLSessionConnector) || changeStreamTimeout >= streamTimeout {
+            client = current
+        } else {
+            if let current = changeClient { await current.disconnect() }
+            client = IMAPClient(connector: changeConnector(streamTimeout: streamTimeout))
+            // Kept before connecting, so close() can drop it while it connects.
+            changeClient = client
+            changeStreamTimeout = streamTimeout
+            try await connectAndSignIn(client)
+        }
+        if await client.selectedMailbox?.name != "INBOX" { try await client.select("INBOX", readOnly: true) }
+        guard changeClient === client else {
+            // close() was called meanwhile.
+            await client.disconnect()
+            throw PMailError.cancelled
+        }
+        return client
+    }
+
+    /// The service's connector, with reads that wait at least `streamTimeout` seconds when it's the network's (a
+    /// quiet IDLE mustn't look like a server that stopped answering).
+    private func changeConnector(streamTimeout: TimeInterval) -> any ByteStreamConnector {
+        guard var network = connector as? URLSessionConnector else { return connector }
+        network.timeout = max(network.timeout, streamTimeout)
+        return network
+    }
+
+    /// Runs `body` with no other wait in flight: they share one connection.
+    private func oneWaitAtATime<T: Sendable>(_ body: () async throws -> T) async throws -> T {
+        if isWaitingForChange {
+            await withCheckedContinuation { changeWaiters.append($0) }
+        } else {
+            isWaitingForChange = true
+        }
+        defer {
+            if changeWaiters.isEmpty { isWaitingForChange = false } else { changeWaiters.removeFirst().resume() }
+        }
+        return try await body()
+    }
+
+    /// Sets how often a server without IDLE is asked about the inbox, for tests.
+    func setPollInterval(_ seconds: TimeInterval) {
+        pollInterval = seconds
     }
 
     // MARK: Connection
@@ -488,10 +755,17 @@ public actor IMAPMailService: MailService {
         }
     }
 
-    /// Connects and signs in. On iCloud, a user name the server turns down is tried once more as the part before
-    /// the @ (or as the whole address), and whichever works is remembered.
+    /// Connects and signs in the main connection.
     private func openClient() async throws -> IMAPClient {
         let client = IMAPClient(connector: connector)
+        try await connectAndSignIn(client)
+        self.client = client
+        return client
+    }
+
+    /// Connects a client and signs it in. On iCloud, a user name the server turns down is tried once more as the part
+    /// before the @ (or as the whole address), and whichever works is remembered.
+    private func connectAndSignIn(_ client: IMAPClient) async throws {
         let names = usernameCandidates()
         for (index, name) in names.enumerated() {
             do {
@@ -501,8 +775,7 @@ public actor IMAPMailService: MailService {
                 }
                 try await client.signIn(credential.withUsername(name))
                 workingUsername = name
-                self.client = client
-                return client
+                return
             } catch PMailError.authenticationFailed where index + 1 < names.count {
                 continue
             } catch {
@@ -535,14 +808,15 @@ public actor IMAPMailService: MailService {
 
     /// The mailbox with a role, from the last LIST (listing first if there hasn't been one).
     private func mailboxName(for role: FolderRole, client: IMAPClient) async throws -> String? {
-        let boxes: [IMAPMailbox]
-        if let mailboxes {
-            boxes = mailboxes
-        } else {
-            boxes = try await client.listMailboxes()
-            mailboxes = boxes
-        }
-        return IMAPFolderRoles.assign(boxes).first { $0.value == role }?.key
+        IMAPFolderRoles.assign(try await knownMailboxes(client: client)).first { $0.value == role }?.key
+    }
+
+    /// The mailboxes from the last LIST, listing them first if there hasn't been one.
+    private func knownMailboxes(client: IMAPClient) async throws -> [IMAPMailbox] {
+        if let mailboxes { return mailboxes }
+        let boxes = try await client.listMailboxes()
+        mailboxes = boxes
+        return boxes
     }
 
     /// Runs `body` with no other operation in flight, so one operation's SELECT can't pull the mailbox out from
@@ -587,6 +861,42 @@ public actor IMAPMailService: MailService {
             !piece.isEmpty && piece.utf8.allSatisfy { $0 >= 0x30 && $0 <= 0x39 }
         }
     }
+
+    /// The UID after `uid`, staying put at the largest one there can be.
+    static func uid(after uid: UInt32) -> UInt32 {
+        uid < .max ? uid + 1 : uid
+    }
+
+    /// A summary's UID, from its ID (0 for an ID this service didn't make).
+    static func uid(of summary: MessageSummary) -> UInt32 {
+        IMAPMessageID(rawValue: summary.id)?.uid ?? 0
+    }
+
+    /// A Message-ID in a form for comparing: without angle brackets or space around it, in lowercase.
+    static func messageIDKey(_ id: String) -> String {
+        id.trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n")).lowercased()
+    }
+}
+
+/// Where `IMAPMailService.checkForNewMail` is up to in the inbox: its UIDVALIDITY and UIDNEXT, kept in a
+/// `MailSyncState` as "<uidvalidity>:<uidnext>".
+struct IMAPInboxState: Hashable {
+    var uidValidity: UInt32
+    var uidNext: UInt32
+
+    init(uidValidity: UInt32, uidNext: UInt32) {
+        self.uidValidity = uidValidity
+        self.uidNext = uidNext
+    }
+
+    /// Reads a state the IMAP service made; nil for anything else.
+    init?(_ state: MailSyncState) {
+        let fields = state.value.split(separator: ":", omittingEmptySubsequences: false)
+        guard fields.count >= 2, let uidValidity = UInt32(fields[0]), let uidNext = UInt32(fields[1]) else { return nil }
+        self.init(uidValidity: uidValidity, uidNext: uidNext)
+    }
+
+    var syncState: MailSyncState { MailSyncState("\(uidValidity):\(uidNext)") }
 }
 
 /// Which mailboxes are the special folders.
