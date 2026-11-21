@@ -173,7 +173,7 @@ import Testing
     }
 
     /// Special-use attributes that only come with extended LIST are added to the plain LIST's mailboxes, and a mailbox
-    /// only the extended answer names isn't added.
+    /// only the extended answer names is listed too.
     @Test func extendedListAddsSpecialUseAttributes() async throws {
         let capabilities = IMAPScript.capabilities + " LIST-EXTENDED"
         let stream = ScriptedByteStream(greeting: IMAPScript.greeting(capabilities), script: [
@@ -192,7 +192,8 @@ import Testing
         let client = try await connectedClient(stream)
         try await client.signIn(.password(username: "pug@example.com", password: "secret"))
         let mailboxes = try await client.listMailboxes()
-        #expect(mailboxes.map(\.name) == ["INBOX", "Outgoing", "Bin"])
+        #expect(mailboxes.map(\.name) == ["INBOX", "Outgoing", "Bin", "Somewhere else"])
+        #expect(mailboxes[3].specialUseRole == .archive)
         #expect(mailboxes[1].attributes == ["\\HasNoChildren", "\\Sent"] && mailboxes[1].specialUseRole == .sent)
         #expect(mailboxes[2].specialUseRole == .trash)
         #expect(stream.mismatches.isEmpty && stream.isFinished)

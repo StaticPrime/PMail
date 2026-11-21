@@ -259,6 +259,8 @@ import Testing
         let stream = ScriptedByteStream(greeting: Script.greeting(), script: [
             Script.signIn("A1"),
             .expect(#"A2 LIST "" "*""#, reply: Script.lines(#"* LIST () "/" "INBOX""#, "A2 OK Done")),
+            // The server offers special-use folders but marked none, so it's asked for them.
+            .expect(#"A3 LIST "" "*" RETURN (SPECIAL-USE)"#, reply: Script.lines(#"* LIST () "/" "INBOX""#, "A3 OK Done")),
         ])
         let harness = IMAPHarness([stream])
         await #expect(throws: PMailError.notSupported("This account has no Archive folder.")) {
@@ -330,6 +332,8 @@ import Testing
         let stream = ScriptedByteStream(greeting: Script.greeting(), script: [
             Script.signIn("A1"),
             .expect(#"A2 LIST "" "*""#, reply: Script.lines(#"* LIST () "/" "INBOX""#, "A2 OK Done")),
+            // The server offers special-use folders but marked none, so it's asked for them.
+            .expect(#"A3 LIST "" "*" RETURN (SPECIAL-USE)"#, reply: Script.lines(#"* LIST () "/" "INBOX""#, "A3 OK Done")),
         ])
         let harness = IMAPHarness([stream])
         try await harness.service.send(OutgoingMessage(from: Self.pug, to: [Self.alex]))

@@ -246,17 +246,18 @@ public actor IMAPClient {
             for case let .list(mailbox) in result.untagged where seen.insert(mailbox.name).inserted {
                 mailboxes.append(mailbox)
             }
-            // Most servers with special-use attributes (RFC 6154) send them with the plain LIST. One that leaves them
-            // out is asked for them with extended LIST, where it has it, and they're added to what's there.
+            // Most servers with special-use folders (RFC 6154) mark them in the plain LIST. One that offers them but
+            // left the marks out is asked for them too; its answer adds marks and folders, and never takes any away.
             let hasRoles = mailboxes.contains { !$0.isInbox && $0.specialUseRole != nil }
-            if !hasRoles, self.capabilities.contains("SPECIAL-USE"), self.capabilities.contains("LIST-EXTENDED") {
+            if !hasRoles, self.capabilities.contains("SPECIAL-USE") {
                 let extended = try await self.run([.text("LIST \"\" \"*\" RETURN (SPECIAL-USE)")])
                 if extended.status.status == .ok {
-                    var attributes: [String: [String]] = [:]
-                    for case let .list(mailbox) in extended.untagged { attributes[mailbox.name, default: []] += mailbox.attributes }
-                    for index in mailboxes.indices {
-                        let more = (attributes[mailboxes[index].name] ?? []).filter { !mailboxes[index].hasAttribute($0) }
-                        mailboxes[index].attributes += more
+                    for case let .list(mailbox) in extended.untagged {
+                        if let index = mailboxes.firstIndex(where: { $0.name == mailbox.name }) {
+                            mailboxes[index].attributes += mailbox.attributes.filter { !mailboxes[index].hasAttribute($0) }
+                        } else if seen.insert(mailbox.name).inserted {
+                            mailboxes.append(mailbox)
+                        }
                     }
                 }
             }
