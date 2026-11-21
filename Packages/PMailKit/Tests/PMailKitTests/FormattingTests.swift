@@ -22,6 +22,14 @@ import Testing
         #expect(formatting.listDate(Self.date("2024-03-04T10:42:00Z")) == "3/4/24")
     }
 
+    @Test func laterDatesSayWhen() {
+        #expect(formatting.laterDate(Self.date("2026-11-21T18:00:00Z")).plainSpaces == "Today, 6:00 PM")
+        #expect(formatting.laterDate(Self.date("2026-11-22T08:00:00Z")).plainSpaces == "Tomorrow, 8:00 AM")
+        #expect(formatting.laterDate(Self.date("2026-11-24T08:00:00Z")).plainSpaces == "Tue, 8:00 AM")
+        #expect(formatting.laterDate(Self.date("2026-12-03T08:00:00Z")).plainSpaces == "Dec 3, 8:00 AM")
+        #expect(formatting.laterDate(Self.date("2027-01-04T08:00:00Z")).plainSpaces == "Jan 4, 2027, 8:00 AM")
+    }
+
     @Test func messageDatesSayHowLongAgo() {
         #expect(formatting.messageDate(Self.date("2026-11-21T13:00:00Z")).hasSuffix("(2 hours ago)"))
         #expect(!formatting.messageDate(Self.date("2025-01-01T13:00:00Z")).contains("ago"))

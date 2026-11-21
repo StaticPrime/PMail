@@ -24,6 +24,21 @@ public struct MailFormatting: Sendable {
         return formatter("yyMd").string(from: date)
     }
 
+    /// A time to come, for snoozes and scheduled messages: "Today, 6:00 PM", "Tomorrow, 8:00 AM", "Sat, 8:00 AM" within
+    /// a week, else "Dec 3, 8:00 AM" (with the year when it isn't this year).
+    public func laterDate(_ date: Date) -> String {
+        let today = now()
+        let time = formatter("jmm").string(from: date)
+        if calendar.isDate(date, inSameDayAs: today) { return "Today, \(time)" }
+        if let tomorrow = calendar.date(byAdding: .day, value: 1, to: today), calendar.isDate(date, inSameDayAs: tomorrow) {
+            return "Tomorrow, \(time)"
+        }
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: today), to: calendar.startOfDay(for: date)).day ?? 99
+        if days > 0, days < 7 { return "\(formatter("EEE").string(from: date)), \(time)" }
+        let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: today)
+        return "\(formatter(sameYear ? "MMMd" : "yMMMd").string(from: date)), \(time)"
+    }
+
     /// A message's full date, with how long ago: "Nov 21, 2026, 10:42 AM (2 hours ago)".
     public func messageDate(_ date: Date) -> String {
         let full = formatter("yMMMdjmm").string(from: date)
