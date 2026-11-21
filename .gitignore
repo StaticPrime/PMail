@@ -1,0 +1,17 @@
+# Build products
+build/
+.build/
+DerivedData/
+*.xcresult
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+.swiftpm/
+
+# macOS
+.DS_Store
+
+# This Mac's signing for debug builds and its sign-in client IDs (see Config/Debug.xcconfig)
+Config/Signing.xcconfig
+Config/Secrets.xcconfig
