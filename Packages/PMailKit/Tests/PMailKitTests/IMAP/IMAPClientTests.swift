@@ -151,19 +151,65 @@ import Testing
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 
+    /// A server offering extended LIST that answers it OK with no mailboxes at all still has every folder listed, with
+    /// roles from the usual names.
+    @Test func anEmptyExtendedListLosesNoFolders() async throws {
+        let capabilities = IMAPScript.capabilities + " LIST-EXTENDED"
+        let plain = ["INBOX", "Sent Messages", "Drafts", "Deleted Messages", "Junk", "Archive", "Notes"]
+            .map { #"* LIST (\HasNoChildren) "/" ""# + $0 + #"""# }
+        let stream = ScriptedByteStream(greeting: IMAPScript.greeting(capabilities), script: [
+            IMAPScript.signIn("A1", capabilities: capabilities),
+            .expect(#"A2 LIST "" "*""#, reply: (plain + ["A2 OK LIST completed"]).map { $0 + "\r\n" }.joined()),
+            .expect(#"A3 LIST "" "*" RETURN (SPECIAL-USE)"#, reply: "A3 OK LIST completed\r\n"),
+        ])
+        let client = try await connectedClient(stream)
+        try await client.signIn(.password(username: "pug@example.com", password: "secret"))
+        let mailboxes = try await client.listMailboxes()
+        #expect(mailboxes.map(\.name) == ["INBOX", "Sent Messages", "Drafts", "Deleted Messages", "Junk", "Archive", "Notes"])
+        let roles = IMAPFolderRoles.assign(mailboxes)
+        #expect(roles["Sent Messages"] == .sent && roles["Drafts"] == .drafts && roles["Deleted Messages"] == .trash)
+        #expect(roles["Junk"] == .spam && roles["Archive"] == .archive && roles["Notes"] == nil)
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
+
+    /// Special-use attributes that only come with extended LIST are added to the plain LIST's mailboxes, and a mailbox
+    /// only the extended answer names isn't added.
+    @Test func extendedListAddsSpecialUseAttributes() async throws {
+        let capabilities = IMAPScript.capabilities + " LIST-EXTENDED"
+        let stream = ScriptedByteStream(greeting: IMAPScript.greeting(capabilities), script: [
+            IMAPScript.signIn("A1", capabilities: capabilities),
+            .expect(#"A2 LIST "" "*""#, reply: IMAPScript.lines(
+                #"* LIST (\HasNoChildren) "/" "INBOX""#,
+                #"* LIST (\HasNoChildren) "/" "Outgoing""#,
+                #"* LIST (\HasNoChildren) "/" "Bin""#,
+                "A2 OK Done")),
+            .expect(#"A3 LIST "" "*" RETURN (SPECIAL-USE)"#, reply: IMAPScript.lines(
+                #"* LIST (\HasNoChildren \Sent) "/" "Outgoing""#,
+                #"* LIST (\HasNoChildren \Trash) "/" "Bin""#,
+                #"* LIST (\HasNoChildren \Archive) "/" "Somewhere else""#,
+                "A3 OK Done")),
+        ])
+        let client = try await connectedClient(stream)
+        try await client.signIn(.password(username: "pug@example.com", password: "secret"))
+        let mailboxes = try await client.listMailboxes()
+        #expect(mailboxes.map(\.name) == ["INBOX", "Outgoing", "Bin"])
+        #expect(mailboxes[1].attributes == ["\\HasNoChildren", "\\Sent"] && mailboxes[1].specialUseRole == .sent)
+        #expect(mailboxes[2].specialUseRole == .trash)
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
+
     @Test func listStatusSelectAndExamine() async throws {
         let stream = ScriptedByteStream(greeting: IMAPScript.greeting(), script: [
             IMAPScript.signIn("A1"),
-            .expect(#"A2 LIST "" "*" RETURN (SPECIAL-USE)"#, reply: "A2 BAD Unknown argument RETURN\r\n"),
-            .expect(#"A3 LIST "" "*""#, reply: IMAPScript.lines(
+            .expect(#"A2 LIST "" "*""#, reply: IMAPScript.lines(
                 #"* LIST (\HasChildren) "/" "INBOX""#,
                 #"* LIST (\HasNoChildren \Sent) "/" "Sent""#,
                 #"* LIST (\HasNoChildren) "/" "Projects/Caf&AOk-""#,
                 #"* LIST (\HasChildren) "/" "INBOX""#,
-                "A3 OK Done")),
-            .expect(#"A4 STATUS "Projects/Caf&AOk-" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)"#, reply: IMAPScript.lines(
-                #"* STATUS "Projects/Caf&AOk-" (MESSAGES 231 UNSEEN 4 UIDNEXT 44292 UIDVALIDITY 1)"#, "A4 OK Done")),
-            .expect(#"A5 SELECT "INBOX""#, reply: IMAPScript.lines(
+                "A2 OK Done")),
+            .expect(#"A3 STATUS "Projects/Caf&AOk-" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)"#, reply: IMAPScript.lines(
+                #"* STATUS "Projects/Caf&AOk-" (MESSAGES 231 UNSEEN 4 UIDNEXT 44292 UIDVALIDITY 1)"#, "A3 OK Done")),
+            .expect(#"A4 SELECT "INBOX""#, reply: IMAPScript.lines(
                 #"* FLAGS (\Answered \Flagged \Deleted \Seen \Draft)"#,
                 #"* OK [PERMANENTFLAGS (\Deleted \Seen \*)] Limited"#,
                 "* 172 EXISTS",
@@ -171,10 +217,10 @@ import Testing
                 "* OK [UNSEEN 12] Message 12 is first unseen",
                 "* OK [UIDVALIDITY 3857529045] UIDs valid",
                 "* OK [UIDNEXT 4392] Predicted next UID",
-                "A5 OK [READ-WRITE] SELECT completed")),
-            .expect(#"A6 EXAMINE "Projects/Caf&AOk-""#, reply: IMAPScript.lines("* 231 EXISTS", "* OK [UIDVALIDITY 1] Ok",
-                                                                               "A6 OK [READ-ONLY] Done")),
-            .expect(#"A7 SELECT "Nowhere""#, reply: "A7 NO Mailbox doesn't exist\r\n"),
+                "A4 OK [READ-WRITE] SELECT completed")),
+            .expect(#"A5 EXAMINE "Projects/Caf&AOk-""#, reply: IMAPScript.lines("* 231 EXISTS", "* OK [UIDVALIDITY 1] Ok",
+                                                                               "A5 OK [READ-ONLY] Done")),
+            .expect(#"A6 SELECT "Nowhere""#, reply: "A6 NO Mailbox doesn't exist\r\n"),
         ])
         let client = try await connectedClient(stream)
         try await client.signIn(.password(username: "pug@example.com", password: "secret"))

@@ -88,7 +88,7 @@ enum IMAPScript {
     ]
 
     static func list(_ tag: String, extra: [String] = []) -> Step {
-        .expect("\(tag) LIST \"\" \"*\" RETURN (SPECIAL-USE)",
+        .expect("\(tag) LIST \"\" \"*\"",
                 reply: (mailboxLines + extra).map { $0 + "\r\n" }.joined() + "\(tag) OK LIST completed\r\n")
     }
 

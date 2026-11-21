@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// An IMAP4rev1 client (RFC 3501, with the extensions mail servers commonly offer): it connects, protects the
 /// connection, signs in, and runs commands one at a time on a single connection.
@@ -27,6 +28,9 @@ public actor IMAPClient {
         /// Drops the connection if the server doesn't finish the IDLE once asked to.
         var graceTimer: Task<Void, Never>?
     }
+
+    /// What the client logs (debug level, mailbox names kept private): what LIST found, for diagnosing a server.
+    static let log = Logger(subsystem: "com.pugglesoft.PMail", category: "IMAP")
 
     /// The fetch items for a message list row: flags, dates, size, envelope, structure, and the threading headers.
     public static let summaryItems = "UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE "
@@ -233,21 +237,34 @@ public actor IMAPClient {
     /// Every mailbox, with special-use attributes (\Sent, \Trash…) when the server offers them.
     public func listMailboxes() async throws -> [IMAPMailbox] {
         try await exclusively {
-            var result: CommandResult
-            if self.capabilities.contains("SPECIAL-USE") {
-                result = try await self.run([.text("LIST \"\" \"*\" RETURN (SPECIAL-USE)")])
-                // A server can offer special-use attributes without extended LIST, and turn the RETURN option down.
-                if result.status.status != .ok { result = try await self.run([.text("LIST \"\" \"*\"")]) }
-            } else {
-                result = try await self.run([.text("LIST \"\" \"*\"")])
-            }
+            // Which mailboxes there are always comes from the plain LIST: a server can answer the extended form OK
+            // and list nothing at all.
+            let result = try await self.run([.text("LIST \"\" \"*\"")])
             try self.check(result)
             var seen = Set<String>()
             var mailboxes: [IMAPMailbox] = []
             for case let .list(mailbox) in result.untagged where seen.insert(mailbox.name).inserted {
                 mailboxes.append(mailbox)
-                self.serverNames[mailbox.name] = mailbox.rawName
             }
+            // Most servers with special-use attributes (RFC 6154) send them with the plain LIST. One that leaves them
+            // out is asked for them with extended LIST, where it has it, and they're added to what's there.
+            let hasRoles = mailboxes.contains { !$0.isInbox && $0.specialUseRole != nil }
+            if !hasRoles, self.capabilities.contains("SPECIAL-USE"), self.capabilities.contains("LIST-EXTENDED") {
+                let extended = try await self.run([.text("LIST \"\" \"*\" RETURN (SPECIAL-USE)")])
+                if extended.status.status == .ok {
+                    var attributes: [String: [String]] = [:]
+                    for case let .list(mailbox) in extended.untagged { attributes[mailbox.name, default: []] += mailbox.attributes }
+                    for index in mailboxes.indices {
+                        let more = (attributes[mailboxes[index].name] ?? []).filter { !mailboxes[index].hasAttribute($0) }
+                        mailboxes[index].attributes += more
+                    }
+                }
+            }
+            for mailbox in mailboxes { self.serverNames[mailbox.name] = mailbox.rawName }
+            Self.log.debug("""
+                LIST found \(mailboxes.count) mailboxes on a server offering \(self.capabilities.sorted().joined(separator: " "), privacy: .public): \
+                \(mailboxes.map { ([$0.name] + $0.attributes).joined(separator: " ") }.joined(separator: "; "), privacy: .private)
+                """)
             return mailboxes
         }
     }
