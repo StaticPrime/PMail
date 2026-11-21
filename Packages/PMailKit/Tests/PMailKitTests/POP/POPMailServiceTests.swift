@@ -125,11 +125,11 @@ private final class RecordingSender: MailSending, @unchecked Sendable {
         let second = session(uids: ["a", "b", "c"], retrieving: [])
         let reopened = service(folder, [second])
         let folders = try await reopened.loadFolders()
-        #expect(folders.map(\.id) == ["INBOX", "pmail:starred", "Sent", "Drafts", "Trash"])
-        #expect(folders.map(\.role) == [.inbox, .starred, .sent, .drafts, .trash])
+        #expect(folders.map(\.id) == ["INBOX", "pmail:starred", "Sent", "Drafts", "Archive", "Junk", "Trash"])
+        #expect(folders.map(\.role) == [.inbox, .starred, .sent, .drafts, .archive, .spam, .trash])
         #expect(folders[0].unreadCount == 0 && folders[0].totalCount == 2)
         #expect(folders[1].totalCount == 1)
-        #expect(folders[4].totalCount == 1)
+        #expect(folders[6].totalCount == 1, "the trashed message")
         let starred = try await reopened.listConversations(ListRequest(folderID: POPMailService.starredID))
         #expect(starred.conversations.map(\.id) == ["<m2@example.com>"])
         #expect(starred.conversations.first?.isStarred == true)
@@ -250,8 +250,7 @@ private final class RecordingSender: MailSending, @unchecked Sendable {
             try await pop.loadMessage(MessageSummary(id: "local:missing"))
         }
 
-        let unsupported: [MailAction] = [.archive, .markSpam, .notSpam, .addLabel("x"), .removeLabel("x"), .markImportant,
-                                         .move(toFolderID: "Elsewhere")]
+        let unsupported: [MailAction] = [.addLabel("x"), .removeLabel("x"), .markImportant, .move(toFolderID: "Elsewhere")]
         for action in unsupported {
             await #expect(throws: PMailError.self) { try await pop.perform(action, on: [summary]) }
         }
@@ -259,9 +258,18 @@ private final class RecordingSender: MailSending, @unchecked Sendable {
         #expect(await store.summary(for: "local:file")?.folderID == "Sent")
         try await pop.perform(.moveToInbox, on: [summary])
         #expect(await store.summary(for: "local:file")?.folderID == "INBOX")
+        // Archive and Junk are kept here too; Not spam brings a message back to the inbox.
+        try await pop.perform(.archive, on: [summary])
+        #expect(await store.summary(for: "local:file")?.folderID == "Archive")
+        try await pop.perform(.markSpam, on: [summary])
+        #expect(await store.summary(for: "local:file")?.folderID == "Junk")
+        let allMail = try await pop.listConversations(ListRequest(folderID: nil, pageSize: 50))
+        #expect(!allMail.conversations.contains { $0.messages.contains { $0.id == "local:file" } }, "junk stays out of All Mail")
+        try await pop.perform(.notSpam, on: [summary])
+        #expect(await store.summary(for: "local:file")?.folderID == "INBOX")
 
         #expect(pop.capabilities == MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: false, hasInboxTabs: false,
-                                                     searchesOnServer: false, canArchive: false, supportsDrafts: true, canMove: true))
+                                                     searchesOnServer: false, canArchive: true, supportsDrafts: true, canMove: true))
         #expect(pop.inboxTabs.isEmpty)
     }
 

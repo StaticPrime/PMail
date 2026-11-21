@@ -1,16 +1,19 @@
 import Foundation
 
-/// Sent, Drafts and Trash kept on this Mac, for an IMAP account whose server has no folder for them (an iCloud account
-/// that has only ever had an inbox, say). The messages live in a `LocalMailStore`. The account's service lists, opens
+/// Sent, Drafts, Archive, Junk and Trash kept on this Mac, for an IMAP account whose server has no folder for them (an
+/// iCloud account that has only ever had an inbox, say). The messages live in a `LocalMailStore`. The account's service lists, opens
 /// and changes them like its own, and uploads one to the server when it's moved to a server folder.
 public struct LocalFolders: Sendable {
     public static let sentID = "pmail:sent"
     public static let draftsID = "pmail:drafts"
     public static let trashID = "pmail:trash"
+    public static let archiveID = "pmail:archive"
+    public static let junkID = "pmail:junk"
 
     /// Each folder that can be kept here: the role it stands in for, its ID and its name.
     static let all: [(role: FolderRole, id: String, name: String)] = [
-        (.sent, sentID, "Sent"), (.drafts, draftsID, "Drafts"), (.trash, trashID, "Trash"),
+        (.sent, sentID, "Sent"), (.drafts, draftsID, "Drafts"), (.archive, archiveID, "Archive"), (.spam, junkID, "Junk"),
+        (.trash, trashID, "Trash"),
     ]
 
     public let store: LocalMailStore
@@ -89,6 +92,17 @@ public struct LocalFolders: Sendable {
             messages.append(message)
         }
         return messages
+    }
+
+    /// Kept messages whose Message-ID is among `keys` (compared as `key` gives them), outside the Trash and Junk: a
+    /// conversation snoozed into the Archive kept here, say.
+    func find(_ keys: Set<String>, key: (String) -> String) async -> [MessageSummary] {
+        await store.allSummaries().filter { summary in
+            guard summary.folderID != Self.trashID, summary.folderID != Self.junkID, let header = summary.messageIDHeader else {
+                return false
+            }
+            return keys.contains(key(header))
+        }
     }
 
     /// Saves a draft in the kept Drafts, replacing the earlier version when that was kept here too.

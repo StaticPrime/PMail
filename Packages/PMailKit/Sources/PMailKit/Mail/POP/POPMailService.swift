@@ -1,8 +1,8 @@
 import Foundation
 
 /// A POP account's mail. The server only holds the inbox, so PMail downloads new messages into a `LocalMailStore`
-/// (leaving them on the server) and keeps everything else there too: flags, Sent, Drafts and Trash. A Starred
-/// folder shows starred messages from every folder.
+/// (leaving them on the server) and keeps everything else there too: flags, Sent, Drafts, Archive, Junk and Trash. A
+/// Starred folder shows starred messages from every folder.
 ///
 /// Message IDs are "pop:" plus the server's unique ID (UIDL) for downloaded mail, and "local:" or "draft:" IDs for
 /// mail written on this Mac.
@@ -12,9 +12,13 @@ public actor POPMailService: MailService {
     public static let sentID = "Sent"
     public static let draftsID = "Drafts"
     public static let trashID = "Trash"
+    public static let archiveID = "Archive"
+    public static let junkID = "Junk"
 
     /// The folders messages can be moved between (Starred only shows messages, it doesn't hold them).
-    private static let localFolderIDs: Set<String> = [inboxID, sentID, draftsID, trashID]
+    private static let localFolderIDs: Set<String> = [inboxID, sentID, draftsID, archiveID, junkID, trashID]
+    /// Folders whose messages stay out of All Mail, Starred and conversations opened from elsewhere.
+    private static let setAsideIDs: Set<String> = [junkID, trashID]
     private static let firstSyncKey = "pop.firstSyncDone"
     /// The most messages one check for new mail returns (the newest).
     static let newMailLimit = 50
@@ -42,7 +46,7 @@ public actor POPMailService: MailService {
 
     public nonisolated var capabilities: MailCapabilities {
         MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: false, hasInboxTabs: false, searchesOnServer: false,
-                         canArchive: false, supportsDrafts: true, canMove: true)
+                         canArchive: true, supportsDrafts: true, canMove: true)
     }
 
     public nonisolated var inboxTabs: [InboxTab] { [] }
@@ -53,7 +57,8 @@ public actor POPMailService: MailService {
         let starred = await store.starredSummaries()
         var folders: [MailFolder] = []
         for (id, name, role) in [(Self.inboxID, "Inbox", FolderRole.inbox), (Self.starredID, "Starred", .starred),
-                                 (Self.sentID, "Sent", .sent), (Self.draftsID, "Drafts", .drafts), (Self.trashID, "Trash", .trash)] {
+                                 (Self.sentID, "Sent", .sent), (Self.draftsID, "Drafts", .drafts), (Self.archiveID, "Archive", .archive),
+                                 (Self.junkID, "Junk", .spam), (Self.trashID, "Trash", .trash)] {
             if id == Self.starredID {
                 folders.append(MailFolder(id: id, name: name, role: role, unreadCount: starred.filter(\.isUnread).count,
                                           totalCount: starred.count))
@@ -73,7 +78,7 @@ public actor POPMailService: MailService {
         var summaries: [MessageSummary]
         if let query = request.query?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty {
             if request.folderID == Self.starredID {
-                summaries = await store.search(query).filter { $0.isStarred && $0.folderID != Self.trashID }
+                summaries = await store.search(query).filter { $0.isStarred && !Self.setAsideIDs.contains($0.folderID ?? "") }
             } else {
                 summaries = await store.search(query, in: request.folderID)
             }
@@ -85,7 +90,7 @@ public actor POPMailService: MailService {
             case Self.starredID?:
                 summaries = await store.starredSummaries()
             case nil:
-                summaries = await store.allSummaries().filter { $0.folderID != Self.trashID }
+                summaries = await store.allSummaries().filter { !Self.setAsideIDs.contains($0.folderID ?? "") }
             case let folderID?:
                 summaries = await store.summaries(in: folderID)
             }
@@ -173,7 +178,7 @@ public actor POPMailService: MailService {
         let wanted = Set(messageIDs.map(Self.messageIDKey).filter { !$0.isEmpty })
         guard !wanted.isEmpty else { return [] }
         return await store.allSummaries().filter { summary in
-            guard summary.folderID != Self.trashID, let header = summary.messageIDHeader else { return false }
+            guard !Self.setAsideIDs.contains(summary.folderID ?? ""), let header = summary.messageIDHeader else { return false }
             return wanted.contains(Self.messageIDKey(header))
         }
     }
@@ -190,8 +195,11 @@ public actor POPMailService: MailService {
 
     public func loadConversation(id: String, hint: Conversation?) async throws -> [MailMessage] {
         let hintIDs = hint?.messages.map(\.id) ?? []
-        let showTrash = !hintIDs.isEmpty && (hint?.messages.allSatisfy { $0.folderID == Self.trashID } ?? false)
-        var summaries = await store.allSummaries().filter { $0.threadID == id && (showTrash || $0.folderID != Self.trashID) }
+        // A conversation opened from Trash or Junk shows what's there; one opened elsewhere leaves those out.
+        let showSetAside = !hintIDs.isEmpty && (hint?.messages.allSatisfy { Self.setAsideIDs.contains($0.folderID ?? "") } ?? false)
+        var summaries = await store.allSummaries().filter {
+            $0.threadID == id && (showSetAside || !Self.setAsideIDs.contains($0.folderID ?? ""))
+        }
         for hintID in hintIDs where !summaries.contains(where: { $0.id == hintID }) {
             if let summary = await store.summary(for: hintID) { summaries.append(summary) }
         }
@@ -235,10 +243,9 @@ public actor POPMailService: MailService {
                 throw PMailError.notSupported("POP accounts can’t move mail there.")
             }
             try await store.move(ids: ids, to: folderID)
-        case .archive:
-            throw PMailError.notSupported("POP accounts don’t have an archive.")
-        case .markSpam, .notSpam:
-            throw PMailError.notSupported("POP accounts don’t have a junk folder.")
+        case .archive: try await store.move(ids: ids, to: Self.archiveID)
+        case .markSpam: try await store.move(ids: ids, to: Self.junkID)
+        case .notSpam: try await store.move(ids: ids, to: Self.inboxID)
         case .addLabel, .removeLabel:
             throw PMailError.notSupported("POP accounts don’t use labels.")
         case .markImportant, .markNotImportant:

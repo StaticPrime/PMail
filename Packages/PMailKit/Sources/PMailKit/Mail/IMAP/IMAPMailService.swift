@@ -33,8 +33,9 @@ public struct IMAPMessageID: RawRepresentable, Sendable, Hashable {
 /// to have dropped (the server timed it out, the network changed), it connects again and tries once more. Waiting
 /// for changes (IMAP IDLE) happens on a second connection of its own, so it never holds the other calls up.
 ///
-/// Given a local store, it keeps Sent, Drafts and Trash on this Mac when the server has no folder for them: sent
-/// copies and drafts are saved there, and deleted messages are copied there before they leave the server.
+/// Given a local store, it keeps Sent, Drafts, Archive, Junk and Trash on this Mac when the server has no folder for
+/// them: sent copies and drafts are saved there, and archived, junk or deleted messages are copied there before they
+/// leave the server.
 public actor IMAPMailService: MailService {
     /// The ID of the virtual folder that lists the inbox's starred (\Flagged) messages.
     public static let starredFolderID = "pmail:starred"
@@ -397,20 +398,20 @@ public actor IMAPMailService: MailService {
     private func destination(for action: MailAction, client: IMAPClient) async throws -> String? {
         switch action {
         case .archive:
-            guard let archive = try await mailboxName(for: .archive, client: client) else {
-                throw PMailError.notSupported("This account has no Archive folder.")
-            }
-            return archive
+            if let archive = try await mailboxName(for: .archive, client: client) { return archive }
+            // A server without an Archive: archived mail goes to the Archive kept on this Mac.
+            guard localFolders != nil else { throw PMailError.notSupported("This account has no Archive folder.") }
+            return LocalFolders.archiveID
         case .trash:
             if let trash = try await mailboxName(for: .trash, client: client) { return trash }
             // A server without a Trash: deleted mail goes to the Trash kept on this Mac.
             guard localFolders != nil else { throw PMailError.notSupported("This account has no Trash folder.") }
             return LocalFolders.trashID
         case .markSpam:
-            guard let junk = try await mailboxName(for: .spam, client: client) else {
-                throw PMailError.notSupported("This account has no Junk folder.")
-            }
-            return junk
+            if let junk = try await mailboxName(for: .spam, client: client) { return junk }
+            // A server without a Junk folder: junk goes to the Junk kept on this Mac.
+            guard localFolders != nil else { throw PMailError.notSupported("This account has no Junk folder.") }
+            return LocalFolders.junkID
         case .moveToInbox, .notSpam:
             return "INBOX"
         case let .move(folderID):
@@ -503,15 +504,17 @@ public actor IMAPMailService: MailService {
         case .moveToInbox, .notSpam:
             try await upload(ids, to: "INBOX")
         case .archive:
-            guard let archive = try await serverMailbox(for: .archive) else {
-                throw PMailError.notSupported("This account has no Archive folder.")
+            if let archive = try await serverMailbox(for: .archive) {
+                try await upload(ids, to: archive)
+            } else {
+                try await store.move(ids: ids, to: LocalFolders.archiveID)
             }
-            try await upload(ids, to: archive)
         case .markSpam:
-            guard let junk = try await serverMailbox(for: .spam) else {
-                throw PMailError.notSupported("This account has no Junk folder.")
+            if let junk = try await serverMailbox(for: .spam) {
+                try await upload(ids, to: junk)
+            } else {
+                try await store.move(ids: ids, to: LocalFolders.junkID)
             }
-            try await upload(ids, to: junk)
         case let .move(folderID):
             if LocalFolders.contains(folderID) {
                 try await store.move(ids: ids, to: folderID)
@@ -703,10 +706,19 @@ public actor IMAPMailService: MailService {
             wanted.append((key, trimmed))
         }
         guard !wanted.isEmpty else { return [] }
+        // Messages kept on this Mac (snoozed into the Archive kept here, say) are found without the server.
+        var kept: [MessageSummary] = []
+        if let local = localFolders {
+            kept = await local.find(Set(wanted.map(\.key)), key: Self.messageIDKey)
+            let keptKeys = Set(kept.compactMap { $0.messageIDHeader.map(Self.messageIDKey) })
+            wanted.removeAll { keptKeys.contains($0.key) }
+        }
+        guard !wanted.isEmpty else { return kept }
+        let alsoKept = kept
         return try await withClient { client in
             let boxes = try await self.knownMailboxes(client: client)
             var missing = wanted
-            var found: [MessageSummary] = []
+            var found: [MessageSummary] = alsoKept
             for mailbox in Self.lookupOrder(boxes, limit: Self.lookupMailboxLimit) {
                 if missing.isEmpty { break }
                 let selected: IMAPSelectedMailbox
