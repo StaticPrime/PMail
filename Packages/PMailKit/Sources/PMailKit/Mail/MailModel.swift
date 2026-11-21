@@ -153,7 +153,7 @@ public struct MessageSummary: Codable, Sendable, Identifiable, Hashable {
 }
 
 /// Messages that belong together: an original and its replies, oldest first.
-public struct Conversation: Sendable, Identifiable, Hashable {
+public struct Conversation: Codable, Sendable, Identifiable, Hashable {
     public var id: String
     /// The conversation's messages that this listing has, oldest first.
     public var messages: [MessageSummary]
@@ -205,7 +205,7 @@ public struct Conversation: Sendable, Identifiable, Hashable {
 }
 
 /// One page of a message list.
-public struct ConversationPage: Sendable {
+public struct ConversationPage: Codable, Sendable {
     public var conversations: [Conversation]
     /// About how many conversations (or messages) the whole list has, for "1–50 of 2,345". Nil when unknown.
     public var totalCount: Int?
@@ -266,7 +266,7 @@ public enum MailAction: Sendable, Hashable {
 }
 
 /// A whole message: its summary, body and attachments.
-public struct MailMessage: Sendable, Identifiable, Hashable {
+public struct MailMessage: Codable, Sendable, Identifiable, Hashable {
     public var summary: MessageSummary
     public var replyTo: [MailAddress]
     public var bcc: [MailAddress]
@@ -299,7 +299,7 @@ public struct MailMessage: Sendable, Identifiable, Hashable {
 }
 
 /// A file attached to a message (or a picture inside it).
-public struct Attachment: Sendable, Identifiable, Hashable {
+public struct Attachment: Codable, Sendable, Identifiable, Hashable {
     /// The service's ID for it (a MIME part number, an attachment ID).
     public var id: String
     public var filename: String
@@ -323,7 +323,7 @@ public struct Attachment: Sendable, Identifiable, Hashable {
 }
 
 /// A message to send (or save as a draft).
-public struct OutgoingMessage: Sendable, Hashable {
+public struct OutgoingMessage: Codable, Sendable, Hashable {
     public var from: MailAddress
     public var to: [MailAddress]
     public var cc: [MailAddress]
@@ -375,7 +375,7 @@ public struct OutgoingMessage: Sendable, Hashable {
 }
 
 /// A file to attach to an outgoing message.
-public struct OutgoingAttachment: Sendable, Hashable {
+public struct OutgoingAttachment: Codable, Sendable, Hashable {
     public var filename: String
     public var mimeType: String
     public var data: Data

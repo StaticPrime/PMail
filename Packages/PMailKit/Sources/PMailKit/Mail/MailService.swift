@@ -39,6 +39,62 @@ public protocol MailService: AnyObject, Sendable {
 
     /// Signs out of the server and closes connections. The service may be used again afterwards (it reconnects).
     func close() async
+
+    /// New messages in the inbox since `state`, cheaply: the background check for new mail calls this every few
+    /// minutes for every account. With no state (the first check ever), it returns no messages, only the state to
+    /// start from, so a first launch doesn't announce the whole inbox.
+    func checkForNewMail(since state: MailSyncState?) async throws -> NewMail
+
+    /// The messages with these Message-ID headers (with angle brackets) anywhere in the account apart from Trash and
+    /// Spam, to find messages again after they moved (moving can change a message's ID). Unknown ones are left out.
+    func findMessages(withMessageIDs messageIDs: [String]) async throws -> [MessageSummary]
+
+    /// Whether `waitForChange` hears from the server the moment the inbox changes (IMAP IDLE).
+    var pushesChanges: Bool { get }
+
+    /// Waits until the server says the inbox changed (true) or `timeout` seconds pass (false), on a connection of its
+    /// own so other calls aren't held up. Services that can't be told return false straight away.
+    func waitForChange(timeout: TimeInterval) async throws -> Bool
+}
+
+/// Where a service is up to in an account's inbox, for asking what's new since then. Only the service that made it
+/// understands it.
+public struct MailSyncState: Codable, Sendable, Hashable {
+    public var value: String
+
+    public init(_ value: String) {
+        self.value = value
+    }
+}
+
+/// What arrived in the inbox since the last check.
+public struct NewMail: Sendable {
+    /// Messages that arrived in the inbox since the last check (still there, read or not), newest first.
+    public var messages: [MessageSummary]
+    /// Pass this to the next check.
+    public var state: MailSyncState
+    /// How many messages in the inbox are unread now, when the service knows without extra work.
+    public var inboxUnread: Int?
+
+    public init(messages: [MessageSummary], state: MailSyncState, inboxUnread: Int? = nil) {
+        self.messages = messages
+        self.state = state
+        self.inboxUnread = inboxUnread
+    }
+}
+
+extension MailService {
+    public func checkForNewMail(since state: MailSyncState?) async throws -> NewMail {
+        throw PMailError.notSupported("This account can’t be checked for new mail yet.")
+    }
+
+    public func findMessages(withMessageIDs messageIDs: [String]) async throws -> [MessageSummary] {
+        throw PMailError.notSupported("This account can’t look messages up yet.")
+    }
+
+    public var pushesChanges: Bool { false }
+
+    public func waitForChange(timeout: TimeInterval) async throws -> Bool { false }
 }
 
 /// Hands a finished message to an outgoing (SMTP) server.
