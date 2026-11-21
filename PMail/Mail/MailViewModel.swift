@@ -3,18 +3,25 @@ import Observation
 import PMailKit
 
 /// One account's mail as the window shows it: its folders, the list showing, which rows are ticked, the conversation
-/// open, and actions waiting out their few seconds of Undo.
+/// open, and actions waiting out their few seconds of Undo. What it loads is kept in the account's cache, so it shows
+/// at once next time and while the server can't be reached. Snoozed, Scheduled and Outbox are folders PMail keeps on
+/// the Mac.
 @Observable
 final class MailViewModel {
     @ObservationIgnored let service: any MailService
+    @ObservationIgnored let storage: AccountStorage
     @ObservationIgnored weak var app: AppModel?
     @ObservationIgnored weak var session: AccountSession?
     var account: Account
 
     // Folders
     private(set) var folders: [MailFolder] = []
+    @ObservationIgnored private var serviceFolders: [MailFolder] = []
     private(set) var foldersLoaded = false
     var showsMoreFolders = false
+    private(set) var snoozeCount = 0
+    private(set) var scheduledCount = 0
+    private(set) var outboxCount = 0
 
     // The list
     /// The folder or label showing; nil for All Mail.
@@ -28,10 +35,15 @@ final class MailViewModel {
     private(set) var isLoadingList = false
     private(set) var listError: String?
     private(set) var needsSignIn = false
+    /// The server couldn't be reached, so what's showing is what PMail last loaded.
+    private(set) var connectionTrouble = false
     var checkedIDs: Set<String> = []
     let pageSize = 50
     @ObservationIgnored private var pageTokens: [Int: String] = [:]
     @ObservationIgnored private var listGeneration = 0
+    /// When each snoozed conversation comes back, and the queued message behind each Scheduled or Outbox row.
+    private(set) var snoozeTimes: [String: Date] = [:]
+    @ObservationIgnored private var queuedItems: [String: QueuedMessage] = [:]
 
     // Reading
     private(set) var openConversation: Conversation?
@@ -48,7 +60,7 @@ final class MailViewModel {
     /// Messages whose pictures the person chose to load this once.
     var imagesShownFor: Set<String> = []
 
-    // Actions waiting for their Undo to run out
+    // Actions waiting for their Undo to run out, or for the network
     private struct PendingAction {
         let id: UUID
         let action: MailAction
@@ -57,20 +69,29 @@ final class MailViewModel {
         let snapshot: [Conversation]
         let total: Int?
         var task: Task<Void, Never>?
+        var onUndo: (() -> Void)?
+        /// Whether it takes its conversations out of the list it was made in.
+        var leaves = false
     }
     @ObservationIgnored private var pending: [UUID: PendingAction] = [:]
+    @ObservationIgnored private var committing: [UUID: PendingAction] = [:]
+    @ObservationIgnored private var waitingForNetwork: [PendingAction] = []
     /// Seconds an archive, delete or move waits before reaching the server, so Undo can stop it.
     @ObservationIgnored var undoDelay: TimeInterval = 6
 
-    init(account: Account, service: any MailService, defaults: UserDefaults = .standard) {
+    init(account: Account, service: any MailService, storage: AccountStorage, defaults: UserDefaults = .standard) {
         self.account = account
         self.service = service
+        self.storage = storage
         self.defaults = defaults
         trustedImageSenders = Set(defaults.stringArray(forKey: "TrustedImageSenders") ?? [])
     }
 
     var capabilities: MailCapabilities { service.capabilities }
     var inboxTabs: [InboxTab] { service.inboxTabs }
+
+    /// Whether the window should say it's offline: no network, or the server didn't answer.
+    var isOffline: Bool { connectionTrouble || app?.sync?.isOnline == false }
 
     // MARK: Folders
 
@@ -121,27 +142,86 @@ final class MailViewModel {
 
     var unreadInbox: Int { inbox?.unreadCount ?? 0 }
 
+    /// Whether a folder is one PMail keeps on the Mac (Snoozed, Scheduled, Outbox).
+    static func isLocal(_ id: String?) -> Bool {
+        id == Snooze.folderID || id == QueuedMessage.scheduledFolderID || id == QueuedMessage.outboxFolderID
+    }
+
+    var showsLocalFolder: Bool { Self.isLocal(selectedFolderID) && activeSearch == nil }
+
+    /// The service's folders, with PMail's own: Snoozed (where snoozing works), and Scheduled and Outbox when
+    /// anything is waiting in them.
+    private func rebuildFolders() {
+        var all = serviceFolders.filter { $0.role != .snoozed && $0.role != .scheduled && $0.role != .outbox }
+        if capabilities.canArchive {
+            all.append(MailFolder(id: Snooze.folderID, name: "Snoozed", role: .snoozed, totalCount: snoozeCount))
+        }
+        if scheduledCount > 0 || selectedFolderID == QueuedMessage.scheduledFolderID {
+            all.append(MailFolder(id: QueuedMessage.scheduledFolderID, name: "Scheduled", role: .scheduled, totalCount: scheduledCount))
+        }
+        if outboxCount > 0 || selectedFolderID == QueuedMessage.outboxFolderID {
+            all.append(MailFolder(id: QueuedMessage.outboxFolderID, name: "Outbox", role: .outbox, unreadCount: outboxCount,
+                                  totalCount: outboxCount))
+        }
+        folders = all
+    }
+
+    /// Counts what's snoozed and waiting to be sent, and lists them again if they're showing.
+    func refreshLocalFolders() async {
+        let snoozes = await storage.snoozes.all()
+        let queued = await storage.queue.all()
+        snoozeCount = snoozes.count
+        scheduledCount = queued.filter(\.isScheduled).count
+        outboxCount = queued.filter { !$0.isScheduled }.count
+        rebuildFolders()
+        if showsLocalFolder { await loadLocalList() }
+    }
+
+    func queueChanged() { Task { await refreshLocalFolders() } }
+    func snoozesChanged() { Task { await refreshLocalFolders() } }
+
     // MARK: Loading
 
     func start() {
-        Task { await loadFolders(thenList: true) }
+        Task {
+            // What was loaded last time shows at once, while the server is asked.
+            if serviceFolders.isEmpty, let cached = await storage.cache.folders() {
+                serviceFolders = cached
+                rebuildFolders()
+                if selectedFolderID == nil, activeSearch == nil {
+                    selectedFolderID = inbox?.id
+                    selectedTabID = inboxTabs.first?.id
+                    if let page = await storage.cache.page(for: listKey), conversations.isEmpty { show(page) }
+                }
+            }
+            await refreshLocalFolders()
+            await loadFolders(thenList: true)
+        }
     }
 
-    /// Loads the folders, and the first list if nothing is showing yet.
+    /// Loads the folders, and the first list if nothing has been loaded from the server yet.
     func loadFolders(thenList: Bool) async {
         do {
             let loaded = try await service.loadFolders()
-            folders = loaded
+            serviceFolders = loaded
+            rebuildFolders()
             foldersLoaded = true
             needsSignIn = false
-            if thenList, selectedFolderID == nil, activeSearch == nil {
-                selectedFolderID = inbox?.id ?? loaded.first(where: \.isSelectable)?.id
-                selectedTabID = inboxTabs.first?.id
+            await storage.cache.save(folders: loaded)
+            if thenList {
+                if selectedFolderID == nil, activeSearch == nil {
+                    selectedFolderID = inbox?.id ?? loaded.first(where: \.isSelectable)?.id
+                    selectedTabID = inboxTabs.first?.id
+                }
                 loadList()
             }
         } catch {
             foldersLoaded = true
-            listError = describe(error)
+            if Self.isConnectionProblem(error), !serviceFolders.isEmpty {
+                connectionTrouble = true
+            } else {
+                listError = describe(error)
+            }
             needsSignIn = (error as? PMailError)?.needsSignIn ?? false
         }
     }
@@ -150,36 +230,113 @@ final class MailViewModel {
     func refresh() {
         Task {
             await loadFolders(thenList: false)
+            await refreshLocalFolders()
             loadList()
         }
     }
 
-    /// Loads the page showing, replacing what's there.
+    /// New mail came in, or the server said something changed: counts and the list showing are fetched again
+    /// (without clearing what's there).
+    func serverChanged() {
+        Task {
+            await loadFolders(thenList: false)
+            if activeSearch == nil, pageIndex == 0, !showsLocalFolder { loadList() }
+        }
+    }
+
+    /// The network is back: waiting changes go to the server, and everything is fetched again.
+    func networkCameBack() {
+        connectionTrouble = false
+        let waiting = waitingForNetwork
+        waitingForNetwork = []
+        let service = self.service
+        Task {
+            for item in waiting {
+                do { try await service.perform(item.action, on: item.messages) } catch { app?.report(error, doing: "That change") }
+            }
+            await loadFolders(thenList: false)
+            loadList()
+        }
+    }
+
+    /// Loads the page showing, replacing what's there (a copy from the cache shows first if the list is empty).
     func loadList() {
+        if showsLocalFolder {
+            Task { await loadLocalList() }
+            return
+        }
         listGeneration += 1
         let generation = listGeneration
+        let key = listKey
         let request = ListRequest(folderID: listFolderID, tabID: selectedTabID, query: activeSearch, pageSize: pageSize,
                                   pageToken: pageIndex == 0 ? nil : pageTokens[pageIndex], pageIndex: pageIndex)
         isLoadingList = true
         listError = nil
+        let cacheable = activeSearch == nil
         Task {
+            if conversations.isEmpty, cacheable, let cached = await storage.cache.page(for: key), generation == listGeneration {
+                show(cached)
+            }
             do {
                 let page = try await service.listConversations(request)
                 guard generation == listGeneration else { return }
-                conversations = page.conversations
-                totalCount = page.totalCount
-                hasNextPage = page.nextPageToken != nil
-                if let token = page.nextPageToken { pageTokens[pageIndex + 1] = token }
-                checkedIDs.formIntersection(Set(conversations.map(\.id)))
+                show(page)
                 isLoadingList = false
                 needsSignIn = false
+                connectionTrouble = false
+                if cacheable { await storage.cache.save(page: page, for: key) }
             } catch {
                 guard generation == listGeneration else { return }
                 isLoadingList = false
-                listError = describe(error)
+                if Self.isConnectionProblem(error), !conversations.isEmpty {
+                    connectionTrouble = true
+                } else {
+                    listError = describe(error)
+                }
                 needsSignIn = (error as? PMailError)?.needsSignIn ?? false
             }
         }
+    }
+
+    private func show(_ page: ConversationPage) {
+        // What was filed away here but hasn't reached the server yet (waiting out Undo, on its way, or waiting for
+        // the network) stays out of the list when it's loaded again.
+        let key = listKey
+        let leaving = Set((Array(pending.values) + Array(committing.values) + waitingForNetwork)
+            .filter { $0.leaves && $0.listKey == key }.flatMap { $0.messages.map(\.id) })
+        var shown = page.conversations
+        if !leaving.isEmpty {
+            shown = shown.compactMap { conversation in
+                var conversation = conversation
+                conversation.messages.removeAll { leaving.contains($0.id) }
+                return conversation.messages.isEmpty ? nil : conversation
+            }
+        }
+        conversations = shown
+        totalCount = page.totalCount.map { max(0, $0 - (page.conversations.count - shown.count)) }
+        hasNextPage = page.nextPageToken != nil
+        if let token = page.nextPageToken { pageTokens[pageIndex + 1] = token }
+        checkedIDs.formIntersection(Set(conversations.map(\.id)))
+    }
+
+    /// Lists Snoozed, Scheduled or Outbox from the Mac.
+    private func loadLocalList() async {
+        listError = nil
+        isLoadingList = false
+        switch selectedFolderID {
+        case Snooze.folderID?:
+            let snoozes = await storage.snoozes.all()
+            snoozeTimes = Dictionary(snoozes.map { ($0.conversation.id, $0.wakeAt) }, uniquingKeysWith: { first, _ in first })
+            conversations = snoozes.map(\.conversation)
+        default:
+            let scheduled = selectedFolderID == QueuedMessage.scheduledFolderID
+            let items = await storage.queue.all().filter { $0.isScheduled == scheduled }
+            queuedItems = Dictionary(items.map { ($0.summaryID, $0) }, uniquingKeysWith: { first, _ in first })
+            conversations = items.map { Conversation(id: $0.summaryID, messages: [$0.summary]) }
+        }
+        totalCount = conversations.count
+        hasNextPage = false
+        checkedIDs.formIntersection(Set(conversations.map(\.id)))
     }
 
     /// The folder to ask the service for: a search in a label account covers all mail.
@@ -215,6 +372,7 @@ final class MailViewModel {
         flushPendingActions()
         closeConversation()
         activeSearch = query
+        if Self.isLocal(selectedFolderID) { selectedFolderID = inbox?.id }
         resetPaging()
         loadList()
     }
@@ -306,7 +464,17 @@ final class MailViewModel {
     }
 
     /// Whether the list is the sent mail (rows then show who messages went to).
-    var listShowsRecipients: Bool { currentFolder?.role == .sent || currentFolder?.role == .drafts }
+    var listShowsRecipients: Bool {
+        [.sent, .drafts, .scheduled, .outbox].contains(currentFolder?.role)
+    }
+
+    /// The date a row shows: when a snoozed conversation comes back, when a scheduled message goes, else its date.
+    func rowDate(for conversation: Conversation) -> String {
+        let formatting = AppClock.formatting
+        if let wake = snoozeTimes[conversation.id], selectedFolderID == Snooze.folderID { return formatting.laterDate(wake) }
+        if let queued = queuedItems[conversation.id], let sendAt = queued.sendAt { return formatting.laterDate(sendAt) }
+        return formatting.listDate(conversation.date)
+    }
 
     // MARK: Ticking rows
 
@@ -338,31 +506,77 @@ final class MailViewModel {
 
     // MARK: Reading
 
+    /// The queued message behind the open Scheduled or Outbox row.
+    var openQueuedItem: QueuedMessage? { openConversation.flatMap { queuedItems[$0.id] } }
+
+    /// When the open conversation comes back from snooze, if it's snoozed.
+    var openSnoozeTime: Date? { openConversation.flatMap { snoozeTimes[$0.id] } }
+
     func open(_ conversation: Conversation) {
         openConversation = conversation
         openMessages = []
         conversationError = nil
-        isLoadingConversation = true
         conversationGeneration += 1
         let generation = conversationGeneration
+        if let queued = queuedItems[conversation.id] {
+            // A message waiting to be sent: shown as it will go.
+            let message = queued.message
+            let attachments = message.attachments.enumerated().map { index, file in
+                Attachment(id: "\(index + 1)", filename: file.filename, mimeType: file.mimeType, size: file.data.count,
+                           contentID: file.contentID, isInline: file.contentID != nil, data: file.data)
+            }
+            openMessages = [MailMessage(summary: queued.summary, bcc: message.bcc, htmlBody: message.htmlBody, textBody: message.textBody,
+                                        attachments: attachments.filter { !$0.isInline }, inlineParts: attachments.filter(\.isInline))]
+            expandedMessageIDs = [queued.summaryID]
+            isLoadingConversation = false
+            return
+        }
+        isLoadingConversation = true
+        let snoozed = selectedFolderID == Snooze.folderID
         Task {
+            var showedCopy = false
+            if let cached = await storage.cache.conversation(conversation.id), !cached.isEmpty, generation == conversationGeneration {
+                show(cached, for: conversation)
+                showedCopy = true
+            }
             do {
-                let messages = try await service.loadConversation(id: conversation.id, hint: conversation)
+                var hint = conversation
+                if snoozed {
+                    // A snoozed conversation was archived, which can give its messages new IDs.
+                    let found = try await service.findMessages(withMessageIDs: conversation.messages.compactMap(\.messageIDHeader))
+                    if !found.isEmpty { hint = Conversation(id: found.first?.threadID ?? conversation.id, messages: found) }
+                }
+                let messages = try await service.loadConversation(id: hint.id, hint: hint)
                 guard generation == conversationGeneration else { return }
-                openMessages = messages
-                // The newest message and every unread one start open; the rest are one line each.
-                var expanded = Set(conversation.messages.filter(\.isUnread).map(\.id))
-                if let last = messages.last { expanded.insert(last.id) }
-                expandedMessageIDs = expanded
-                isLoadingConversation = false
+                show(messages, for: conversation)
+                connectionTrouble = false
+                await storage.cache.save(conversation: conversation.id, messages: messages)
                 let unread = conversation.messages.filter(\.isUnread)
-                if !unread.isEmpty { setFlags(.markRead, on: unread) }
+                if !unread.isEmpty, !snoozed { setFlags(.markRead, on: unread) }
             } catch {
                 guard generation == conversationGeneration else { return }
                 isLoadingConversation = false
-                conversationError = describe(error)
+                if showedCopy, Self.isConnectionProblem(error) {
+                    connectionTrouble = true
+                } else if !showedCopy {
+                    conversationError = Self.isConnectionProblem(error)
+                        ? "This conversation hasn’t been opened on this Mac before, so it can’t be shown while you’re offline."
+                        : describe(error)
+                }
             }
         }
+    }
+
+    private func show(_ messages: [MailMessage], for conversation: Conversation) {
+        let firstShow = openMessages.isEmpty
+        openMessages = messages
+        if firstShow {
+            // The newest message and every unread one start open; the rest are one line each.
+            var expanded = Set(conversation.messages.filter(\.isUnread).map(\.id))
+            if let last = messages.last { expanded.insert(last.id) }
+            expandedMessageIDs = expanded
+        }
+        isLoadingConversation = false
     }
 
     func closeConversation() {
@@ -440,7 +654,7 @@ final class MailViewModel {
     private func setFlags(_ action: MailAction, on messages: [MessageSummary]) {
         let ids = Set(messages.map(\.id))
         let unreadBefore = messages.filter(\.isUnread)
-        updateMessages(ids) { summary in
+        let change: (inout MessageSummary) -> Void = { summary in
             switch action {
             case .markRead: summary.isUnread = false
             case .markUnread: summary.isUnread = true
@@ -452,12 +666,23 @@ final class MailViewModel {
             default: break
             }
         }
+        updateMessages(ids, change)
         if action == .markRead { adjustUnreadCounts(by: -unreadBefore.count, for: unreadBefore) }
         if action == .markUnread { adjustUnreadCounts(by: messages.filter { !$0.isUnread }.count, for: messages) }
+        let changed = messages.map { summary -> MessageSummary in
+            var summary = summary
+            change(&summary)
+            return summary
+        }
         let service = self.service
+        let cache = storage.cache
         Task {
+            await cache.update(summaries: changed)
             do {
                 try await service.perform(action, on: messages)
+            } catch where Self.isConnectionProblem(error) {
+                waitingForNetwork.append(PendingAction(id: UUID(), action: action, messages: messages, listKey: listKey, snapshot: [], total: nil))
+                connectionTrouble = true
             } catch {
                 app?.report(error, doing: "That change")
                 loadList()
@@ -468,9 +693,10 @@ final class MailViewModel {
     private func adjustUnreadCounts(by delta: Int, for messages: [MessageSummary]) {
         guard delta != 0 else { return }
         let inFolders = Set(messages.compactMap(\.folderID) + messages.flatMap(\.labelIDs) + [selectedFolderID].compactMap { $0 })
-        for index in folders.indices where inFolders.contains(folders[index].id) {
-            folders[index].unreadCount = max(0, folders[index].unreadCount + delta)
+        for index in serviceFolders.indices where inFolders.contains(serviceFolders[index].id) {
+            serviceFolders[index].unreadCount = max(0, serviceFolders[index].unreadCount + delta)
         }
+        rebuildFolders()
     }
 
     private func updateMessages(_ ids: Set<String>, _ change: (inout MessageSummary) -> Void) {
@@ -505,12 +731,14 @@ final class MailViewModel {
         }
     }
 
-    private func fileAway(_ action: MailAction, messages: [MessageSummary], count: Int) {
+    private func fileAway(_ action: MailAction, messages: [MessageSummary], count: Int, note: String? = nil, onUndo: (() -> Void)? = nil,
+                          alwaysLeaves: Bool = false) {
         let ids = Set(messages.map(\.id))
         let snapshot = conversations
         let total = totalCount
         let wasOpen = openConversation
-        if leavesList(action) {
+        let leaves = alwaysLeaves || leavesList(action)
+        if leaves {
             conversations = conversations.compactMap { conversation in
                 var conversation = conversation
                 conversation.messages.removeAll { ids.contains($0.id) }
@@ -520,7 +748,7 @@ final class MailViewModel {
             checkedIDs.subtract(snapshot.map(\.id).filter { id in !conversations.contains { $0.id == id } })
         }
         // Leaving a conversation that was filed away goes on to the next one, or back to the list.
-        if let open = wasOpen, open.messages.allSatisfy({ ids.contains($0.id) }) || leavesList(action) {
+        if let open = wasOpen, open.messages.allSatisfy({ ids.contains($0.id) }) || leaves {
             if let next = snapshot.firstIndex(where: { $0.id == open.id }).flatMap({ index in
                 conversations.first { candidate in !ids.isSuperset(of: candidate.messages.map(\.id)) && snapshot.firstIndex(of: candidate).map { $0 > index } == true }
             }) {
@@ -550,7 +778,8 @@ final class MailViewModel {
         default: text = "Done."
         }
         let undoable = action != .deleteForever
-        var item = PendingAction(id: id, action: action, messages: messages, listKey: listKey, snapshot: snapshot, total: total)
+        var item = PendingAction(id: id, action: action, messages: messages, listKey: listKey, snapshot: snapshot, total: total, onUndo: onUndo)
+        item.leaves = leaves
         let delay = undoable ? undoDelay : 0
         item.task = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
@@ -558,16 +787,22 @@ final class MailViewModel {
             await self?.commit(id)
         }
         pending[id] = item
-        app?.show(text, actionTitle: undoable ? "Undo" : nil, duration: undoable ? undoDelay : 4,
+        app?.show(note ?? text, actionTitle: undoable ? "Undo" : nil, duration: undoable ? undoDelay : 4,
                   action: undoable ? { [weak self] in self?.undo(id) } : nil)
     }
 
-    /// Sends a waiting action to the server.
+    /// Sends a waiting action to the server; offline, it waits for the network.
     private func commit(_ id: UUID) async {
         guard let item = pending.removeValue(forKey: id) else { return }
+        committing[id] = item
+        defer { committing[id] = nil }
         do {
             try await service.perform(item.action, on: item.messages)
             await loadFolders(thenList: false)
+        } catch where Self.isConnectionProblem(error) {
+            waitingForNetwork.append(item)
+            connectionTrouble = true
+            app?.show("You’re offline. That change will be made when PMail can reach the server again.")
         } catch {
             app?.report(error, doing: "That change")
             loadList()
@@ -578,6 +813,7 @@ final class MailViewModel {
     func undo(_ id: UUID) {
         guard let item = pending.removeValue(forKey: id) else { return }
         item.task?.cancel()
+        item.onUndo?()
         if item.listKey == listKey {
             conversations = item.snapshot
             totalCount = item.total
@@ -593,31 +829,133 @@ final class MailViewModel {
         for item in items {
             item.task?.cancel()
             Task { [weak self] in
-                do { try await service.perform(item.action, on: item.messages) } catch { self?.app?.report(error, doing: "That change") }
+                do {
+                    try await service.perform(item.action, on: item.messages)
+                } catch where Self.isConnectionProblem(error) {
+                    self?.waitingForNetwork.append(item)
+                } catch {
+                    self?.app?.report(error, doing: "That change")
+                }
             }
         }
     }
 
     /// Waits for every waiting action to reach the server, for quitting.
     func flushAndWait() async {
-        let items = Array(pending.values)
+        let items = Array(pending.values) + waitingForNetwork
         pending.removeAll()
+        waitingForNetwork.removeAll()
         for item in items {
             item.task?.cancel()
             try? await service.perform(item.action, on: item.messages)
         }
     }
 
-    var hasPendingActions: Bool { !pending.isEmpty }
+    var hasPendingActions: Bool { !pending.isEmpty || !waitingForNetwork.isEmpty }
 
     /// Puts a sent message's conversation at the top if the list showing is where it belongs.
     func didSend() {
         if currentFolder?.role == .sent || openConversation != nil { refresh() }
     }
 
+    // MARK: Snoozing
+
+    /// Whether conversations here can be snoozed (it needs archiving, and they're not PMail's own).
+    var canSnooze: Bool { capabilities.canArchive && !Self.isLocal(selectedFolderID) }
+
+    /// Puts conversations away until `date`: out of the inbox now, back (unread, with a notification) then.
+    func snooze(_ conversations: [Conversation], until date: Date) {
+        guard canSnooze, !conversations.isEmpty else { return }
+        let snoozes = conversations.map { Snooze(conversation: $0, wakeAt: date) }
+        let book = storage.snoozes
+        Task {
+            for snooze in snoozes { try? await book.add(snooze) }
+            await refreshLocalFolders()
+        }
+        let noun = conversations.count == 1 ? "Conversation" : "\(conversations.count) conversations"
+        fileAway(.archive, messages: conversations.flatMap(\.messages), count: conversations.count,
+                 note: "\(noun) snoozed until \(AppClock.formatting.laterDate(date)).", onUndo: { [weak self] in
+                     Task {
+                         for snooze in snoozes { await book.remove(snooze.id) }
+                         await self?.refreshLocalFolders()
+                     }
+                 }, alwaysLeaves: true)
+    }
+
+    /// Brings a snoozed conversation back to the inbox now.
+    func unsnooze(_ conversation: Conversation) {
+        let book = storage.snoozes
+        let service = self.service
+        if openConversation?.id == conversation.id { closeConversation() }
+        conversations.removeAll { $0.id == conversation.id }
+        Task {
+            if let snooze = await book.snooze(forConversation: conversation.id) {
+                await book.remove(snooze.id)
+                do {
+                    let found = try await service.findMessages(withMessageIDs: snooze.messageIDs)
+                    if !found.isEmpty { try await service.perform(.moveToInbox, on: found) }
+                    app?.show("Conversation moved back to the inbox.")
+                } catch {
+                    app?.report(error, doing: "Unsnoozing")
+                }
+            }
+            await refreshLocalFolders()
+            await loadFolders(thenList: false)
+        }
+    }
+
+    // MARK: Waiting messages
+
+    /// Takes a message out of Scheduled or the Outbox and opens it to edit (it becomes a message being written).
+    func editQueued(_ item: QueuedMessage) {
+        Task {
+            await storage.queue.remove(item.id)
+            await refreshLocalFolders()
+            closeConversation()
+            guard let app, let session else { return }
+            let compose = ComposeModel(app: app, session: session)
+            compose.load(item.message)
+            app.open(compose)
+            app.show(item.isScheduled ? "Scheduled send canceled. Edit the message and send it again, or close it to keep a draft."
+                                      : "The message was taken out of the Outbox.")
+        }
+    }
+
+    /// Sends a scheduled or Outbox message as soon as possible.
+    func sendQueuedNow(_ item: QueuedMessage) {
+        Task {
+            var now = item
+            now.sendAt = nil
+            now.attempts = 0
+            now.lastAttempt = nil
+            now.queuedAt = AppClock.now()
+            try? await storage.queue.save(now)
+            closeConversation()
+            await refreshLocalFolders()
+            if let session, let sync = app?.sync { await sync.sendDue(session, at: AppClock.now()) }
+        }
+    }
+
+    func deleteQueued(_ item: QueuedMessage) {
+        Task {
+            await storage.queue.remove(item.id)
+            closeConversation()
+            await refreshLocalFolders()
+            app?.show("Message deleted.")
+        }
+    }
+
     // MARK: Errors
 
     func describe(_ error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
+    /// Whether an error means the server couldn't be reached (as opposed to refusing).
+    static func isConnectionProblem(_ error: Error) -> Bool {
+        switch error as? PMailError {
+        case .connectionFailed?, .timedOut?: true
+        default: false
+        }
     }
 }

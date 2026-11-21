@@ -25,9 +25,9 @@ struct LiveServiceFactory: ServiceFactory {
         }
     }
 
-    /// Where an account keeps what it keeps on the Mac.
+    /// Where an account keeps what it keeps on the Mac (the same folder as its cache and Outbox).
     func storage(for account: Account) -> URL {
-        folder.appendingPathComponent("Accounts", isDirectory: true).appendingPathComponent(account.id.uuidString, isDirectory: true)
+        AppDelegate.accountsFolder(in: folder).appendingPathComponent(account.id.uuidString, isDirectory: true)
     }
 
     private func unavailable(_ reason: PMailError) -> AccountServices {

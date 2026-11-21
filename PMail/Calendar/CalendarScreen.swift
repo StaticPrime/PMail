@@ -18,6 +18,8 @@ struct CalendarScreen: View {
                                actionTitle: "Sign In…") { app.sheet = .addAccount(session.account.kind) }
                     } else if let error = model.error {
                         Banner(text: error, actionTitle: "Try Again") { model.start() }
+                    } else if model.isOffline || app.sync?.isOnline == false {
+                        OfflineBanner()
                     }
                     CalendarHeader(model: model)
                     Divider().overlay(Theme.divider)

@@ -16,7 +16,22 @@ struct ConversationView: View {
                 IconButton(symbol: "arrow.left", help: "Back to \(mail.listTitle)") { mail.closeConversation() }
                     .padding(.leading, 8)
                     .padding(.trailing, 8)
-                if let conversation = mail.openConversation {
+                if let queued = mail.openQueuedItem {
+                    OutlinePillButton(title: "Send Now", symbol: "paperplane") { mail.sendQueuedNow(queued) }
+                    OutlinePillButton(title: queued.isScheduled ? "Cancel Send" : "Edit", symbol: "pencil") { mail.editQueued(queued) }
+                        .help(queued.isScheduled ? "Stop the scheduled send and open the message to edit" : "Take it out of the Outbox to edit")
+                    IconButton(symbol: "trash", help: "Delete") { mail.deleteQueued(queued) }
+                    if let sendAt = queued.sendAt {
+                        Text("Sends \(AppClock.formatting.laterDate(sendAt))").font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
+                            .padding(.leading, 8)
+                    } else if let error = queued.lastError {
+                        Text("Not sent yet: \(error)").font(.pm(12.5)).foregroundStyle(Theme.danger).lineLimit(1).padding(.leading, 8)
+                    }
+                } else if let wake = mail.openSnoozeTime, let conversation = mail.openConversation {
+                    OutlinePillButton(title: "Unsnooze", symbol: "tray.and.arrow.down") { mail.unsnooze(conversation) }
+                    Text("Snoozed until \(AppClock.formatting.laterDate(wake))").font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
+                        .padding(.leading, 8)
+                } else if let conversation = mail.openConversation {
                     ConversationActions(app: app, mail: mail, targets: [conversation])
                 }
                 Spacer()
@@ -50,7 +65,7 @@ struct ConversationView: View {
                             }
                             Divider().overlay(Theme.divider).padding(.leading, 72)
                         }
-                        if let last = mail.openMessages.last {
+                        if let last = mail.openMessages.last, mail.openQueuedItem == nil {
                             HStack(spacing: 12) {
                                 OutlinePillButton(title: "Reply", symbol: "arrowshape.turn.up.left") { app.reply(to: last, kind: .reply, in: session) }
                                 if last.summary.to.count + last.summary.cc.count > 1 {
@@ -159,34 +174,37 @@ private struct ExpandedMessage: View {
                     }
                     Spacer(minLength: 8)
                     Text(mail.formatting.messageDate(summary.date)).font(.pm(12)).foregroundStyle(Theme.textSecondary)
-                    if mail.capabilities.canStar {
-                        IconButton(symbol: summary.isStarred ? "star.fill" : "star", help: summary.isStarred ? "Starred" : "Not starred",
-                                   size: 30, iconSize: 14, tint: summary.isStarred ? Theme.star : Theme.icon) {
-                            mail.perform(summary.isStarred ? .unstar : .star, onMessage: summary)
+                    // A message waiting to be sent has nothing to star or reply to yet.
+                    if mail.openQueuedItem == nil {
+                        if mail.capabilities.canStar {
+                            IconButton(symbol: summary.isStarred ? "star.fill" : "star", help: summary.isStarred ? "Starred" : "Not starred",
+                                       size: 30, iconSize: 14, tint: summary.isStarred ? Theme.star : Theme.icon) {
+                                mail.perform(summary.isStarred ? .unstar : .star, onMessage: summary)
+                            }
                         }
-                    }
-                    IconButton(symbol: "arrowshape.turn.up.left", help: "Reply", size: 30, iconSize: 14) {
-                        app.reply(to: message, kind: .reply, in: session)
-                    }
-                    Menu {
-                        Button("Reply") { app.reply(to: message, kind: .reply, in: session) }
-                        Button("Reply all") { app.reply(to: message, kind: .replyAll, in: session) }
-                        Button("Forward") { app.reply(to: message, kind: .forward, in: session) }
-                        Divider()
-                        Button("Delete this message") { mail.perform(.trash, onMessage: summary) }
-                        Button("Mark unread from here") { mail.perform(.markUnread, onMessage: summary); mail.closeConversation() }
-                        Divider()
-                        if message.rawSource != nil { Button("Download message") { saveOriginal() } }
-                        if let unsubscribe = message.listUnsubscribe.flatMap(unsubscribeURL) {
-                            Button("Unsubscribe") { NSWorkspace.shared.open(unsubscribe) }
+                        IconButton(symbol: "arrowshape.turn.up.left", help: "Reply", size: 30, iconSize: 14) {
+                            app.reply(to: message, kind: .reply, in: session)
                         }
-                    } label: {
-                        Image(systemName: "ellipsis").rotationEffect(.degrees(90)).foregroundStyle(Theme.icon)
+                        Menu {
+                            Button("Reply") { app.reply(to: message, kind: .reply, in: session) }
+                            Button("Reply all") { app.reply(to: message, kind: .replyAll, in: session) }
+                            Button("Forward") { app.reply(to: message, kind: .forward, in: session) }
+                            Divider()
+                            Button("Delete this message") { mail.perform(.trash, onMessage: summary) }
+                            Button("Mark unread from here") { mail.perform(.markUnread, onMessage: summary); mail.closeConversation() }
+                            Divider()
+                            if message.rawSource != nil { Button("Download message") { saveOriginal() } }
+                            if let unsubscribe = message.listUnsubscribe.flatMap(unsubscribeURL) {
+                                Button("Unsubscribe") { NSWorkspace.shared.open(unsubscribe) }
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis").rotationEffect(.degrees(90)).foregroundStyle(Theme.icon)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .frame(width: 30, height: 30)
+                        .help("More")
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .frame(width: 30, height: 30)
-                    .help("More")
                 }
                 Button { showsDetails.toggle() } label: {
                     HStack(spacing: 3) {

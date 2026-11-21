@@ -48,6 +48,7 @@ final class CalendarViewModel {
     }
 
     @ObservationIgnored let service: any CalendarService
+    @ObservationIgnored let cache: AccountCache?
     @ObservationIgnored weak var app: AppModel?
     var account: Account
     @ObservationIgnored let grid: CalendarGrid
@@ -69,10 +70,11 @@ final class CalendarViewModel {
     /// The event whose details are showing in a popover.
     var selectedEventID: String?
 
-    init(account: Account, service: any CalendarService, calendar: Calendar = .current, defaults: UserDefaults = .standard,
-         today: @escaping () -> Date = Date.init) {
+    init(account: Account, service: any CalendarService, cache: AccountCache? = nil, calendar: Calendar = .current,
+         defaults: UserDefaults = .standard, today: @escaping () -> Date = Date.init) {
         self.account = account
         self.service = service
+        self.cache = cache
         self.defaults = defaults
         grid = CalendarGrid(calendar: calendar)
         formatting = MailFormatting(calendar: calendar)
@@ -88,14 +90,30 @@ final class CalendarViewModel {
 
     // MARK: Loading
 
+    /// Whether what's showing is a copy, because the server couldn't be reached.
+    private(set) var isOffline = false
+
     func start() {
         Task {
+            // What was loaded last time shows at once.
+            if calendars.isEmpty, let cached = await cache?.calendars() {
+                calendars = cached
+                if let stored = await cache?.events() { events = stored.events }
+            }
             do {
-                calendars = try await service.loadCalendars()
+                let loaded = try await service.loadCalendars()
+                calendars = loaded
                 needsSignIn = false
+                isOffline = false
+                error = nil
+                await cache?.save(calendars: loaded)
                 reload()
             } catch {
-                self.error = describe(error)
+                if MailViewModel.isConnectionProblem(error), !calendars.isEmpty {
+                    isOffline = true
+                } else {
+                    self.error = describe(error)
+                }
                 needsSignIn = (error as? PMailError)?.needsSignIn ?? false
             }
         }
@@ -127,11 +145,17 @@ final class CalendarViewModel {
                 events = loaded
                 loadedInterval = interval
                 isLoading = false
+                isOffline = false
                 error = nil
+                await cache?.save(events: loaded, covering: interval)
             } catch {
                 guard generation == loadGeneration else { return }
                 isLoading = false
-                self.error = describe(error)
+                if MailViewModel.isConnectionProblem(error), !events.isEmpty {
+                    isOffline = true
+                } else {
+                    self.error = describe(error)
+                }
                 needsSignIn = (error as? PMailError)?.needsSignIn ?? false
             }
         }

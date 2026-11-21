@@ -150,9 +150,7 @@ struct ComposeWindow: View {
 
     private var sendBar: some View {
         HStack(spacing: 2) {
-            FilledPillButton(title: model.isSending ? "Sending…" : "Send", isDisabled: model.isSending) { model.send() }
-                .keyboardShortcut(.return, modifiers: .command)
-                .help("Send (⌘Return)")
+            SplitSendButton(isSending: model.isSending) { model.send() } schedule: { date in model.schedule(at: date) }
                 .padding(.trailing, 8)
             IconButton(symbol: "textformat", help: model.showsFormatting ? "Hide formatting options" : "Formatting options", size: 34, iconSize: 15,
                        tint: model.showsFormatting ? Theme.accent : Theme.icon) { model.showsFormatting.toggle() }

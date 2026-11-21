@@ -1,5 +1,6 @@
 import AppKit
 import PMailKit
+import ServiceManagement
 import SwiftUI
 
 /// PMail ▸ Settings: shortcuts, Undo Send, pictures in messages, and whether sign-in with Google and Microsoft is set
@@ -35,9 +36,26 @@ struct SettingsView: View {
     @AppStorage("SingleKeyShortcuts") private var singleKeys = true
     @AppStorage("UndoSendSeconds") private var undoSeconds = 5
     @AppStorage("AlwaysShowPictures") private var alwaysShowPictures = false
+    @AppStorage("NotifyNewMail") private var notifyNewMail = true
+    @AppStorage("CheckMinutes") private var checkMinutes = 2
+    @State private var opensAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var loginError: String?
 
     var body: some View {
         Form {
+            Section("New mail") {
+                Toggle("Show a notification when new mail arrives", isOn: $notifyNewMail)
+                Picker("Check for new mail", selection: $checkMinutes) {
+                    Text("Every minute").tag(1)
+                    Text("Every 2 minutes").tag(2)
+                    Text("Every 5 minutes").tag(5)
+                    Text("Every 15 minutes").tag(15)
+                }
+                Text("An IMAP account (iCloud included) is watched while it’s showing: new mail appears the moment its server says so, or within a minute.")
+                    .font(.pm(11.5)).foregroundStyle(.secondary)
+                Toggle("Open PMail when I log in", isOn: Binding(get: { opensAtLogin }, set: { setOpensAtLogin($0) }))
+                if let loginError { Text(loginError).font(.pm(11.5)).foregroundStyle(.red) }
+            }
             Section("Mail") {
                 Picker("Undo Send", selection: $undoSeconds) {
                     ForEach([5, 10, 20, 30], id: \.self) { Text("\($0) seconds").tag($0) }
@@ -60,6 +78,17 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 520)
         .fixedSize()
+    }
+
+    /// Adds PMail to (or takes it out of) the apps that open at login, so new mail and snoozes keep coming.
+    private func setOpensAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            loginError = nil
+        } catch {
+            loginError = "macOS didn’t allow it: \(error.localizedDescription)"
+        }
+        opensAtLogin = SMAppService.mainApp.status == .enabled
     }
 
     private func status(_ ready: Bool, variable: String) -> some View {

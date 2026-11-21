@@ -16,6 +16,8 @@ struct ContactsScreen: View {
                     if model.needsSignIn {
                         Banner(text: "\(session.account.email) needs to be signed in again.", symbol: "person.crop.circle.badge.exclamationmark",
                                actionTitle: "Sign In…") { app.sheet = .addAccount(session.account.kind) }
+                    } else if model.isOffline || app.sync?.isOnline == false {
+                        OfflineBanner()
                     }
                     if let contact = model.contact(model.openContactID) {
                         ContactPage(app: app, session: session, model: model, contact: contact)

@@ -12,6 +12,7 @@ final class ContactsViewModel {
     }
 
     @ObservationIgnored let service: any ContactsService
+    @ObservationIgnored let cache: AccountCache?
     @ObservationIgnored weak var app: AppModel?
     var account: Account
     private(set) var contacts: [Contact] = []
@@ -23,26 +24,41 @@ final class ContactsViewModel {
     /// The person whose page is showing; nil for the list.
     var openContactID: String?
 
-    init(account: Account, service: any ContactsService) {
+    init(account: Account, service: any ContactsService, cache: AccountCache? = nil) {
         self.account = account
         self.service = service
+        self.cache = cache
     }
+
+    /// Whether what's showing is a copy, because the server couldn't be reached.
+    private(set) var isOffline = false
 
     func start() { reload() }
 
     func reload() {
         isLoading = true
         Task {
+            if contacts.isEmpty, let cached = await cache?.contacts() {
+                contacts = cached
+                loaded = true
+            }
             do {
-                contacts = try await service.loadContacts()
+                let fresh = try await service.loadContacts()
+                contacts = fresh
                 loaded = true
                 isLoading = false
+                isOffline = false
                 error = nil
                 needsSignIn = false
+                await cache?.save(contacts: fresh)
             } catch {
                 loaded = true
                 isLoading = false
-                self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                if MailViewModel.isConnectionProblem(error), !contacts.isEmpty {
+                    isOffline = true
+                } else {
+                    self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                }
                 needsSignIn = (error as? PMailError)?.needsSignIn ?? false
             }
         }

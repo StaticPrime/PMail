@@ -75,6 +75,8 @@ final class AppModel {
 
     let accounts: AccountsController
     let oauth: OAuthConfiguration
+    /// Keeps every account up to date in the background (made once the window exists).
+    var sync: SyncController?
     var module: Module = .mail
     var searchText = ""
     var isSidebarExpanded = true
@@ -187,6 +189,18 @@ final class AppModel {
         accounts.switchTo(id)
         searchText = ""
         current?.activate()
+        sync?.accountChanged()
+    }
+
+    /// Opens a message's conversation in its account's inbox (from a notification).
+    func openConversation(_ message: MessageSummary, in accountID: UUID) {
+        (NSApp.delegate as? AppDelegate)?.showMainWindow(nil)
+        NSApp.activate()
+        switchAccount(to: accountID)
+        show(.mail)
+        guard let mail = current?.mail else { return }
+        if mail.currentFolder?.role != .inbox, let inbox = mail.inbox { mail.select(folderID: inbox.id) }
+        mail.open(Conversation(id: message.threadID, messages: [message]))
     }
 }
 

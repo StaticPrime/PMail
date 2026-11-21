@@ -166,7 +166,8 @@ struct AppRail: View {
         }
         .padding(.top, 4)
         .frame(width: 72)
-        .onChange(of: session.mail.unreadInbox, initial: true) { _, unread in
+        .onChange(of: app.sync?.totalUnread ?? session.mail.unreadInbox, initial: true) { _, unread in
+            // Unread mail in every account's inbox.
             NSApp.dockTile.badgeLabel = unread > 0 ? (unread > 999 ? "999+" : "\(unread)") : nil
         }
     }

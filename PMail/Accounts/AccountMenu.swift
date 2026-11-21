@@ -39,7 +39,7 @@ struct AccountMenu: View {
             let others = app.accounts.accounts.filter { $0.id != app.accounts.currentID }
             VStack(spacing: 0) {
                 ForEach(others) { account in
-                    AccountRow(account: account) {
+                    AccountRow(account: account, unread: app.sync?.unread(for: account.id) ?? 0) {
                         dismiss()
                         app.switchAccount(to: account.id)
                     }
@@ -65,6 +65,7 @@ struct AccountMenu: View {
 
 private struct AccountRow: View {
     let account: Account
+    var unread = 0
     let action: () -> Void
     @State private var hovering = false
 
@@ -77,6 +78,10 @@ private struct AccountRow: View {
                     Text(account.email).font(.pm(12)).foregroundStyle(Theme.textSecondary)
                 }
                 Spacer()
+                if unread > 0 {
+                    Text(unread > 999 ? "999+" : "\(unread)").font(.pm(12, .semibold)).foregroundStyle(Theme.textSecondary)
+                        .accessibilityLabel("\(unread) unread")
+                }
                 ProviderLogo(kind: account.kind, size: 16)
             }
             .padding(.horizontal, 18)

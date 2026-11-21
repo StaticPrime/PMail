@@ -210,8 +210,15 @@ enum SelfTest {
             mail.perform(.archive, on: [target])
             check(mail.conversations.count == before - 1 && !mail.conversations.contains { $0.id == target.id }, "archiving takes a conversation out of the inbox at once")
             check(app.toast?.text == "Conversation archived." && app.toast?.actionTitle == "Undo", "and offers Undo", app.toast?.text ?? "no note")
+            // New mail can load the list again while Undo is offered, when the server still has it in the inbox.
+            mail.loadList()
+            wait("the inbox to load again") { !mail.isLoadingList }
+        }
+        step {
+            check(!mail.conversations.contains { $0.subject == "Thanksgiving pie plans 🥧" },
+                  "loading the inbox again while Undo is offered leaves the archived conversation out")
             app.toast?.action?()
-            check(mail.conversations.contains { $0.id == target.id }, "Undo puts it back")
+            check(mail.conversations.contains { $0.subject == "Thanksgiving pie plans 🥧" }, "Undo puts it back")
             check(!actions().contains("archive"), "and nothing reached the server")
         }
         step {
@@ -454,6 +461,161 @@ enum SelfTest {
             let unconfigured = LiveServiceFactory(oauth: OAuthConfiguration(), folder: folder).services(for: google, secrets: secrets)
             check(unconfigured.mail is UnavailableService, "and neither can a Google account in a copy without Google sign-in")
             try? FileManager.default.removeItem(at: folder)
+        }
+
+        // MARK: Keeping up to date
+        var sentMark = 0
+        var notifier: RecordingNotifier? { app.sync?.notifier as? RecordingNotifier }
+        step {
+            app.show(.mail)
+            mail.select(folderID: mail.inbox?.id)
+            wait("the inbox") { !mail.isLoadingList && !mail.conversations.isEmpty }
+        }
+        step {
+            guard let sync = app.sync else { return check(false, "the background sync runs") }
+            let session = session
+            Task { await sync.check(session) }
+            let cache = session.storage.cache
+            wait("the first check") { (read({ await cache.syncState() }) ?? nil) != nil }
+        }
+        step {
+            check(notifier?.newMail.isEmpty == true, "the first check for new mail announces nothing")
+            // Reading something, so the window isn't just showing the inbox (where a notification would only repeat it).
+            if let first = mail.conversations.first { mail.open(first) }
+            let service = sampleMail
+            let alex = SampleData.person("Alex Kim")
+            Task { await service?.deliver(from: alex, subject: "Self-test arrival", text: "Just arrived.", at: AppClock.now()) }
+            let session = session
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { Task { await app.sync?.check(session) } }
+            wait("the new message to be noticed") { notifier?.newMail.isEmpty == false }
+        }
+        step {
+            check(notifier?.newMail.first?.messages.first?.subject == "Self-test arrival", "new mail is announced")
+            wait("the inbox to show it") { mail.conversations.contains { $0.subject == "Self-test arrival" } }
+        }
+        step {
+            check(mail.conversations.first?.subject == "Self-test arrival", "and the inbox shows it at the top without being asked")
+            check((app.sync?.unread(for: session.id) ?? 0) >= 1, "the unread count follows")
+            guard let message = notifier?.newMail.first?.messages.first else { return }
+            mail.closeConversation()
+            app.openConversation(message, in: session.id)
+            wait("the conversation") { mail.openMessages.first?.summary.subject == "Self-test arrival" }
+        }
+        step {
+            check(mail.openConversation?.subject == "Self-test arrival", "clicking a notification opens its conversation")
+            mail.closeConversation()
+            guard let target = mail.conversations.first(where: { $0.subject == "Self-test arrival" }) else {
+                return check(false, "the new conversation is listed")
+            }
+            mail.undoDelay = 0.2
+            mail.snooze([target], until: AppClock.now().addingTimeInterval(1.5))
+            check(!mail.conversations.contains { $0.id == target.id }, "snoozing takes a conversation out of the inbox")
+            check(app.toast?.text.contains("snoozed until Today") == true, "and says until when", app.toast?.text ?? "")
+            wait("the snooze to be kept and the archive to go") { mail.snoozeCount == 1 && actions().filter { $0 == "archive" }.count >= 2 }
+        }
+        step {
+            check(mail.snoozeCount == 1, "Snoozed counts it")
+            mail.select(folderID: Snooze.folderID)
+            wait("Snoozed") { mail.conversations.count == 1 }
+        }
+        step {
+            check(mail.conversations.first?.subject == "Self-test arrival", "Snoozed lists it")
+            check(mail.conversations.first.map { mail.rowDate(for: $0).hasPrefix("Today") } == true, "with when it comes back")
+            wait(upTo: 1.6) { false }
+        }
+        step {
+            let session = session
+            Task { await app.sync?.wakeSnoozes(session, at: AppClock.now()) }
+            wait("the conversation to come back") { notifier?.snoozeReturns.isEmpty == false }
+        }
+        step {
+            check(notifier?.snoozeReturns.count == 1, "a snoozed conversation comes back when its time comes, with a notification")
+            check(actions().contains("moveToInbox"), "back into the inbox on the server")
+            wait("Snoozed to empty") { mail.snoozeCount == 0 && mail.conversations.isEmpty }
+        }
+        step {
+            check(mail.snoozeCount == 0 && mail.conversations.isEmpty, "and leaves Snoozed")
+            mail.select(folderID: mail.inbox?.id)
+            sentMark = sentCount()
+            guard let composer = app.compose(to: [SampleData.person("Alex Kim")], subject: "Self-test later", body: "Sent later.") else { return }
+            composer.schedule(at: AppClock.now().addingTimeInterval(1))
+            check(app.composers.isEmpty, "scheduling a message closes it")
+            wait("Scheduled to count it") { mail.scheduledCount == 1 || sentCount() > sentMark }
+        }
+        step {
+            check(mail.folder(role: .scheduled) != nil || sentCount() > sentMark, "Scheduled shows in the sidebar while something waits there")
+            mail.select(folderID: QueuedMessage.scheduledFolderID)
+            wait("Scheduled") { mail.conversations.count == 1 || sentCount() > sentMark }
+        }
+        step {
+            if sentCount() == sentMark {
+                check(mail.conversations.first?.subject == "Self-test later", "Scheduled lists the message")
+                if let first = mail.conversations.first { mail.open(first) }
+                check(mail.openQueuedItem != nil && mail.openMessages.first?.textBody?.contains("Sent later.") == true, "and opens it as it will go")
+                mail.closeConversation()
+            }
+            wait(upTo: 1.1) { false }
+        }
+        step {
+            let session = session
+            Task { await app.sync?.sendDue(session, at: AppClock.now()) }
+            wait("the scheduled message to go") { sentCount() > sentMark }
+        }
+        step {
+            if let service = sampleMail, let last = read({ await service.sentMessages.last }) ?? nil {
+                check(last.subject == "Self-test later", "a scheduled message goes when its time comes", last.subject)
+            }
+            wait("Scheduled to empty") { mail.scheduledCount == 0 }
+        }
+        step {
+            check(mail.scheduledCount == 0, "and leaves Scheduled")
+            mail.select(folderID: mail.inbox?.id)
+            wait("the inbox") { mail.currentFolder?.role == .inbox && !mail.isLoadingList && !mail.conversations.isEmpty }
+        }
+        step {
+            guard let roadmap = mail.conversations.first(where: { $0.subject == "Q4 roadmap draft" }) else { return }
+            mail.open(roadmap)
+            wait("the roadmap conversation") { mail.openMessages.count == 3 }
+        }
+        step {
+            mail.closeConversation()
+            let service = sampleMail
+            Task { await service?.setFailsLikeOffline(true) }
+            wait(upTo: 0.3) { false }
+        }
+        step {
+            guard let roadmap = mail.conversations.first(where: { $0.subject == "Q4 roadmap draft" }) else { return }
+            mail.open(roadmap)
+            wait("the offline copy") { mail.openMessages.count == 3 && mail.isOffline }
+        }
+        step {
+            check(mail.openMessages.count == 3, "a conversation read before opens offline, from the copy on the Mac")
+            check(mail.isOffline, "and the window says it’s offline")
+            mail.closeConversation()
+            sentMark = sentCount()
+            guard let composer = app.compose(to: [SampleData.person("Sam Rivera")], subject: "Self-test outbox", body: "Waiting for the network.") else { return }
+            composer.undoSendDelay = 0.1
+            composer.send()
+            wait("the Outbox") { mail.outboxCount == 1 }
+        }
+        step {
+            check(mail.outboxCount == 1, "a message sent offline waits in the Outbox")
+            check(app.toast?.text.contains("Outbox") == true, "and says so", app.toast?.text ?? "")
+            let service = sampleMail
+            let session = session
+            Task {
+                await service?.setFailsLikeOffline(false)
+                await app.sync?.sendDue(session, at: AppClock.now().addingTimeInterval(1))
+            }
+            wait("the Outbox to send") { mail.outboxCount == 0 && sentCount() > sentMark }
+        }
+        step {
+            check(mail.outboxCount == 0 && sentCount() > sentMark, "the Outbox sends once the server can be reached")
+            mail.refresh()
+            wait("back online") { !mail.isOffline }
+        }
+        step {
+            check(!mail.isOffline, "and the offline note goes once the server answers")
         }
 
         // MARK: Accounts, windows and menus

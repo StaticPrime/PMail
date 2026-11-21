@@ -29,6 +29,10 @@ enum DebugLaunchOptions {
         return defaults.bool(forKey: "PMNoAccounts") ? [] : SampleData.accounts
     }
 
+    /// A fresh folder for the sample accounts' caches, Outboxes and snoozes, so the real ones are never touched.
+    static let sampleStorage = FileManager.default.temporaryDirectory
+        .appendingPathComponent("PMail Sample Accounts \(UUID().uuidString)", isDirectory: true)
+
     /// Settings for sample runs, emptied at launch so every run starts the same way.
     static let sampleDefaults: UserDefaults = {
         let name = "com.pugglesoft.PMail.sample"
@@ -92,6 +96,35 @@ enum DebugLaunchOptions {
             if folderName == "all" { mail.select(folderID: nil) } else if let folder { mail.select(folderID: folder.id) }
         }
         if let tab = mail.inboxTabs[safe: defaults.integer(forKey: "PMTab") - 1] { mail.select(tabID: tab.id) }
+        // `-PMSampleWaiting YES`: snoozed conversations and a scheduled message, to look at Snoozed and Scheduled. The
+        // folder named with -PMFolder is chosen once they're there.
+        if defaults.bool(forKey: "PMSampleWaiting") {
+            let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: AppClock.now()))
+                .flatMap { Calendar.current.date(bySettingHour: 8, minute: 0, second: 0, of: $0) } ?? AppClock.now()
+            let book = session.storage.snoozes
+            let queue = session.storage.queue
+            let service = session.services.mail
+            let message = OutgoingMessage(from: session.account.address, to: [SampleData.person("Priya Shah")], subject: "Friday demo notes",
+                                          textBody: "Hi Priya,\n\nNotes from the demo are below. Talk Monday!\n\nJamie")
+            let request = ListRequest(folderID: mail.inbox?.id, tabID: mail.inboxTabs.first?.id)
+            Task {
+                let inbox = try? await service.listConversations(request)
+                for conversation in inbox?.conversations.filter({ $0.subject.contains("Hiking") || $0.subject.contains("Turkey") }) ?? [] {
+                    try? await book.add(Snooze(conversation: conversation, wakeAt: tomorrow))
+                }
+                try? await queue.save(QueuedMessage(message: message, sendAt: tomorrow.addingTimeInterval(3600 * 24 * 2), queuedAt: AppClock.now()))
+                await mail.refreshLocalFolders()
+                if let role = defaults.string(forKey: "PMFolder").flatMap(FolderRole.init(rawValue:)), let folder = mail.folder(role: role) {
+                    mail.select(folderID: folder.id)
+                    try? await Task.sleep(for: .milliseconds(300))
+                    if let open = mail.conversations[safe: defaults.integer(forKey: "PMOpen") - 1] { mail.open(open) }
+                }
+            }
+        }
+        // `-PMOffline YES`: the sample servers stop answering, as if the network were down.
+        if defaults.bool(forKey: "PMOffline"), let service = session.services.mail as? SampleMailService {
+            Task { await service.setFailsLikeOffline(true) }
+        }
         if let search = defaults.string(forKey: "PMSearch") {
             app.searchText = search
             if app.module == .mail { mail.search(search) }

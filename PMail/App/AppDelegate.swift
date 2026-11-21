@@ -8,7 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingLinks: [URL] = []
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        UserDefaults.standard.register(defaults: ["NSFullScreenMenuItemEverywhere": false, "SingleKeyShortcuts": true, "UndoSendSeconds": 5])
+        UserDefaults.standard.register(defaults: ["NSFullScreenMenuItemEverywhere": false, "SingleKeyShortcuts": true, "UndoSendSeconds": 5,
+                                                  "NotifyNewMail": true, "CheckMinutes": 2])
         let oauth = OAuthConfiguration.load()
         let accounts = makeAccounts(oauth: oauth)
         app = AppModel(accounts: accounts, oauth: oauth)
@@ -32,6 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
         showMainWindow(nil)
         app.current?.activate()
+        let sync = SyncController(app: app, notifier: makeNotifier())
+        app.sync = sync
+        sync.start()
         for link in pendingLinks { app.handleMailto(link) }
         pendingLinks = []
         #if DEBUG
@@ -40,16 +44,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 
+    /// The system's notifications, or (in sample runs) a list of them.
+    private func makeNotifier() -> any MailNotifier {
+        #if DEBUG
+        if DebugLaunchOptions.usesSampleAccounts { return RecordingNotifier() }
+        #endif
+        return SystemNotifier()
+    }
+
     /// The saved accounts with their real services, or (in debug runs that ask for them) the sample accounts.
     private func makeAccounts(oauth: OAuthConfiguration) -> AccountsController {
         #if DEBUG
         if DebugLaunchOptions.usesSampleAccounts {
             return AccountsController(store: nil, secrets: MemorySecretStore(), factory: SampleServiceFactory(),
-                                      defaults: DebugLaunchOptions.sampleDefaults)
+                                      storageFolder: DebugLaunchOptions.sampleStorage, defaults: DebugLaunchOptions.sampleDefaults)
         }
         #endif
         return AccountsController(store: AccountStore(fileURL: Self.supportFolder.appendingPathComponent("Accounts.json")),
-                                  secrets: KeychainSecretStore(), factory: LiveServiceFactory(oauth: oauth, folder: Self.supportFolder))
+                                  secrets: KeychainSecretStore(), factory: LiveServiceFactory(oauth: oauth, folder: Self.supportFolder),
+                                  storageFolder: Self.accountsFolder(in: Self.supportFolder))
+    }
+
+    /// Application Support/PMail/Accounts: a folder for each account's cache, Outbox, snoozes and anything kept only
+    /// on the Mac.
+    static func accountsFolder(in support: URL) -> URL {
+        support.appendingPathComponent("Accounts", isDirectory: true)
     }
 
     /// Application Support/PMail in the app's container.
@@ -81,6 +100,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
     /// Archives, deletes and moves still waiting out their Undo reach the server before PMail quits.
+    func applicationWillTerminate(_ notification: Notification) {
+        app.sync?.stop()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let sessions = app.accounts.sessions.values.filter { $0.mail.hasPendingActions }
         guard !sessions.isEmpty else { return .terminateNow }

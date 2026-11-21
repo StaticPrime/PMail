@@ -99,6 +99,17 @@ struct ConversationActions: View {
     var body: some View {
         let role = mail.currentFolder?.role
         HStack(spacing: 2) {
+            if MailViewModel.isLocal(mail.selectedFolderID) {
+                LocalFolderActions(mail: mail, targets: targets)
+            } else {
+                standardActions(role: role)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func standardActions(role: FolderRole?) -> some View {
+        HStack(spacing: 2) {
             if mail.capabilities.canArchive, role != .archive {
                 IconButton(symbol: "archivebox", help: "Archive (E)") { mail.perform(.archive, on: targets) }
             }
@@ -117,6 +128,14 @@ struct ConversationActions: View {
             IconButton(symbol: anyUnread ? "envelope.open" : "envelope.badge", help: anyUnread ? "Mark as read" : "Mark as unread") {
                 mail.perform(anyUnread ? .markRead : .markUnread, on: targets)
                 if !anyUnread, mail.openConversation != nil { mail.closeConversation() }
+            }
+            if mail.canSnooze {
+                LaterPicker(help: "Snooze", heading: "Snooze until…", choices: { LaterTimes.snooze(now: AppClock.now()) }) { date in
+                    mail.snooze(targets, until: date)
+                } label: {
+                    Image(systemName: "clock").foregroundStyle(Theme.icon).frame(width: 36, height: 36)
+                }
+                .frame(width: 36, height: 36)
             }
             if role == .trash || role == .archive || (role != .inbox && mail.capabilities.usesLabels && mail.selectedFolderID == nil) {
                 IconButton(symbol: "tray.and.arrow.down", help: "Move to Inbox") { mail.perform(.moveToInbox, on: targets) }
@@ -290,7 +309,7 @@ struct MessageRow: View {
                 if hovering {
                     HoverActions(mail: mail, conversation: conversation)
                 } else {
-                    Text(mail.formatting.listDate(conversation.date))
+                    Text(mail.rowDate(for: conversation))
                         .font(.pm(12.5, unread ? .bold : .regular))
                         .foregroundStyle(unread ? Theme.textPrimary : Theme.textSecondary)
                         .monospacedDigit()
@@ -334,7 +353,20 @@ private struct HoverActions: View {
     let mail: MailViewModel
     let conversation: Conversation
 
+    @ViewBuilder
     var body: some View {
+        if MailViewModel.isLocal(mail.selectedFolderID) {
+            if mail.selectedFolderID == Snooze.folderID {
+                IconButton(symbol: "tray.and.arrow.down", help: "Unsnooze", size: 32, iconSize: 14) { mail.unsnooze(conversation) }
+            } else {
+                Text(mail.rowDate(for: conversation)).font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
+            }
+        } else {
+            hoverButtons
+        }
+    }
+
+    private var hoverButtons: some View {
         HStack(spacing: 0) {
             if mail.capabilities.canArchive, mail.currentFolder?.role != .archive {
                 IconButton(symbol: "archivebox", help: "Archive", size: 32, iconSize: 14) { mail.perform(.archive, on: [conversation]) }
@@ -343,6 +375,30 @@ private struct HoverActions: View {
             IconButton(symbol: conversation.isUnread ? "envelope.open" : "envelope.badge",
                        help: conversation.isUnread ? "Mark as read" : "Mark as unread", size: 32, iconSize: 14) {
                 mail.perform(conversation.isUnread ? .markRead : .markUnread, on: [conversation])
+            }
+            if mail.canSnooze {
+                LaterPicker(help: "Snooze", heading: "Snooze until…", choices: { LaterTimes.snooze(now: AppClock.now()) }) { date in
+                    mail.snooze([conversation], until: date)
+                } label: {
+                    Image(systemName: "clock").font(.system(size: 14)).foregroundStyle(Theme.icon).frame(width: 32, height: 32)
+                }
+                .frame(width: 32, height: 32)
+            }
+        }
+    }
+}
+
+/// Buttons for Snoozed, Scheduled and Outbox rows, which PMail keeps on the Mac.
+struct LocalFolderActions: View {
+    let mail: MailViewModel
+    let targets: [Conversation]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            if mail.selectedFolderID == Snooze.folderID {
+                IconButton(symbol: "tray.and.arrow.down", help: "Unsnooze: back to the inbox now") {
+                    for conversation in targets { mail.unsnooze(conversation) }
+                }
             }
         }
     }
@@ -358,6 +414,22 @@ private struct RowMenu: View {
         let targets = mail.checkedIDs.contains(conversation.id) ? mail.checkedConversations : [conversation]
         Button("Open") { mail.open(conversation) }
         Divider()
+        if mail.selectedFolderID == Snooze.folderID {
+            Button("Unsnooze") { for item in targets { mail.unsnooze(item) } }
+        } else if !MailViewModel.isLocal(mail.selectedFolderID) {
+            standardItems(targets)
+        }
+    }
+
+    @ViewBuilder
+    private func standardItems(_ targets: [Conversation]) -> some View {
+        if mail.canSnooze {
+            Menu("Snooze until") {
+                ForEach(LaterTimes.snooze(now: AppClock.now()), id: \.title) { choice in
+                    Button("\(choice.title)   \(AppClock.formatting.laterDate(choice.date))") { mail.snooze(targets, until: choice.date) }
+                }
+            }
+        }
         if mail.capabilities.canArchive { Button("Archive") { mail.perform(.archive, on: targets) } }
         Button("Delete") { mail.perform(.trash, on: targets) }
         Button(targets.contains(where: \.isUnread) ? "Mark as read" : "Mark as unread") {
@@ -403,6 +475,9 @@ private struct EmptyListState: View {
         case .starred?: return "No starred messages. Stars let you give messages a special status to make them easier to find."
         case .sent?: return "No sent messages."
         case .drafts?: return "You don’t have any saved drafts."
+        case .snoozed?: return "Nothing snoozed. Snooze a conversation to have it come back to the inbox when you’re ready for it."
+        case .scheduled?: return "No scheduled messages."
+        case .outbox?: return "Your Outbox is empty."
         case .spam?: return "Hooray, no spam here!"
         case .trash?: return "No conversations in Trash."
         default: return "No conversations here."

@@ -160,17 +160,98 @@ final class ComposeModel: Identifiable {
 
     private func deliver(_ message: OutgoingMessage) async {
         let service = session.services.mail
+        // Offline, it goes straight to the Outbox.
+        if app?.sync?.isOnline == false {
+            await putInOutbox(message)
+            return
+        }
         do {
             try await service.send(message)
             if let savedDraft { try? await service.deleteDraft(savedDraft) }
             isSending = false
             app?.show("Message sent.")
             session.mail.didSend()
+        } catch where MailViewModel.isConnectionProblem(error) {
+            await putInOutbox(message)
         } catch {
             isSending = false
             self.error = "It wasn’t sent: \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
             isMinimized = false
             app?.open(self)
+        }
+    }
+
+    /// Keeps a message the server couldn't take in the Outbox, to send once it can.
+    private func putInOutbox(_ message: OutgoingMessage) async {
+        isSending = false
+        do {
+            try await session.storage.queue.save(QueuedMessage(message: message, queuedAt: AppClock.now(), draft: savedDraft))
+            session.mail.queueChanged()
+            app?.show("You’re offline. The message is in your Outbox and will be sent when PMail can reach the server.", duration: 8)
+        } catch {
+            self.error = "It wasn’t sent, and couldn’t be kept to send later: \((error as? LocalizedError)?.errorDescription ?? "")"
+            isMinimized = false
+            app?.open(self)
+        }
+    }
+
+    // MARK: Scheduling
+
+    /// Sends the message at `date` instead of now. It waits on this Mac, in Scheduled, until then.
+    func schedule(at date: Date) {
+        guard !to.isEmpty || !cc.isEmpty || !bcc.isEmpty else {
+            error = "Add at least one recipient."
+            return
+        }
+        if let bad = invalidAddresses.first {
+            error = "“\(bad)” isn’t a complete email address."
+            return
+        }
+        error = nil
+        let item = QueuedMessage(message: outgoing(), sendAt: date, queuedAt: AppClock.now(), draft: savedDraft)
+        app?.close(self)
+        let queue = session.storage.queue
+        let mail = session.mail
+        let app = self.app
+        Task { [weak self] in
+            do {
+                try await queue.save(item)
+                mail.queueChanged()
+                app?.show("Send scheduled for \(AppClock.formatting.laterDate(date)).", actionTitle: "Undo", duration: 8) { [weak self] in
+                    Task {
+                        await queue.remove(item.id)
+                        mail.queueChanged()
+                        if let self {
+                            self.isMinimized = false
+                            self.app?.open(self)
+                        }
+                    }
+                }
+            } catch {
+                guard let self else { return }
+                self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                app?.open(self)
+            }
+        }
+    }
+
+    /// Fills the window with a message written earlier (one taken out of Scheduled or the Outbox).
+    func load(_ message: OutgoingMessage) {
+        to = message.to
+        cc = message.cc
+        bcc = message.bcc
+        subject = message.subject
+        attachments = message.attachments
+        inReplyTo = message.inReplyTo
+        references = message.references
+        threadID = message.threadID
+        if let html = message.htmlBody, let data = html.data(using: .utf8),
+           let text = NSAttributedString(html: data, options: [.documentType: NSAttributedString.DocumentType.html,
+                                                               .characterEncoding: String.Encoding.utf8.rawValue], documentAttributes: nil) {
+            body = text
+            bodyRevision += 1
+        } else {
+            setPlainBody(message.textBody)
         }
     }
 

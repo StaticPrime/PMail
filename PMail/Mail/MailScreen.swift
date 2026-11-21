@@ -16,6 +16,8 @@ struct MailScreen: View {
                     if mail.needsSignIn {
                         Banner(text: "\(session.account.email) needs to be signed in again.", symbol: "person.crop.circle.badge.exclamationmark",
                                actionTitle: "Sign In…") { app.sheet = .addAccount(session.account.kind) }
+                    } else if mail.isOffline {
+                        OfflineBanner()
                     }
                     if mail.openConversation != nil {
                         ConversationView(app: app, session: session, mail: mail)
@@ -97,7 +99,7 @@ struct MailSidebar: View {
     }
 
     private func folderRow(_ folder: MailFolder, depth: Int = 0) -> some View {
-        let count = folder.role == .drafts ? (folder.totalCount ?? 0) : folder.unreadCount
+        let count = [.drafts, .scheduled, .outbox].contains(folder.role) ? (folder.totalCount ?? 0) : folder.unreadCount
         let selected = mail.selectedFolderID == folder.id && mail.activeSearch == nil
         // Counts only where they mean something: unread in the inbox, spam and labels, and how many drafts there are.
         let showsCount = count > 0 && [nil, .inbox, .drafts, .spam, .outbox, .scheduled].contains(folder.role)

@@ -14,12 +14,26 @@ protocol ServiceFactory {
     func services(for account: Account, secrets: any SecretStore) -> AccountServices
 }
 
+/// What an account keeps on the Mac: a copy of what it last loaded, messages waiting to be sent, and snoozes.
+struct AccountStorage {
+    let cache: AccountCache
+    let queue: MailQueue
+    let snoozes: SnoozeBook
+
+    init(folder: URL) {
+        cache = AccountCache(folder: folder.appendingPathComponent("Cache", isDirectory: true))
+        queue = MailQueue(folder: folder.appendingPathComponent("Outbox", isDirectory: true))
+        snoozes = SnoozeBook(file: folder.appendingPathComponent("Snoozes.json"))
+    }
+}
+
 /// An account with its services and what each part of the window shows for it. Switching accounts swaps the whole
 /// session, so mail, calendar and contacts always belong to the same account.
 @Observable
 final class AccountSession: Identifiable {
     private(set) var account: Account
     @ObservationIgnored let services: AccountServices
+    @ObservationIgnored let storage: AccountStorage
     let mail: MailViewModel
     let calendar: CalendarViewModel
     let contacts: ContactsViewModel
@@ -27,12 +41,14 @@ final class AccountSession: Identifiable {
 
     var id: UUID { account.id }
 
-    init(account: Account, services: AccountServices, app: AppModel?, defaults: UserDefaults = .standard) {
+    init(account: Account, services: AccountServices, storage: AccountStorage, app: AppModel?, defaults: UserDefaults = .standard) {
         self.account = account
         self.services = services
-        mail = MailViewModel(account: account, service: services.mail, defaults: defaults)
-        calendar = CalendarViewModel(account: account, service: services.calendar, defaults: defaults, today: { AppClock.now() })
-        contacts = ContactsViewModel(account: account, service: services.contacts)
+        self.storage = storage
+        mail = MailViewModel(account: account, service: services.mail, storage: storage, defaults: defaults)
+        calendar = CalendarViewModel(account: account, service: services.calendar, cache: storage.cache, defaults: defaults,
+                                     today: { AppClock.now() })
+        contacts = ContactsViewModel(account: account, service: services.contacts, cache: storage.cache)
         attach(app)
     }
 
@@ -76,15 +92,22 @@ final class AccountsController {
     @ObservationIgnored let secrets: any SecretStore
     @ObservationIgnored let factory: any ServiceFactory
     @ObservationIgnored let defaults: UserDefaults
+    /// Where each account keeps what it keeps on the Mac, in a folder named after its ID.
+    @ObservationIgnored let storageFolder: URL
     @ObservationIgnored weak var app: AppModel?
 
     private static let currentKey = "CurrentAccount"
 
-    init(store: AccountStore?, secrets: any SecretStore, factory: any ServiceFactory, defaults: UserDefaults = .standard) {
+    init(store: AccountStore?, secrets: any SecretStore, factory: any ServiceFactory, storageFolder: URL, defaults: UserDefaults = .standard) {
         self.store = store
         self.secrets = secrets
         self.factory = factory
+        self.storageFolder = storageFolder
         self.defaults = defaults
+    }
+
+    func storageFolder(for id: UUID) -> URL {
+        storageFolder.appendingPathComponent(id.uuidString, isDirectory: true)
     }
 
     var current: AccountSession? { currentID.flatMap { sessions[$0] } }
@@ -98,7 +121,8 @@ final class AccountsController {
     }
 
     private func makeSession(_ account: Account) -> AccountSession {
-        AccountSession(account: account, services: factory.services(for: account, secrets: secrets), app: app, defaults: defaults)
+        AccountSession(account: account, services: factory.services(for: account, secrets: secrets),
+                       storage: AccountStorage(folder: storageFolder(for: account.id)), app: app, defaults: defaults)
     }
 
     func session(for id: UUID) -> AccountSession? { sessions[id] }
@@ -159,6 +183,9 @@ final class AccountsController {
             Task { await mail.close() }
         }
         try? secrets.setSecret(nil, for: id)
+        // The copies and waiting messages go; calendars, contacts and mail kept only on this Mac stay in its folder.
+        let folder = storageFolder(for: id)
+        for name in ["Cache", "Outbox", "Snoozes.json"] { try? FileManager.default.removeItem(at: folder.appendingPathComponent(name)) }
         accounts.removeAll { $0.id == id }
         sessions[id] = nil
         save()

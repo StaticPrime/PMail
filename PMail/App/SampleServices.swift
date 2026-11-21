@@ -73,6 +73,7 @@ actor SampleMailService: MailService {
 
     func loadFolders() async throws -> [MailFolder] {
         await pause()
+        if failsLikeOffline { throw PMailError.connectionFailed("the network is off") }
         return folders.map { folder in
             var folder = folder
             let inside = messages.filter { isIn($0, folder: folder.id) }
@@ -84,6 +85,7 @@ actor SampleMailService: MailService {
 
     func listConversations(_ request: ListRequest) async throws -> ConversationPage {
         await pause()
+        if failsLikeOffline { throw PMailError.connectionFailed("the network is off") }
         var matching = messages.filter { isIn($0, folder: request.folderID) }
         if let tab = request.tabID { matching = matching.filter { $0.summary.labelIDs.contains(tab) } }
         if let query = request.query?.lowercased(), !query.isEmpty {
@@ -107,6 +109,7 @@ actor SampleMailService: MailService {
 
     func loadConversation(id: String, hint: Conversation?) async throws -> [MailMessage] {
         await pause()
+        if failsLikeOffline { throw PMailError.connectionFailed("the network is off") }
         return messages.filter { $0.summary.threadID == id }.sorted { $0.summary.date < $1.summary.date }.map(mailMessage)
     }
 
@@ -171,6 +174,7 @@ actor SampleMailService: MailService {
 
     func send(_ message: OutgoingMessage) async throws {
         await pause()
+        if failsLikeOffline { throw PMailError.connectionFailed("the network is off") }
         sent.append(message)
         counter += 1
         let id = "sent-\(counter)"
@@ -197,6 +201,46 @@ actor SampleMailService: MailService {
     }
 
     func close() async {}
+
+    // MARK: Keeping up to date
+
+    /// The state is the newest inbox message's date: anything newer is new.
+    func checkForNewMail(since state: MailSyncState?) async throws -> NewMail {
+        await pause()
+        if failsLikeOffline { throw PMailError.connectionFailed("the network is off") }
+        let inbox = messages.filter { isIn($0, folder: role(.inbox)) }.map(\.summary)
+        let newest = inbox.map(\.date).max() ?? .distantPast
+        let unread = inbox.filter(\.isUnread).count
+        guard let state, let seconds = Double(state.value) else {
+            return NewMail(messages: [], state: MailSyncState(String(newest.timeIntervalSince1970)), inboxUnread: unread)
+        }
+        let since = Date(timeIntervalSince1970: seconds)
+        let arrived = inbox.filter { $0.date > since }.sorted { $0.date > $1.date }
+        return NewMail(messages: arrived, state: MailSyncState(String(max(newest, since).timeIntervalSince1970)), inboxUnread: unread)
+    }
+
+    func findMessages(withMessageIDs messageIDs: [String]) async throws -> [MessageSummary] {
+        await pause()
+        if failsLikeOffline { throw PMailError.connectionFailed("the network is off") }
+        let wanted = Set(messageIDs)
+        return messages.map(\.summary).filter { $0.messageIDHeader.map(wanted.contains) == true && !$0.labelIDs.contains("TRASH") }
+    }
+
+    /// While set, every call fails as if the network were down (for the self-test).
+    private(set) var failsLikeOffline = false
+
+    func setFailsLikeOffline(_ fails: Bool) { failsLikeOffline = fails }
+
+    /// A new message arriving in the inbox, as if from outside (for the self-test).
+    func deliver(from: MailAddress, subject: String, text: String, at date: Date) {
+        counter += 1
+        let id = "arrived-\(counter)"
+        let labels = capabilities.usesLabels ? ["INBOX", "CATEGORY_PERSONAL", "UNREAD"] : []
+        let summary = MessageSummary(id: id, folderID: capabilities.usesLabels ? nil : role(.inbox), labelIDs: labels, from: from,
+                                     to: [account.address], subject: subject, snippet: HTMLText.snippet(from: text), date: date,
+                                     isUnread: true, messageIDHeader: "<\(id)@example.com>")
+        messages.append(SampleData.Message(summary: summary, text: text))
+    }
 }
 
 actor SampleCalendarService: CalendarService {
