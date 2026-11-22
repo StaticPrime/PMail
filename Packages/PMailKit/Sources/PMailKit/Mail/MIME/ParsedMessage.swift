@@ -80,7 +80,8 @@ public struct ParsedMessage: Sendable, Hashable {
         MessageSummary(id: id, threadID: threadID ?? references.first ?? inReplyTo ?? messageID ?? id, folderID: folderID,
                        labelIDs: labelIDs, from: from, to: to, cc: cc, subject: subject, snippet: snippet, date: date ?? Date(),
                        isUnread: isUnread, isStarred: isStarred, hasAttachments: !attachments.isEmpty,
-                       messageIDHeader: messageID, inReplyTo: inReplyTo, references: references, size: size)
+                       messageIDHeader: messageID, inReplyTo: inReplyTo, references: references, size: size,
+                       senderHints: senderHints)
     }
 
     /// The whole message for the reading pane.

@@ -55,7 +55,7 @@ public enum InboxCategory: String, Codable, Sendable, CaseIterable, Hashable {
 public struct SenderHints: Codable, Sendable, Hashable {
     /// It has a List-Unsubscribe header: newsletters and marketing.
     public var canUnsubscribe: Bool
-    /// Its List-Id header, for mailing lists.
+    /// Its List-Id header (the list's identifier, between the angle brackets), for mailing lists.
     public var listID: String?
     /// Precedence: bulk, list or junk.
     public var isBulk: Bool
@@ -68,26 +68,114 @@ public struct SenderHints: Codable, Sendable, Hashable {
         self.isBulk = isBulk
         self.isAutomatic = isAutomatic
     }
+
+    /// What a message's List-Unsubscribe, List-Id, Precedence and Auto-Submitted header fields say. `field` gives a
+    /// field's value by its name in lowercase, or nil when the message doesn't have it.
+    public init(field: (String) -> String?) {
+        func value(_ name: String) -> String? {
+            guard let value = field(name)?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+            return value
+        }
+        // The first word of a value, in lowercase: "bulk" in "Bulk (newsletter)", "auto-replied" in "auto-replied; x=y".
+        func keyword(_ name: String) -> String? {
+            value(name).map { String($0.lowercased().prefix { !$0.isWhitespace && $0 != ";" && $0 != "(" }) }
+        }
+        self.init(canUnsubscribe: value("list-unsubscribe") != nil, listID: value("list-id").flatMap(Self.listIdentifier),
+                  isBulk: keyword("precedence").map { ["bulk", "list", "junk"].contains($0) } ?? false,
+                  isAutomatic: keyword("auto-submitted").map { !$0.isEmpty && $0 != "no" } ?? false)
+    }
+
+    /// The identifier in a List-Id ("dev.lists.example.org" in "Dev talk <dev.lists.example.org>"), or the whole
+    /// value when it has no angle brackets.
+    static func listIdentifier(_ value: String) -> String? {
+        if let open = value.lastIndex(of: "<"), let close = value[open...].firstIndex(of: ">") {
+            let identifier = value[value.index(after: open)..<close].trimmingCharacters(in: .whitespaces)
+            if !identifier.isEmpty { return identifier }
+        }
+        let trimmed = value.trimmingCharacters(in: CharacterSet(charactersIn: " \t<>"))
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+extension ParsedMessage {
+    /// What the message's headers say about its sender, for sorting an inbox into categories.
+    public var senderHints: SenderHints { SenderHints(field: { header($0) }) }
 }
 
 /// Sorts one account's inbox into categories: by the person's own choice for a sender ("always put mail from them in
-/// Promotions"), otherwise by what the message and its headers say. The choices are kept in a JSON file.
+/// Promotions"), otherwise by the rules (`InboxCategorizer`). The choices are kept in a JSON file; one that's missing
+/// or can't be read counts as no choices. Every change is written straight away.
 public actor InboxSorter {
     public let file: URL
+    /// The choices, by address in lowercase, once read from the file.
+    private var choices: [String: InboxCategory]?
 
     public init(file: URL) {
         self.file = file
     }
 
-    /// The category a message belongs in.
+    /// The category a message belongs in: the one chosen for its sender, else the rules'.
     public func category(of message: MessageSummary) -> InboxCategory {
-        // Filled in by the sorting work: the sender's chosen category first, then the message's own signs.
-        .primary
+        if let email = message.from?.email, let chosen = loaded()[Self.key(for: email)] { return chosen }
+        return InboxCategorizer.category(for: message)
+    }
+
+    /// The categories of several messages, in the same order.
+    public func categories(of messages: [MessageSummary]) -> [InboxCategory] {
+        messages.map { category(of: $0) }
+    }
+
+    /// The category chosen for a sender's mail, or nil when it's sorted automatically.
+    public func chosenCategory(forSender email: String) -> InboxCategory? {
+        loaded()[Self.key(for: email)]
     }
 
     /// Puts a sender's mail in a category from now on (nil goes back to sorting it automatically).
-    public func setCategory(_ category: InboxCategory?, forSender email: String) throws {}
+    public func setCategory(_ category: InboxCategory?, forSender email: String) throws {
+        let key = Self.key(for: email)
+        guard !key.isEmpty else { return }
+        var updated = loaded()
+        guard updated[key] != category else { return }
+        updated[key] = category
+        try save(updated)
+    }
 
     /// The senders the person has put in a category, by address in lowercase.
-    public func senderCategories() -> [String: InboxCategory] { [:] }
+    public func senderCategories() -> [String: InboxCategory] { loaded() }
+
+    /// An address as choices are kept: without spaces or angle brackets around it, in lowercase.
+    static func key(for email: String) -> String {
+        email.trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n<>")).lowercased()
+    }
+
+    /// The file's contents. Categories are kept by name, so one this version doesn't know is skipped, not fatal.
+    private struct Stored: Codable {
+        var version: Int?
+        var senders: [String: String]?
+    }
+
+    private func loaded() -> [String: InboxCategory] {
+        if let choices { return choices }
+        var read: [String: InboxCategory] = [:]
+        if let data = try? Data(contentsOf: file), let stored = try? JSONDecoder().decode(Stored.self, from: data) {
+            for (email, name) in stored.senders ?? [:] {
+                let key = Self.key(for: email)
+                if !key.isEmpty, let category = InboxCategory(rawValue: name) { read[key] = category }
+            }
+        }
+        choices = read
+        return read
+    }
+
+    private func save(_ new: [String: InboxCategory]) throws {
+        do {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            try encoder.encode(Stored(version: 1, senders: new.mapValues(\.rawValue))).write(to: file, options: .atomic)
+        } catch {
+            throw PMailError.server("PMail couldn’t save the inbox categories: \(error.localizedDescription)")
+        }
+        choices = new
+    }
 }

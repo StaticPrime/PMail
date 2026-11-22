@@ -99,6 +99,8 @@ public actor IMAPMailService: MailService {
     nonisolated let labelBook: LabelBook?
     /// Sorts the inbox into categories, shown as tabs; nil leaves the inbox as one list.
     nonisolated let sorter: InboxSorter?
+    /// The inbox's messages as the category tabs sorted them (see IMAPMailService+Categories.swift).
+    var categoryIndex = IMAPCategoryIndex()
 
     public nonisolated var capabilities: MailCapabilities {
         MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: false, hasInboxTabs: sorter != nil, searchesOnServer: true,

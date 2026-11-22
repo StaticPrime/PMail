@@ -8,8 +8,7 @@ import Testing
 
     private static let idleCapabilities = IMAPScript.capabilities + " IDLE"
 
-    private static let summaryFetch = "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE "
-        + "BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE)])"
+    private static let summaryFetch = "(\(IMAPClient.summaryItems))"
 
     private static func inboxStatus(_ tag: String, uidNext: Int, uidValidity: Int = 7, unseen: Int) -> ScriptedByteStream.Step {
         .expect(#"\#(tag) STATUS "INBOX" (UIDNEXT UIDVALIDITY UNSEEN)"#, reply: Script.lines(

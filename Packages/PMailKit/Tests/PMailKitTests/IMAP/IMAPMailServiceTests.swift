@@ -11,8 +11,7 @@ import Testing
             "* STATUS \"\(name)\" (MESSAGES \(messages) UNSEEN \(unseen) UIDNEXT 100 UIDVALIDITY 7)", "\(tag) OK STATUS completed"))
     }
 
-    private static let summaryFetch = "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE "
-        + "BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE)])"
+    private static let summaryFetch = "(\(IMAPClient.summaryItems))"
 
     private static func date(_ text: String) throws -> Date {
         try #require(ISO8601DateFormatter().date(from: text))
@@ -169,8 +168,7 @@ import Testing
             Script.select("A5", "Sent Messages", exists: 2, uidValidity: 9, readOnly: true),
             Script.ok("A6", #"UID SEARCH OR OR HEADER References "<root@example.com>" HEADER In-Reply-To "<root@example.com>" "#
                 + #"HEADER Message-ID "<root@example.com>""#, untagged: ["* SEARCH 5"]),
-            .expect("A7 UID FETCH 5 (UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE "
-                + "BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE)] BODY.PEEK[])", reply: Script.lines(
+            .expect("A7 UID FETCH 5 (\(IMAPClient.summaryItems) BODY.PEEK[])", reply: Script.lines(
                 #"* 1 FETCH (UID 5 FLAGS (\Seen) ENVELOPE ("Sat, 21 Nov 2026 15:00:00 -0500" "Re: Park day" "#
                     + #"(("Pug Tester" NIL "pug" "example.com")) NIL NIL (("Alex Kim" NIL "alex" "example.com")) NIL NIL "#
                     + #""<root@example.com>" "<mine@example.com>") "#

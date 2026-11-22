@@ -32,9 +32,10 @@ public actor IMAPClient {
     /// What the client logs (debug level, mailbox names kept private): what LIST found, for diagnosing a server.
     static let log = Logger(subsystem: "com.pugglesoft.PMail", category: "IMAP")
 
-    /// The fetch items for a message list row: flags, dates, size, envelope, structure, and the threading headers.
+    /// The fetch items for a message list row: flags, dates, size, envelope, structure, the threading headers, and the
+    /// headers that say whether it came from a list or a machine (for sorting the inbox into categories).
     public static let summaryItems = "UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE "
-        + "BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE)]"
+        + "BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE LIST-ID PRECEDENCE AUTO-SUBMITTED)]"
 
     private let connector: any ByteStreamConnector
     private var connection: LineConnection?
