@@ -857,6 +857,40 @@ enum SelfTest {
             if let added = session.contacts.savedContacts.first(where: { $0.givenName == "Taylor" }) { session.contacts.delete(added, quietly: true) }
             wait("Taylor tidied away") { !session.contacts.savedContacts.contains { $0.givenName == "Taylor" } }
         }
+        let riley = MailAddress(name: "Riley Chen", email: "riley@elsewhere.example")
+        step {
+            // Guests invited to an event, the same way.
+            guard var draft = session.calendar.newDraft() else { return check(false, "an event can be started") }
+            draft.title = "Self-test invite"
+            draft.guests = [taylor, riley, SampleData.person("Alex Kim")]
+            app.toast = nil
+            let calendar = session.calendar
+            Task { _ = try? await calendar.save(draft) }
+            wait("the guests", upTo: 6) { session.contacts.savedContacts.contains { $0.givenName == "Taylor" } && app.toast?.actionTitle == "Add…" }
+        }
+        step {
+            let added = session.contacts.savedContacts.first { $0.givenName == "Taylor" }
+            check(added?.jobTitle == "Product Designer" && added?.phones.first?.value == "(503) 555-0161",
+                  "a guest invited to an event who's in the organization's directory is added, with their details")
+            check(app.toast?.text == "Added Taylor Brooks. Add Riley Chen to Contacts?", "and someone new is offered", app.toast?.text ?? "none")
+            check(session.contacts.savedContacts.filter { $0.emails.contains { $0.value == "alex.kim@example.com" } }.count == 1, "a guest already there isn't added again")
+            app.toast = nil
+            let calendar = session.calendar
+            if let invite = calendar.events.first(where: { $0.title == "Self-test invite" }) {
+                var draft = calendar.draft(for: invite)
+                draft.title = "Self-test invite, renamed"
+                Task { _ = try? await calendar.save(draft) }
+            }
+            wait(upTo: 1.5) { false }
+        }
+        step {
+            check(app.toast?.actionTitle != "Add…", "changing the event doesn't ask about its guests again", app.toast?.text ?? "none")
+            if let invite = session.calendar.events.first(where: { $0.title.hasPrefix("Self-test invite") }) { session.calendar.delete(invite, scope: .thisEvent) }
+            if let added = session.contacts.savedContacts.first(where: { $0.givenName == "Taylor" }) { session.contacts.delete(added, quietly: true) }
+            wait("the invite tidied away") {
+                !session.contacts.savedContacts.contains { $0.givenName == "Taylor" } && !session.calendar.events.contains { $0.title.hasPrefix("Self-test invite") }
+            }
+        }
 
         // MARK: The real services, made for each kind of account (nothing connects)
         step {

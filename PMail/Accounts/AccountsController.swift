@@ -97,6 +97,7 @@ final class AccountSession: Identifiable {
         calendar.app = app
         contacts.app = app
         mail.session = self
+        calendar.contacts = contacts
     }
 
     /// Starts loading the account's mail, calendars and contacts the first time it's shown.

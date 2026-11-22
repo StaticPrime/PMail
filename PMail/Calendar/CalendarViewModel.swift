@@ -507,11 +507,24 @@ final class CalendarViewModel {
         return draft
     }
 
+    /// The account's contacts, which guests newly invited are added to (or asked about).
+    @ObservationIgnored weak var contacts: ContactsViewModel?
+
     /// Saves a draft: makes the event (or task), or changes it, creating its video meeting if asked. When the calendar
-    /// can't be reached, the change is kept on this Mac and sent once it can.
+    /// can't be reached, the change is kept on this Mac and sent once it can. Guests just invited who aren't in
+    /// contacts are added (or asked about), as people written to are.
     @discardableResult
     func save(_ draft: EventDraft) async throws -> SaveOutcome {
         if draft.isTask { return try await saveTask(draft) }
+        let outcome = try await saveEvent(draft)
+        let invited = draft.guests.filter { guest in
+            !(draft.original?.attendees.contains { $0.address.isSameMailbox(as: guest.email) } ?? false)
+        }
+        if let contacts, !invited.isEmpty { Task { await contacts.addPeopleWritten(to: invited) } }
+        return outcome
+    }
+
+    private func saveEvent(_ draft: EventDraft) async throws -> SaveOutcome {
         var event = draft.original ?? CalendarEvent(calendarID: draft.calendarID, start: draft.start, end: draft.end)
         event.calendarID = draft.calendarID
         event.title = draft.title.trimmingCharacters(in: .whitespaces)
