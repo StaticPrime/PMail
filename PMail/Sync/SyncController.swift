@@ -106,7 +106,7 @@ final class SyncController {
         do {
             let result = try await session.services.mail.checkForNewMail(since: state)
             await storage.cache.save(syncState: result.state)
-            // Mail from blocked senders goes straight to Junk, unannounced.
+            // Mail from blocked senders goes straight to the spam folder, unannounced.
             let blocked = await storage.blockedSenders.blocked(among: result.messages)
             if !blocked.isEmpty { try? await session.services.mail.perform(.markSpam, on: blocked) }
             let blockedIDs = Set(blocked.map(\.id))

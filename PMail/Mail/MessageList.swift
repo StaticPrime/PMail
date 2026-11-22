@@ -49,9 +49,11 @@ private struct ListToolbar: View {
                 Menu {
                     Button("All") { mail.check(.all) }
                     Button("None") { mail.check(.none) }
-                    Button("Read") { mail.check(.read) }
-                    Button("Unread") { mail.check(.unread) }
-                    if mail.capabilities.canStar {
+                    if !mail.showsDrafts {
+                        Button("Read") { mail.check(.read) }
+                        Button("Unread") { mail.check(.unread) }
+                    }
+                    if mail.capabilities.canStar, !mail.showsDrafts {
                         Button("Starred") { mail.check(.starred) }
                         Button("Unstarred") { mail.check(.unstarred) }
                     }
@@ -66,15 +68,17 @@ private struct ListToolbar: View {
             .padding(.leading, 8)
             if mail.checkedIDs.isEmpty {
                 IconButton(symbol: "arrow.clockwise", help: "Refresh") { mail.refresh() }
-                Menu {
-                    Button("Mark all as read") { mail.perform(.markRead, on: mail.conversations) }
-                } label: {
-                    Image(systemName: "ellipsis").rotationEffect(.degrees(90)).foregroundStyle(Theme.icon)
+                if !mail.showsDrafts {
+                    Menu {
+                        Button("Mark all as read") { mail.perform(.markRead, on: mail.conversations) }
+                    } label: {
+                        Image(systemName: "ellipsis").rotationEffect(.degrees(90)).foregroundStyle(Theme.icon)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: 36, height: 36)
+                    .help("More")
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .frame(width: 36, height: 36)
-                .help("More")
             } else {
                 ConversationActions(app: app, mail: mail, targets: mail.checkedConversations)
             }
@@ -101,6 +105,14 @@ struct ConversationActions: View {
         HStack(spacing: 2) {
             if MailViewModel.isLocal(mail.selectedFolderID) {
                 LocalFolderActions(mail: mail, targets: targets)
+            } else if mail.showsDrafts {
+                // Drafts aren't mail yet: nothing to reply to, read, star or file away, only to throw away.
+                Button { mail.discardDrafts(targets) } label: {
+                    Text("Discard Drafts").font(.pm(13.5, .medium)).foregroundStyle(Theme.accent)
+                        .padding(.horizontal, 10).frame(height: 32).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(targets.count == 1 ? "Throw this draft away" : "Throw these \(targets.count) drafts away")
             } else {
                 standardActions(role: role)
             }
@@ -249,7 +261,7 @@ struct MessageRow: View {
         HStack(spacing: 0) {
             CheckBox(isOn: checked, help: checked ? "Deselect" : "Select") { mail.toggleChecked(conversation.id) }
                 .padding(.leading, 8)
-            if mail.capabilities.canStar {
+            if mail.capabilities.canStar, !mail.showsDrafts {
                 Button {
                     mail.perform(conversation.isStarred ? .unstar : .star, on: [conversation])
                 } label: {
@@ -363,6 +375,8 @@ private struct HoverActions: View {
             } else {
                 Text(mail.rowDate(for: conversation)).font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
             }
+        } else if mail.showsDrafts {
+            IconButton(symbol: "trash", help: "Discard draft", size: 32, iconSize: 14) { mail.discardDrafts([conversation]) }
         } else {
             hoverButtons
         }
@@ -414,12 +428,17 @@ private struct RowMenu: View {
 
     var body: some View {
         let targets = mail.checkedIDs.contains(conversation.id) ? mail.checkedConversations : [conversation]
-        Button("Open") { mail.open(conversation) }
-        Divider()
-        if mail.selectedFolderID == Snooze.folderID {
-            Button("Unsnooze") { for item in targets { mail.unsnooze(item) } }
-        } else if !MailViewModel.isLocal(mail.selectedFolderID) {
-            standardItems(targets)
+        if mail.showsDrafts {
+            Button("Edit Draft") { mail.open(conversation) }
+            Button(targets.count == 1 ? "Discard Draft" : "Discard \(targets.count) Drafts") { mail.discardDrafts(targets) }
+        } else {
+            Button("Open") { mail.open(conversation) }
+            Divider()
+            if mail.selectedFolderID == Snooze.folderID {
+                Button("Unsnooze") { for item in targets { mail.unsnooze(item) } }
+            } else if !MailViewModel.isLocal(mail.selectedFolderID) {
+                standardItems(targets)
+            }
         }
     }
 

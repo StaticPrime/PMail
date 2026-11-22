@@ -100,7 +100,7 @@ struct SettingsView: View {
                 }
             }
             if blocked.isEmpty {
-                Text("No one is blocked. Report spam offers to block the sender, or everything from their domain, so their mail goes to Junk as it arrives.")
+                Text("No one is blocked. Report spam offers to block the sender, or everything from their domain, so their mail goes to \(mail?.spamFolderName ?? "Junk") as it arrives.")
                     .font(.pm(11.5)).foregroundStyle(.secondary)
             } else {
                 ScrollView {

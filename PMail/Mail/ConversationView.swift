@@ -65,7 +65,7 @@ struct ConversationView: View {
                             }
                             Divider().overlay(Theme.divider).padding(.leading, 72)
                         }
-                        if let last = mail.openMessages.last, mail.openQueuedItem == nil {
+                        if let last = mail.openMessages.last(where: { !$0.summary.isDraft }), mail.openQueuedItem == nil {
                             HStack(spacing: 12) {
                                 OutlinePillButton(title: "Reply", symbol: "arrowshape.turn.up.left") { app.reply(to: last, kind: .reply, in: session) }
                                 if last.summary.to.count + last.summary.cc.count > 1 {
@@ -126,9 +126,9 @@ private struct CollapsedMessage: View {
         let sender = message.summary.from ?? MailAddress(email: "")
         HStack(spacing: 16) {
             Avatar(name: sender.name ?? "", email: sender.email, size: 40)
-            Text(sender.isSameMailbox(as: mail.account.email) ? "me" : sender.displayName)
+            Text(message.summary.isDraft ? "Draft" : sender.isSameMailbox(as: mail.account.email) ? "me" : sender.displayName)
                 .font(.pm(14, message.summary.isUnread ? .bold : .semibold))
-                .foregroundStyle(Theme.textPrimary)
+                .foregroundStyle(message.summary.isDraft ? Theme.danger : Theme.textPrimary)
                 .frame(width: 180, alignment: .leading)
                 .lineLimit(1)
             Text(message.summary.snippet.isEmpty ? HTMLText.snippet(from: message.textBody ?? "") : message.summary.snippet)
@@ -143,11 +143,14 @@ private struct CollapsedMessage: View {
         .frame(height: 64)
         .background(hovering ? Theme.hover.opacity(0.5) : .clear)
         .contentShape(Rectangle())
-        .onTapGesture { mail.toggleExpanded(message.id) }
+        .onTapGesture {
+            // A draft opens to carry on writing it.
+            if message.summary.isDraft { mail.editDraft(message.summary) } else { mail.toggleExpanded(message.id) }
+        }
         .onHover { hovering = $0 }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
-        .accessibilityHint("Shows the whole message")
+        .accessibilityHint(message.summary.isDraft ? "Opens the draft to edit it" : "Shows the whole message")
     }
 }
 
@@ -174,8 +177,14 @@ private struct ExpandedMessage: View {
                     }
                     Spacer(minLength: 8)
                     Text(mail.formatting.messageDate(summary.date)).font(.pm(12)).foregroundStyle(Theme.textSecondary)
+                    // A draft isn't mail yet: it's edited or thrown away, not starred or replied to.
+                    if summary.isDraft, mail.openQueuedItem == nil {
+                        Text("Draft").font(.pm(12.5, .semibold)).foregroundStyle(Theme.danger)
+                        Button("Edit") { mail.editDraft(summary) }.help("Carry on writing this draft")
+                        Button("Discard") { mail.discardDraft(summary) }.help("Throw this draft away")
+                    }
                     // A message waiting to be sent has nothing to star or reply to yet.
-                    if mail.openQueuedItem == nil {
+                    if mail.openQueuedItem == nil, !summary.isDraft {
                         if mail.capabilities.canStar {
                             IconButton(symbol: summary.isStarred ? "star.fill" : "star", help: summary.isStarred ? "Starred" : "Not starred",
                                        size: 30, iconSize: 14, tint: summary.isStarred ? Theme.star : Theme.icon) {

@@ -149,6 +149,11 @@ final class AppModel {
 
     func open(_ model: ComposeModel) {
         module = .mail
+        // One that's already open comes to the front rather than opening twice.
+        if composers.contains(where: { $0 === model }) {
+            composers.removeAll { $0 === model }
+            model.isMinimized = false
+        }
         // At most three stay open side by side; older ones minimize.
         for other in composers where !other.isMinimized && composers.filter({ !$0.isMinimized }).count >= 3 {
             other.isMinimized = true

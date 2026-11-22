@@ -13,12 +13,12 @@ public actor POPMailService: MailService {
     public static let draftsID = "Drafts"
     public static let trashID = "Trash"
     public static let archiveID = "Archive"
-    public static let junkID = "Junk"
+    public static let spamID = "Spam"
 
     /// The folders messages can be moved between (Starred only shows messages, it doesn't hold them).
-    private static let localFolderIDs: Set<String> = [inboxID, sentID, draftsID, archiveID, junkID, trashID]
+    private static let localFolderIDs: Set<String> = [inboxID, sentID, draftsID, archiveID, spamID, trashID]
     /// Folders whose messages stay out of All Mail, Starred and conversations opened from elsewhere.
-    private static let setAsideIDs: Set<String> = [junkID, trashID]
+    private static let setAsideIDs: Set<String> = [spamID, trashID]
     private static let firstSyncKey = "pop.firstSyncDone"
     /// The most messages one check for new mail returns (the newest).
     static let newMailLimit = 50
@@ -58,7 +58,7 @@ public actor POPMailService: MailService {
         var folders: [MailFolder] = []
         for (id, name, role) in [(Self.inboxID, "Inbox", FolderRole.inbox), (Self.starredID, "Starred", .starred),
                                  (Self.sentID, "Sent", .sent), (Self.draftsID, "Drafts", .drafts), (Self.archiveID, "Archive", .archive),
-                                 (Self.junkID, "Junk", .spam), (Self.trashID, "Trash", .trash)] {
+                                 (Self.spamID, "Junk", .spam), (Self.trashID, "Trash", .trash)] {
             if id == Self.starredID {
                 folders.append(MailFolder(id: id, name: name, role: role, unreadCount: starred.filter(\.isUnread).count,
                                           totalCount: starred.count))
@@ -244,7 +244,7 @@ public actor POPMailService: MailService {
             }
             try await store.move(ids: ids, to: folderID)
         case .archive: try await store.move(ids: ids, to: Self.archiveID)
-        case .markSpam: try await store.move(ids: ids, to: Self.junkID)
+        case .markSpam: try await store.move(ids: ids, to: Self.spamID)
         case .notSpam: try await store.move(ids: ids, to: Self.inboxID)
         case .addLabel, .removeLabel:
             throw PMailError.notSupported("POP accounts don’t use labels.")

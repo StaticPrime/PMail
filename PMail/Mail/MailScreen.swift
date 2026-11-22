@@ -42,7 +42,7 @@ struct MailScreen: View {
             }
             Button("Cancel", role: .cancel) { mail.spamReport = nil }
         } message: { _ in
-            Text("Mail from blocked senders goes to Junk as it arrives. You can unblock them in Settings.")
+            Text("Mail from blocked senders goes to \(mail.spamFolderName) as it arrives. You can unblock them in Settings.")
         }
     }
 }

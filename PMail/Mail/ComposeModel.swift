@@ -49,6 +49,9 @@ final class ComposeModel: Identifiable {
 
     var account: Account { session.account }
 
+    /// The saved draft this window is editing, so opening that draft again brings this window forward.
+    var editingDraftID: String? { savedDraft?.id }
+
     var title: String {
         if !subject.isEmpty { return subject }
         switch kind {
@@ -167,7 +170,10 @@ final class ComposeModel: Identifiable {
         }
         do {
             try await service.send(message)
-            if let savedDraft { try? await service.deleteDraft(savedDraft) }
+            if let savedDraft {
+                try? await service.deleteDraft(savedDraft)
+                session.mail.draftsChanged()
+            }
             isSending = false
             app?.show("Message sent.")
             session.mail.didSend()
@@ -255,6 +261,22 @@ final class ComposeModel: Identifiable {
         }
     }
 
+    /// Fills the window with a saved draft to carry on writing: saving replaces that draft, and sending or discarding
+    /// deletes it. Closing it unchanged leaves the draft as it was.
+    func load(draft message: MailMessage, files: [OutgoingAttachment]) {
+        let summary = message.summary
+        load(OutgoingMessage(from: account.address, to: summary.to, cc: summary.cc, bcc: message.bcc, subject: summary.subject,
+                             textBody: message.textBody ?? "", htmlBody: message.htmlBody, attachments: files,
+                             inReplyTo: summary.inReplyTo, references: summary.references, threadID: summary.threadID))
+        savedDraft = summary
+        lastSavedFingerprint = Self.fingerprint(outgoing())
+    }
+
+    /// What changed-or-not compares when closing, to save a draft only when there's something new in it.
+    private static func fingerprint(_ message: OutgoingMessage) -> String {
+        "\(message.to)\(message.cc)\(message.bcc)\(message.subject)\(message.textBody)\(message.attachments.count)"
+    }
+
     /// Stops a message whose few seconds haven't run out, and opens it again.
     func undoSend() {
         sendTask?.cancel()
@@ -272,7 +294,7 @@ final class ComposeModel: Identifiable {
         app?.close(self)
         guard !isEmpty, session.services.mail.capabilities.supportsDrafts else { return }
         let message = outgoing()
-        let fingerprint = "\(message.to)\(message.cc)\(message.subject)\(message.textBody)\(message.attachments.count)"
+        let fingerprint = Self.fingerprint(message)
         guard fingerprint != lastSavedFingerprint else { return }
         lastSavedFingerprint = fingerprint
         let previous = savedDraft
@@ -281,6 +303,7 @@ final class ComposeModel: Identifiable {
             do {
                 savedDraft = try await service.saveDraft(message, replacing: previous)
                 app?.show("Draft saved.")
+                session.mail.draftsChanged()
             } catch {
                 app?.report(error, doing: "Saving the draft")
             }
@@ -293,7 +316,11 @@ final class ComposeModel: Identifiable {
         app?.close(self)
         if let savedDraft {
             let service = session.services.mail
-            Task { try? await service.deleteDraft(savedDraft) }
+            let mail = session.mail
+            Task {
+                try? await service.deleteDraft(savedDraft)
+                mail.draftsChanged()
+            }
         }
         if !isEmpty { app?.show("Draft discarded.") }
     }

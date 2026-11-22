@@ -72,6 +72,8 @@ final class MailViewModel {
         var onUndo: (() -> Void)?
         /// Whether it takes its conversations out of the list it was made in.
         var leaves = false
+        /// Drafts thrown away: deleted as drafts rather than moved.
+        var discardsDrafts = false
     }
     @ObservationIgnored private var pending: [UUID: PendingAction] = [:]
     @ObservationIgnored private var committing: [UUID: PendingAction] = [:]
@@ -97,7 +99,7 @@ final class MailViewModel {
         return capabilities
     }
 
-    /// Whether Report spam has somewhere to put mail: labels, or a Junk folder.
+    /// Whether Report spam has somewhere to put mail: labels, or a spam folder.
     var canReportSpam: Bool {
         service.capabilities.usesLabels || !foldersLoaded || serviceFolders.contains { $0.role == .spam }
     }
@@ -266,7 +268,7 @@ final class MailViewModel {
         let service = self.service
         Task {
             for item in waiting {
-                do { try await service.perform(item.action, on: item.messages) } catch { app?.report(error, doing: "That change") }
+                do { try await Self.apply(item, with: service) } catch { app?.report(error, doing: "That change") }
             }
             await loadFolders(thenList: false)
             loadList()
@@ -441,6 +443,15 @@ final class MailViewModel {
         return currentFolder.map(displayName(for:)) ?? "All Mail"
     }
 
+    /// What the spam folder is called: Spam or Junk, as the server words it, and Junk when it says neither (or PMail
+    /// keeps the folder itself).
+    static func spamName(_ serverName: String) -> String {
+        serverName.range(of: "spam", options: .caseInsensitive) != nil ? "Spam" : "Junk"
+    }
+
+    /// This account's spam folder's name, for messages that mention it.
+    var spamFolderName: String { folder(role: .spam).map(displayName(for:)) ?? "Junk" }
+
     func displayName(for folder: MailFolder) -> String {
         switch folder.role {
         case .inbox: "Inbox"
@@ -453,7 +464,7 @@ final class MailViewModel {
         case .outbox: "Outbox"
         case .archive: "Archive"
         case .allMail: "All Mail"
-        case .spam: capabilities.usesLabels ? "Spam" : (folder.name.isEmpty ? "Junk" : folder.name)
+        case .spam: Self.spamName(folder.name)
         case .trash: "Trash"
         case nil: folder.name
         }
@@ -527,6 +538,11 @@ final class MailViewModel {
     var openSnoozeTime: Date? { openConversation.flatMap { snoozeTimes[$0.id] } }
 
     func open(_ conversation: Conversation) {
+        // A draft opens in a window to carry on writing, not to be read.
+        if queuedItems[conversation.id] == nil, let draft = draftToEdit(in: conversation) {
+            editDraft(draft)
+            return
+        }
         openConversation = conversation
         openMessages = []
         conversationError = nil
@@ -746,7 +762,7 @@ final class MailViewModel {
     }
 
     private func fileAway(_ action: MailAction, messages: [MessageSummary], count: Int, note: String? = nil, onUndo: (() -> Void)? = nil,
-                          alwaysLeaves: Bool = false) {
+                          alwaysLeaves: Bool = false, discardsDrafts: Bool = false, staysOpen: Bool = false) {
         let ids = Set(messages.map(\.id))
         let snapshot = conversations
         let total = totalCount
@@ -762,7 +778,7 @@ final class MailViewModel {
             checkedIDs.subtract(snapshot.map(\.id).filter { id in !conversations.contains { $0.id == id } })
         }
         // Leaving a conversation that was filed away goes on to the next one, or back to the list.
-        if let open = wasOpen, open.messages.allSatisfy({ ids.contains($0.id) }) || leaves {
+        if !staysOpen, let open = wasOpen, open.messages.allSatisfy({ ids.contains($0.id) }) || leaves {
             if let next = snapshot.firstIndex(where: { $0.id == open.id }).flatMap({ index in
                 conversations.first { candidate in !ids.isSuperset(of: candidate.messages.map(\.id)) && snapshot.firstIndex(of: candidate).map { $0 > index } == true }
             }) {
@@ -794,6 +810,7 @@ final class MailViewModel {
         let undoable = action != .deleteForever
         var item = PendingAction(id: id, action: action, messages: messages, listKey: listKey, snapshot: snapshot, total: total, onUndo: onUndo)
         item.leaves = leaves
+        item.discardsDrafts = discardsDrafts
         let delay = undoable ? undoDelay : 0
         item.task = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
@@ -811,7 +828,8 @@ final class MailViewModel {
         committing[id] = item
         defer { committing[id] = nil }
         do {
-            try await service.perform(item.action, on: item.messages)
+            try await Self.apply(item, with: service)
+            if item.discardsDrafts { draftsChanged() }
             await loadFolders(thenList: false)
         } catch where Self.isConnectionProblem(error) {
             waitingForNetwork.append(item)
@@ -844,7 +862,7 @@ final class MailViewModel {
             item.task?.cancel()
             Task { [weak self] in
                 do {
-                    try await service.perform(item.action, on: item.messages)
+                    try await Self.apply(item, with: service)
                 } catch where Self.isConnectionProblem(error) {
                     self?.waitingForNetwork.append(item)
                 } catch {
@@ -861,7 +879,7 @@ final class MailViewModel {
         waitingForNetwork.removeAll()
         for item in items {
             item.task?.cancel()
-            try? await service.perform(item.action, on: item.messages)
+            try? await Self.apply(item, with: service)
         }
     }
 
@@ -870,6 +888,85 @@ final class MailViewModel {
     /// Puts a sent message's conversation at the top if the list showing is where it belongs.
     func didSend() {
         if currentFolder?.role == .sent || openConversation != nil { refresh() }
+    }
+
+    // MARK: Drafts
+
+    /// Whether the list showing is Drafts.
+    var showsDrafts: Bool { currentFolder?.role == .drafts && activeSearch == nil }
+
+    /// The draft a conversation opens to carry on writing: in Drafts its newest draft (or newest message), elsewhere
+    /// its newest message when every message in it is a draft. A conversation with real mail in it opens to read.
+    func draftToEdit(in conversation: Conversation) -> MessageSummary? {
+        let drafts = conversation.messages.filter(\.isDraft)
+        if currentFolder?.role == .drafts {
+            return drafts.max { $0.date < $1.date } ?? conversation.latest
+        }
+        guard !drafts.isEmpty, drafts.count == conversation.messages.count else { return nil }
+        return drafts.max { $0.date < $1.date }
+    }
+
+    /// Opens a saved draft in a window, ready to carry on writing (or brings forward the window already editing it).
+    func editDraft(_ draft: MessageSummary) {
+        guard let app, let session else { return }
+        if let open = app.composers.first(where: { $0.editingDraftID == draft.id }) {
+            app.open(open)
+            return
+        }
+        let service = self.service
+        Task {
+            do {
+                let message = try await service.loadMessage(draft)
+                var files: [OutgoingAttachment] = []
+                for attachment in message.attachments {
+                    let data: Data
+                    if let loaded = attachment.data { data = loaded } else { data = try await service.loadAttachment(attachment, in: draft) }
+                    files.append(OutgoingAttachment(filename: attachment.filename, mimeType: attachment.mimeType, data: data))
+                }
+                let compose = ComposeModel(app: app, session: session)
+                compose.load(draft: message, files: files)
+                app.open(compose)
+            } catch {
+                app.report(error, doing: "Opening the draft")
+            }
+        }
+    }
+
+    /// Throws drafts away, with Undo: out of the list at once, deleted a few seconds later.
+    func discardDrafts(_ conversations: [Conversation]) {
+        var drafts: [MessageSummary] = []
+        for conversation in conversations {
+            let marked = conversation.messages.filter(\.isDraft)
+            drafts += marked.isEmpty && currentFolder?.role == .drafts ? conversation.messages : marked
+        }
+        guard !drafts.isEmpty else { return }
+        fileAway(.trash, messages: drafts, count: conversations.count,
+                 note: drafts.count == 1 ? "Draft discarded." : "\(drafts.count) drafts discarded.", alwaysLeaves: true, discardsDrafts: true)
+    }
+
+    /// Throws away one draft in the conversation showing (a reply not sent yet), leaving the rest of it open.
+    func discardDraft(_ draft: MessageSummary) {
+        let before = openMessages
+        let conversationID = openConversation?.id
+        fileAway(.trash, messages: [draft], count: 1, note: "Draft discarded.", onUndo: { [weak self] in
+            guard let self, self.openConversation?.id == conversationID else { return }
+            self.openMessages = before
+        }, discardsDrafts: true, staysOpen: true)
+    }
+
+    /// A draft was saved, sent or thrown away: Drafts lists it again if it's showing, and the counts follow.
+    func draftsChanged() {
+        if showsDrafts { loadList() }
+        Task { await loadFolders(thenList: false) }
+    }
+
+    /// Sends a waiting action to the server: thrown-away drafts are deleted as drafts, anything else is the action.
+    private static func apply(_ item: PendingAction, with service: any MailService) async throws {
+        if item.discardsDrafts {
+            for draft in item.messages { try await service.deleteDraft(draft) }
+        } else {
+            try await service.perform(item.action, on: item.messages)
+        }
     }
 
     // MARK: Spam and blocked senders
@@ -906,7 +1003,7 @@ final class MailViewModel {
             addresses.append(email)
         }
         guard !addresses.isEmpty else { return perform(.markSpam, on: conversations) }
-        // The account's own domain isn't offered: blocking it would send its own mail to Junk.
+        // The account's own domain isn't offered: blocking it would send its own mail to the spam folder.
         let ownDomain = BlockedSender.domain(ofAddress: own)
         var domains: [String] = []
         for domain in addresses.compactMap(BlockedSender.domain(ofAddress:)) where domain != ownDomain && !domains.contains(domain) {
@@ -915,7 +1012,7 @@ final class MailViewModel {
         spamReport = SpamReport(conversations: conversations, addresses: addresses, domains: domains)
     }
 
-    /// Moves reported conversations to Junk, blocking their senders first if asked. Blocking also takes the inbox's
+    /// Moves reported conversations to the spam folder, blocking their senders first if asked. Blocking also takes the inbox's
     /// other conversations from them along; Undo puts everything back and unblocks them.
     func finishSpamReport(_ report: SpamReport, block: SpamBlock) {
         spamReport = nil
@@ -944,7 +1041,7 @@ final class MailViewModel {
         }
         let who = rules.count == 1 ? rules[0].displayName : block == .domains ? "\(rules.count) domains" : "\(rules.count) senders"
         fileAway(.markSpam, messages: targets.flatMap(\.messages), count: targets.count,
-                 note: "Blocked \(who). Their mail goes to Junk from now on.", onUndo: { [weak self] in
+                 note: "Blocked \(who). Their mail goes to \(spamFolderName) from now on.", onUndo: { [weak self] in
                      Task {
                          for rule in rules { try? await book.remove(id: rule.id) }
                          await self?.loadBlockedSenders()

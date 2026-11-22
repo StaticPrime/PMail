@@ -47,7 +47,7 @@ struct IMAPLocalFoldersTests {
 
         let folders = try await service.loadFolders()
         #expect(folders.map(\.id) == ["INBOX", "pmail:starred", LocalFolders.sentID, LocalFolders.draftsID, LocalFolders.archiveID,
-                                      LocalFolders.junkID, LocalFolders.trashID])
+                                      LocalFolders.spamID, LocalFolders.trashID])
         #expect(folders.map(\.role) == [.inbox, .starred, .sent, .drafts, .archive, .spam, .trash])
         #expect(folders.map(\.name) == ["Inbox", "Starred", "Sent", "Drafts", "Archive", "Junk", "Trash"])
 
@@ -99,8 +99,8 @@ struct IMAPLocalFoldersTests {
     }
 
     /// Archiving and reporting spam on a server without those folders keeps the mail here; a snoozed conversation
-    /// waiting in the Archive kept here is found again without the server, and Not spam puts junk back on it.
-    @Test func archiveAndJunkAreKeptOnTheMac() async throws {
+    /// waiting in the Archive kept here is found again without the server, and Not spam puts it back on it.
+    @Test func archiveAndSpamAreKeptOnTheMac() async throws {
         let store = temporaryStore()
         defer { try? FileManager.default.removeItem(at: store.folder) }
         let offer = "From: Deals <deals@spam.example>\r\nTo: pug@example.com\r\nSubject: You won!\r\n"
@@ -139,10 +139,10 @@ struct IMAPLocalFoldersTests {
         #expect(found.map(\.id) == archived.map(\.id))
 
         try await service.perform(.markSpam, on: [MessageSummary(id: IMAPMessageID.inbox(13), folderID: "INBOX")])
-        let junk = await store.summaries(in: LocalFolders.junkID)
+        let junk = await store.summaries(in: LocalFolders.spamID)
         #expect(junk.map(\.subject) == ["You won!"])
         try await service.perform(.notSpam, on: junk)
-        #expect(await store.summaries(in: LocalFolders.junkID).isEmpty)
+        #expect(await store.summaries(in: LocalFolders.spamID).isEmpty)
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 
@@ -168,7 +168,7 @@ struct IMAPLocalFoldersTests {
         #expect(folders.filter { $0.role == .trash }.map(\.id) == ["Deleted Messages"])
         let kept = try #require(folders.first { $0.id == LocalFolders.sentID })
         #expect(kept.name == "Sent on this Mac" && kept.role == nil && kept.totalCount == 1)
-        #expect(!folders.contains { [LocalFolders.trashID, LocalFolders.draftsID, LocalFolders.archiveID, LocalFolders.junkID].contains($0.id) })
+        #expect(!folders.contains { [LocalFolders.trashID, LocalFolders.draftsID, LocalFolders.archiveID, LocalFolders.spamID].contains($0.id) })
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 }

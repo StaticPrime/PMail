@@ -502,7 +502,8 @@ enum SelfTest {
             wait("the conversation") { mail.openMessages.first?.summary.subject == "Self-test arrival" }
         }
         step {
-            check(mail.openConversation?.subject == "Self-test arrival", "clicking a notification opens its conversation")
+            check(mail.openConversation?.subject == "Self-test arrival", "clicking a notification opens its conversation",
+                  "open: \(mail.openConversation?.subject ?? "nothing") \(mail.openMessages.map(\.summary.subject)); composers: \(app.composers.map(\.title)); folder: \(String(describing: mail.currentFolder?.role)); error: \(mail.conversationError ?? "none")")
             mail.closeConversation()
             guard let target = mail.conversations.first(where: { $0.subject == "Self-test arrival" }) else {
                 return check(false, "the new conversation is listed")
@@ -640,7 +641,7 @@ enum SelfTest {
             spamMark = actions().filter { $0 == "markSpam" }.count
             mail.finishSpamReport(report, block: .senders)
             check(!mail.conversations.contains { $0.id == offer.id }, "reporting takes the conversation out of the inbox")
-            check(app.toast?.text == "Blocked deals@offers.example. Their mail goes to Junk from now on.", "and says who's blocked",
+            check(app.toast?.text == "Blocked deals@offers.example. Their mail goes to Spam from now on.", "and says who's blocked",
                   app.toast?.text ?? "")
             wait("the block to be kept") {
                 mail.blockedSenders.map(\.id) == ["address:deals@offers.example"] && actions().filter { $0 == "markSpam" }.count > spamMark
@@ -648,7 +649,7 @@ enum SelfTest {
         }
         step {
             check(mail.blockedSenders.map(\.id) == ["address:deals@offers.example"], "the sender is blocked on this account")
-            check(actions().filter { $0 == "markSpam" }.count > spamMark, "and the conversation went to Junk on the server")
+            check(actions().filter { $0 == "markSpam" }.count > spamMark, "and the conversation went to Spam on the server")
             spamMark = actions().filter { $0 == "markSpam" }.count
             notifiedBefore = notifier?.newMail.count ?? 0
             let service = sampleMail
@@ -656,10 +657,10 @@ enum SelfTest {
             Task { await service?.deliver(from: deals, subject: "Self-test offer again", text: "Last chance!", at: AppClock.now().addingTimeInterval(120)) }
             let session = session
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { Task { await app.sync?.check(session) } }
-            wait("the blocked mail to go to Junk") { actions().filter { $0 == "markSpam" }.count > spamMark }
+            wait("the blocked mail to go to Spam") { actions().filter { $0 == "markSpam" }.count > spamMark }
         }
         step {
-            check(actions().filter { $0 == "markSpam" }.count > spamMark, "new mail from a blocked sender goes straight to Junk")
+            check(actions().filter { $0 == "markSpam" }.count > spamMark, "new mail from a blocked sender goes straight to Spam")
             check((notifier?.newMail.count ?? 0) == notifiedBefore, "without a notification")
             check(!mail.conversations.contains { $0.subject == "Self-test offer again" }, "and never shows in the inbox's list")
             guard let rule = mail.blockedSenders.first else { return check(false, "the block is listed") }
@@ -668,6 +669,70 @@ enum SelfTest {
         }
         step {
             check(mail.blockedSenders.isEmpty, "Settings can unblock a sender")
+            guard let composer = app.compose(to: [SampleData.person("Alex Kim")], subject: "Self-test draft", body: "Half written.") else {
+                return check(false, "a new message opens")
+            }
+            composer.closeKeepingDraft()
+            mail.select(folderID: mail.folder(role: .drafts)?.id)
+            wait("Drafts to list it") { mail.showsDrafts && mail.conversations.contains { $0.subject == "Self-test draft" } }
+        }
+
+        // MARK: Drafts
+        step {
+            guard let draft = mail.conversations.first(where: { $0.subject == "Self-test draft" }) else {
+                return check(false, "Drafts lists the draft")
+            }
+            mail.open(draft)
+            check(mail.openConversation == nil, "a draft doesn't open to be read like mail")
+            wait("the draft's window") { app.composers.contains { $0.subject == "Self-test draft" } }
+        }
+        step {
+            guard let editor = app.composers.first(where: { $0.subject == "Self-test draft" }),
+                  let draft = mail.conversations.first(where: { $0.subject == "Self-test draft" }) else {
+                return check(false, "the draft opens in a window to edit")
+            }
+            check(editor.to.map(\.email) == [SampleData.person("Alex Kim").email] && editor.body.string.contains("Half written."),
+                  "it opens to edit, with its recipients and text")
+            check(editor.editingDraftID == draft.latest?.id, "the window knows which draft it's editing")
+            mail.open(draft)
+            check(app.composers.filter { $0.subject == "Self-test draft" }.count == 1, "opening it again brings the same window forward")
+            editor.closeKeepingDraft()
+            mail.loadList()
+            wait("Drafts to load again") { !mail.isLoadingList }
+        }
+        step {
+            check(mail.conversations.filter { $0.subject == "Self-test draft" }.count == 1, "closing it unchanged leaves one draft")
+            guard let draft = mail.conversations.first(where: { $0.subject == "Self-test draft" }) else { return }
+            mail.open(draft)
+            wait("the draft's window again") { app.composers.contains { $0.subject == "Self-test draft" } }
+        }
+        step {
+            guard let editor = app.composers.first(where: { $0.subject == "Self-test draft" }) else { return check(false, "the draft reopens") }
+            editor.setPlainBody("Fully written now.")
+            editor.closeKeepingDraft()
+            wait("the edited draft to replace the old one") {
+                mail.conversations.filter { $0.subject == "Self-test draft" }.count == 1
+                    && mail.conversations.first { $0.subject == "Self-test draft" }?.snippet.contains("Fully written") == true
+            }
+        }
+        step {
+            check(mail.conversations.first { $0.subject == "Self-test draft" }?.snippet.contains("Fully written") == true,
+                  "editing a draft replaces it rather than adding another")
+            guard let draft = mail.conversations.first(where: { $0.subject == "Self-test draft" }) else { return }
+            mail.undoDelay = 0.2
+            mail.discardDrafts([draft])
+            check(!mail.conversations.contains { $0.id == draft.id }, "discarding a draft takes it out of Drafts at once")
+            check(app.toast?.text == "Draft discarded." && app.toast?.actionTitle == "Undo", "with Undo", app.toast?.text ?? "")
+            wait("the draft to be deleted") { !mail.isLoadingList && !mail.conversations.contains { $0.subject == "Self-test draft" } }
+        }
+        step {
+            mail.loadList()
+            wait("Drafts to load again") { !mail.isLoadingList }
+        }
+        step {
+            check(!mail.conversations.contains { $0.subject == "Self-test draft" }, "and it's deleted from the server")
+            mail.select(folderID: mail.inbox?.id)
+            wait("the inbox") { mail.currentFolder?.role == .inbox && !mail.isLoadingList }
         }
 
         // MARK: Accounts, windows and menus

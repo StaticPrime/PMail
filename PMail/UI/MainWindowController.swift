@@ -154,16 +154,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         guard let mail = app.current?.mail else { return }
         let targets = mail.targetConversations
         guard !targets.isEmpty else { return }
-        // Not offered where the account has nowhere to put the mail (no Archive or Junk folder).
+        // Not offered where the account has nowhere to put the mail (no Archive or spam folder).
         if case .archive = action, !mail.capabilities.canArchive { return }
         if case .markSpam = action, !mail.canReportSpam { return }
         // Report spam asks whether to block the sender too.
         if case .markSpam = action { return mail.reportSpam(targets) }
+        // In Drafts, Delete throws drafts away; there's nothing to archive, read or star there.
+        if mail.showsDrafts {
+            if case .trash = action { mail.discardDrafts(targets) }
+            return
+        }
         mail.perform(action, on: targets)
     }
 
     private func reply(_ kind: ReplyBuilder.Kind) {
-        guard let session = app.current, let message = session.mail.openMessages.last else { return }
+        guard let session = app.current, let message = session.mail.openMessages.last(where: { !$0.summary.isDraft }) else { return }
         app.reply(to: message, kind: kind, in: session)
     }
 
@@ -279,6 +284,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         let capabilities = mail?.capabilities
         // While text is being typed, keys like ⌘⌫ belong to the text, not to the conversation behind it.
         let typing = window.map(Self.isEditingText) ?? false
+        // Drafts are only edited or thrown away.
+        let inDrafts = mail?.showsDrafts == true
         switch menuItem.action {
         case #selector(pmNewMessage(_:)), #selector(pmNewContact(_:)), #selector(pmRefresh(_:)), #selector(pmFind(_:)),
              #selector(pmAccountSettings(_:)), #selector(pmRemoveAccount(_:)):
@@ -298,21 +305,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             menuItem.state = (menuItem.representedObject as? UUID) == app.accounts.currentID ? .on : .off
             return true
         case #selector(pmReply(_:)), #selector(pmReplyAll(_:)), #selector(pmForward(_:)):
-            return app.module == .mail && mail?.openMessages.isEmpty == false
+            return app.module == .mail && mail?.openMessages.contains { !$0.summary.isDraft } == true
         case #selector(pmArchive(_:)):
-            return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canArchive == true
+            return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canArchive == true && !inDrafts
         case #selector(pmTrash(_:)):
             return !typing && app.module == .mail && !targets.isEmpty
         case #selector(pmSpam(_:)):
-            return !typing && app.module == .mail && !targets.isEmpty && mail?.canReportSpam == true
+            return !typing && app.module == .mail && !targets.isEmpty && mail?.canReportSpam == true && !inDrafts
         case #selector(pmToggleRead(_:)):
             menuItem.title = targets.contains(where: \.isUnread) ? "Mark as Read" : "Mark as Unread"
-            return !typing && app.module == .mail && !targets.isEmpty
+            return !typing && app.module == .mail && !targets.isEmpty && !inDrafts
         case #selector(pmToggleStar(_:)):
             menuItem.title = !targets.isEmpty && targets.allSatisfy(\.isStarred) ? "Remove Star" : "Add Star"
-            return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canStar == true
+            return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canStar == true && !inDrafts
         case #selector(pmMoveTo(_:)):
-            return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canMove == true
+            return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canMove == true && !inDrafts
         case #selector(pmSendMessage(_:)):
             return app.composers.contains { !$0.isMinimized }
         default:

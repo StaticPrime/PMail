@@ -125,7 +125,7 @@ private final class RecordingSender: MailSending, @unchecked Sendable {
         let second = session(uids: ["a", "b", "c"], retrieving: [])
         let reopened = service(folder, [second])
         let folders = try await reopened.loadFolders()
-        #expect(folders.map(\.id) == ["INBOX", "pmail:starred", "Sent", "Drafts", "Archive", "Junk", "Trash"])
+        #expect(folders.map(\.id) == ["INBOX", "pmail:starred", "Sent", "Drafts", "Archive", "Spam", "Trash"])
         #expect(folders.map(\.role) == [.inbox, .starred, .sent, .drafts, .archive, .spam, .trash])
         #expect(folders[0].unreadCount == 0 && folders[0].totalCount == 2)
         #expect(folders[1].totalCount == 1)
@@ -258,13 +258,13 @@ private final class RecordingSender: MailSending, @unchecked Sendable {
         #expect(await store.summary(for: "local:file")?.folderID == "Sent")
         try await pop.perform(.moveToInbox, on: [summary])
         #expect(await store.summary(for: "local:file")?.folderID == "INBOX")
-        // Archive and Junk are kept here too; Not spam brings a message back to the inbox.
+        // Archive and Spam are kept here too; Not spam brings a message back to the inbox.
         try await pop.perform(.archive, on: [summary])
         #expect(await store.summary(for: "local:file")?.folderID == "Archive")
         try await pop.perform(.markSpam, on: [summary])
-        #expect(await store.summary(for: "local:file")?.folderID == "Junk")
+        #expect(await store.summary(for: "local:file")?.folderID == "Spam")
         let allMail = try await pop.listConversations(ListRequest(folderID: nil, pageSize: 50))
-        #expect(!allMail.conversations.contains { $0.messages.contains { $0.id == "local:file" } }, "junk stays out of All Mail")
+        #expect(!allMail.conversations.contains { $0.messages.contains { $0.id == "local:file" } }, "spam stays out of All Mail")
         try await pop.perform(.notSpam, on: [summary])
         #expect(await store.summary(for: "local:file")?.folderID == "INBOX")
 

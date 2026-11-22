@@ -8,11 +8,11 @@ public struct LocalFolders: Sendable {
     public static let draftsID = "pmail:drafts"
     public static let trashID = "pmail:trash"
     public static let archiveID = "pmail:archive"
-    public static let junkID = "pmail:junk"
+    public static let spamID = "pmail:spam"
 
     /// Each folder that can be kept here: the role it stands in for, its ID and its name.
     static let all: [(role: FolderRole, id: String, name: String)] = [
-        (.sent, sentID, "Sent"), (.drafts, draftsID, "Drafts"), (.archive, archiveID, "Archive"), (.spam, junkID, "Junk"),
+        (.sent, sentID, "Sent"), (.drafts, draftsID, "Drafts"), (.archive, archiveID, "Archive"), (.spam, spamID, "Junk"),
         (.trash, trashID, "Trash"),
     ]
 
@@ -98,7 +98,7 @@ public struct LocalFolders: Sendable {
     /// conversation snoozed into the Archive kept here, say.
     func find(_ keys: Set<String>, key: (String) -> String) async -> [MessageSummary] {
         await store.allSummaries().filter { summary in
-            guard summary.folderID != Self.trashID, summary.folderID != Self.junkID, let header = summary.messageIDHeader else {
+            guard summary.folderID != Self.trashID, summary.folderID != Self.spamID, let header = summary.messageIDHeader else {
                 return false
             }
             return keys.contains(key(header))

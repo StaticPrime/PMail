@@ -409,9 +409,9 @@ public actor IMAPMailService: MailService {
             return LocalFolders.trashID
         case .markSpam:
             if let junk = try await mailboxName(for: .spam, client: client) { return junk }
-            // A server without a Junk folder: junk goes to the Junk kept on this Mac.
+            // A server without a spam folder: spam goes to the Junk kept on this Mac.
             guard localFolders != nil else { throw PMailError.notSupported("This account has no Junk folder.") }
-            return LocalFolders.junkID
+            return LocalFolders.spamID
         case .moveToInbox, .notSpam:
             return "INBOX"
         case let .move(folderID):
@@ -513,7 +513,7 @@ public actor IMAPMailService: MailService {
             if let junk = try await serverMailbox(for: .spam) {
                 try await upload(ids, to: junk)
             } else {
-                try await store.move(ids: ids, to: LocalFolders.junkID)
+                try await store.move(ids: ids, to: LocalFolders.spamID)
             }
         case let .move(folderID):
             if LocalFolders.contains(folderID) {

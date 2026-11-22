@@ -1,7 +1,7 @@
 import Foundation
 
 /// A sender blocked on an account: one address, or every address at a domain and its subdomains. Mail from them goes
-/// to Junk as PMail finds it.
+/// to the spam folder as PMail finds it.
 public struct BlockedSender: Codable, Sendable, Hashable, Identifiable {
     public enum Kind: String, Codable, Sendable {
         case address
