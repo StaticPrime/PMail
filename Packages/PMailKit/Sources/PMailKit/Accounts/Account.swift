@@ -115,15 +115,18 @@ public struct Account: Codable, Sendable, Identifiable, Hashable {
     public var contactsServer: URL?
     /// The name used to sign in to the calendar and contacts servers (an iCloud account's Apple Account email).
     public var serverLoginName: String?
-    /// Plain text added under new messages, after "-- ".
+    /// Plain text added under new messages, after "-- " (the signature's words, for plain text messages).
     public var signature: String
+    /// The signature with its formatting, as HTML: fonts, colors, links and pictures (from the web by address, or
+    /// kept in it). Nil for a plain signature. A Google account's is the one on its server.
+    public var signatureHTML: String?
     /// The account's picture, as the provider gave it.
     public var pictureURL: URL?
     public var addedAt: Date
 
     public init(id: UUID = UUID(), kind: AccountKind, name: String, email: String, colorIndex: Int = 0,
                 incoming: ServerSettings? = nil, outgoing: ServerSettings? = nil, calendarServer: URL? = nil,
-                contactsServer: URL? = nil, serverLoginName: String? = nil, signature: String = "",
+                contactsServer: URL? = nil, serverLoginName: String? = nil, signature: String = "", signatureHTML: String? = nil,
                 pictureURL: URL? = nil, addedAt: Date = Date()) {
         self.id = id
         self.kind = kind
@@ -136,6 +139,7 @@ public struct Account: Codable, Sendable, Identifiable, Hashable {
         self.contactsServer = contactsServer
         self.serverLoginName = serverLoginName
         self.signature = signature
+        self.signatureHTML = signatureHTML
         self.pictureURL = pictureURL
         self.addedAt = addedAt
     }

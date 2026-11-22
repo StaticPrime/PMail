@@ -38,6 +38,8 @@ public struct OAuthProvider: Sendable, Hashable {
                       clientID: clientID, clientSecret: clientSecret,
                       redirectURI: redirectURI ?? googleRedirectURI(forClientID: clientID),
                       scopes: ["openid", "email", "profile", "https://mail.google.com/",
+                               // The signature, kept with the account's send-as address.
+                               "https://www.googleapis.com/auth/gmail.settings.basic",
                                "https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/contacts",
                                "https://www.googleapis.com/auth/contacts.other.readonly"],
                       // Offline access with consent, so the answer always includes a refresh token.

@@ -411,10 +411,12 @@ public struct MailCapabilities: Sendable, Hashable {
     public var canLabel: Bool
     /// Labels can be made, renamed, recolored and deleted.
     public var canEditLabels: Bool
+    /// The signature lives on the server too (`loadSignature`, `saveSignature`), so changes go both ways.
+    public var syncsSignature: Bool
 
     public init(usesLabels: Bool = false, canStar: Bool = true, canMarkImportant: Bool = false, hasInboxTabs: Bool = false,
                 searchesOnServer: Bool = true, canArchive: Bool = true, supportsDrafts: Bool = true, canMove: Bool = true,
-                canLabel: Bool = false, canEditLabels: Bool = false) {
+                canLabel: Bool = false, canEditLabels: Bool = false, syncsSignature: Bool = false) {
         self.usesLabels = usesLabels
         self.canStar = canStar
         self.canMarkImportant = canMarkImportant
@@ -425,5 +427,6 @@ public struct MailCapabilities: Sendable, Hashable {
         self.canMove = canMove
         self.canLabel = canLabel
         self.canEditLabels = canEditLabels
+        self.syncsSignature = syncsSignature
     }
 }

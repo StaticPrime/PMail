@@ -49,6 +49,10 @@ public enum RichTextHTML {
         }
     }
 
+    /// On a picture in the text, the web address it's shown from (a signature's logo, say): it goes out as that address
+    /// rather than as a part of the message.
+    public static let imageSourceKey = NSAttributedString.Key("PMailImageSource")
+
     /// How far each step of indenting moves a paragraph, in points.
     public static let indentStep: CGFloat = 40
 
@@ -105,6 +109,71 @@ public enum RichTextHTML {
         return html
     }
 
+    /// The HTML for a body with its pictures written into it (`data:` addresses), for keeping it in one piece: a
+    /// signature saved on the Mac.
+    public static func selfContainedHTML(from text: NSAttributedString) -> String {
+        var images: [OutgoingAttachment] = []
+        var html = html(from: text, images: &images)
+        for image in images {
+            guard let contentID = image.contentID else { continue }
+            html = html.replacingOccurrences(of: "cid:\(contentID)", with: "data:\(image.mimeType);base64,\(image.data.base64EncodedString())")
+        }
+        return html
+    }
+
+    /// Text with formatting from HTML (a signature, a draft), in PMail's default font where it names none. Pictures
+    /// from the web aren't fetched: each becomes a picture holding its address (`imageSourceKey`), sized as the HTML
+    /// says, for whoever shows it to fill in. Pictures written into the HTML come in as they are.
+    @MainActor
+    public static func attributedString(fromHTML html: String) -> NSAttributedString {
+        let pattern = #"<img\b[^>]*?\bsrc\s*=\s*["'](https?://[^"']+)["'][^>]*>"#
+        let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        let source = html as NSString
+        var pictures: [(url: String, size: CGSize)] = []
+        var marked = html
+        let matches = regex?.matches(in: html, range: NSRange(location: 0, length: source.length)) ?? []
+        for match in matches.reversed() {
+            let tag = source.substring(with: match.range)
+            let url = source.substring(with: match.range(at: 1)).replacingOccurrences(of: "&amp;", with: "&")
+            func dimension(_ name: String) -> CGFloat? {
+                guard let found = tag.range(of: "\\b\(name)\\s*=\\s*[\"']?(\\d+)", options: [.regularExpression, .caseInsensitive]) else { return nil }
+                return CGFloat(Double(tag[found].filter(\.isNumber)) ?? 0)
+            }
+            let width = dimension("width") ?? 120
+            let height = dimension("height") ?? (width / 3)
+            pictures.insert((url, CGSize(width: max(1, width), height: max(1, height))), at: 0)
+            marked = (marked as NSString).replacingCharacters(in: match.range, with: "\u{E000}\(matches.count - 1 - pictures.count + 1)\u{E001}")
+        }
+        let wrapped = "<div style=\"font-family:-apple-system,Helvetica,Arial,sans-serif;font-size:13px\">\(marked)</div>"
+        guard let data = wrapped.data(using: .utf8),
+              let read = try? NSMutableAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.html,
+                                                                               .characterEncoding: String.Encoding.utf8.rawValue],
+                                                        documentAttributes: nil) else {
+            return NSAttributedString(string: html)
+        }
+        // Black text is written black; it shows in the text color, so it reads in Dark Mode.
+        read.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: read.length)) { value, range, _ in
+            guard let color = (value as? NSColor)?.usingColorSpace(.sRGB),
+                  color.redComponent + color.greenComponent + color.blueComponent < 0.15 else { return }
+            read.addAttribute(.foregroundColor, value: NSColor.textColor, range: range)
+        }
+        // The pictures from the web go back where they were.
+        for (index, picture) in pictures.enumerated().reversed() {
+            let token = "\u{E000}\(index)\u{E001}"
+            let range = (read.string as NSString).range(of: token)
+            guard range.location != NSNotFound else { continue }
+            let attachment = NSTextAttachment()
+            attachment.bounds = CGRect(origin: .zero, size: picture.size)
+            let piece = NSMutableAttributedString(attachment: attachment)
+            piece.addAttributes(read.attributes(at: range.location, effectiveRange: nil).filter { $0.key != .attachment },
+                                range: NSRange(location: 0, length: piece.length))
+            piece.addAttribute(imageSourceKey, value: picture.url, range: NSRange(location: 0, length: piece.length))
+            read.replaceCharacters(in: range, with: piece)
+        }
+        while read.length > 0, read.string.hasSuffix("\n") { read.deleteCharacters(in: NSRange(location: read.length - 1, length: 1)) }
+        return read
+    }
+
     /// The HTML for a body, leaving pictures out.
     public static func html(from text: NSAttributedString) -> String {
         var images: [OutgoingAttachment] = []
@@ -127,6 +196,13 @@ public enum RichTextHTML {
         }
         var html = ""
         text.enumerateAttributes(in: range) { attributes, runRange, _ in
+            // A picture from the web goes out by its address, at the size it's shown.
+            if attributes[.attachment] != nil, let source = attributes[imageSourceKey] as? String {
+                let bounds = (attributes[.attachment] as? NSTextAttachment)?.bounds ?? .zero
+                let size = bounds.width > 1 ? " width=\"\(Int(bounds.width.rounded()))\" height=\"\(Int(bounds.height.rounded()))\"" : ""
+                html += "<img src=\"\(escape(source))\"\(size) alt=\"\">"
+                return
+            }
             // A picture in the text goes out as a part of its own, shown where it sits.
             if let attachment = attributes[.attachment] as? NSTextAttachment {
                 if let picture = picture(from: attachment, number: images.count + 1) {
@@ -149,6 +225,9 @@ public enum RichTextHTML {
                     styles.append("font-family:\(choice.css)")
                 } else if traits.contains(.monoSpace) {
                     styles.append("font-family:monospace")
+                } else if let family = font.familyName, !family.hasPrefix("."), family != "Helvetica" {
+                    // Any other font (one a signature came with) keeps its name.
+                    styles.append("font-family:'\(family.replacingOccurrences(of: "'", with: ""))', sans-serif")
                 }
             }
             if let underline = attributes[.underlineStyle] as? Int, underline != 0, attributes[.link] == nil { piece = "<u>\(piece)</u>" }

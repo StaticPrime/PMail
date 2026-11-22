@@ -81,4 +81,47 @@ import Testing
         #expect(!html.contains("\u{FFFC}") && !RichTextHTML.plainText(from: text).contains("\u{FFFC}"))
         #expect(RichTextHTML.html(from: text).contains("cid:"), "the picture stays in place even when pictures aren't collected")
     }
+
+    @Test func picturesFromTheWebKeepTheirAddressAndOtherFontsTheirName() throws {
+        let attachment = NSTextAttachment()
+        attachment.bounds = CGRect(x: 0, y: 0, width: 120, height: 40)
+        let logo = NSMutableAttributedString(attachment: attachment)
+        logo.addAttribute(RichTextHTML.imageSourceKey, value: "https://example.com/logo.png?a=1&b=2", range: NSRange(location: 0, length: logo.length))
+        let text = NSMutableAttributedString(string: "Jamie ", attributes: [.font: base])
+        text.append(logo)
+        let optima = try #require(NSFont(name: "Optima-Regular", size: 13))
+        text.append(NSAttributedString(string: " with care", attributes: [.font: optima]))
+        var images: [OutgoingAttachment] = []
+        let html = RichTextHTML.html(from: text, images: &images)
+        #expect(images.isEmpty, "a picture from the web isn't sent along")
+        #expect(html.contains(#"<img src="https://example.com/logo.png?a=1&amp;b=2" width="120" height="40""#))
+        #expect(html.contains("font-family:'Optima', sans-serif"), "a font outside the menu keeps its name")
+    }
+
+    @Test func selfContainedHTMLWritesItsPicturesIn() throws {
+        let png = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4,
+                                                hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?
+            .representation(using: .png, properties: [:]))
+        let text = NSMutableAttributedString(string: "Logo: ", attributes: [.font: base])
+        text.append(NSAttributedString(attachment: NSTextAttachment(data: png, ofType: "public.png")))
+        let html = RichTextHTML.selfContainedHTML(from: text)
+        #expect(html.contains("data:image/png;base64,\(png.base64EncodedString())") && !html.contains("cid:"))
+    }
+
+    @MainActor @Test func signaturesReadFromHTMLKeepLinksFontsAndWebPictures() throws {
+        let html = #"<div><b>Jamie Rivera</b> · <a href="https://puggle.example/">Puggle</a><br><img src="https://example.com/logo.png" width="96" height="32"><br><span style="font-family:Georgia">Sent with care</span></div>"#
+        let text = RichTextHTML.attributedString(fromHTML: html)
+        #expect(text.string.contains("Jamie Rivera") && text.string.contains("Puggle") && text.string.contains("Sent with care"))
+        var sources: [String] = []
+        var links: [String] = []
+        text.enumerateAttributes(in: NSRange(location: 0, length: text.length)) { attributes, _, _ in
+            if let source = attributes[RichTextHTML.imageSourceKey] as? String { sources.append(source) }
+            if let link = attributes[.link] { links.append((link as? URL)?.absoluteString ?? "\(link)") }
+        }
+        #expect(sources == ["https://example.com/logo.png"], "the picture keeps its address and isn't fetched")
+        #expect(links.contains("https://puggle.example/"))
+        let again = RichTextHTML.html(from: text)
+        #expect(again.contains(#"src="https://example.com/logo.png" width="96" height="32""#))
+        #expect(again.contains(#"href="https://puggle.example/""#) && again.contains("Georgia") && again.contains("<b>"))
+    }
 }

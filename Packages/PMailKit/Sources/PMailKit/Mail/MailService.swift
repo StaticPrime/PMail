@@ -70,6 +70,11 @@ public protocol MailService: AnyObject, Sendable {
     /// How many unread messages the inbox has under each of its tabs, by tab ID, for the counts on the tabs. Empty
     /// when the service can't say.
     func unreadCounts(inTabs tabs: [InboxTab]) async throws -> [String: Int]
+
+    /// The signature kept on the server, as HTML, where `capabilities.syncsSignature` (nil when none is set).
+    func loadSignature() async throws -> String?
+    /// Saves the signature on the server (HTML; an empty one clears it).
+    func saveSignature(html: String) async throws
 }
 
 /// Where a service is up to in an account's inbox, for asking what's new since then. Only the service that made it
@@ -124,6 +129,14 @@ extension MailService {
     }
 
     public func unreadCounts(inTabs tabs: [InboxTab]) async throws -> [String: Int] { [:] }
+
+    public func loadSignature() async throws -> String? {
+        throw PMailError.notSupported("This account keeps no signature on its server.")
+    }
+
+    public func saveSignature(html: String) async throws {
+        throw PMailError.notSupported("This account keeps no signature on its server.")
+    }
 }
 
 /// Hands a finished message to an outgoing (SMTP) server.
