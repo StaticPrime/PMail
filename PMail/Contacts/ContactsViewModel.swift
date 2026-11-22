@@ -204,9 +204,9 @@ final class ContactsViewModel {
     /// Settings ▸ Mail: whether people written to are added to contacts.
     static let addsPeopleKey = "AddPeopleToContacts"
 
-    /// People just written to (To, Cc and Bcc) who aren't in contacts yet: added at once when the account can tell more
-    /// about them (its organization's directory, or people it has written to), with what it finds; otherwise offered
-    /// with "Add to Contacts?", once for each address. The account's own address and automated ones (no-reply) are
+    /// People just written to (To, Cc and Bcc) or invited who aren't in contacts yet: added at once when the account can
+    /// tell more about them (its organization's directory, or people it has written to), with what it finds; otherwise
+    /// offered with "Add to Contacts?", each time until they're added. The account's own address and automated ones (no-reply) are
     /// left out.
     func addPeopleWritten(to addresses: [MailAddress]) async {
         guard UserDefaults.standard.object(forKey: Self.addsPeopleKey) as? Bool ?? true, let known = await knownEmails() else { return }
@@ -225,12 +225,7 @@ final class ContactsViewModel {
                 unknown.append(address)
             }
         }
-        // Each address is asked about once.
-        let askedKey = "AskedToAddContacts-\(account.id.uuidString)"
-        let asked = Set(defaults.stringArray(forKey: askedKey) ?? [])
-        let ask = unknown.filter { !asked.contains($0.email.lowercased()) }
-        if !ask.isEmpty { defaults.set(Array(asked.union(ask.map { $0.email.lowercased() })), forKey: askedKey) }
-        announce(added: added, ask: ask)
+        announce(added: added, ask: unknown)
     }
 
     /// Says who was added (with Undo), and offers to add the rest.

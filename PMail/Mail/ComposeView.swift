@@ -40,7 +40,7 @@ struct ComposeWindow: View {
                         .frame(height: 36)
                         Divider().overlay(Theme.divider).padding(.horizontal, 16)
                     }
-                    RecipientField(label: "To", addresses: $model.to, contacts: model.session.contacts) {
+                    RecipientField(label: "To", addresses: $model.to, text: $model.typedTo, contacts: model.session.contacts) {
                         HStack(spacing: 8) {
                             if !model.showsCc { Button("Cc") { model.showsCc = true }.buttonStyle(.plain) }
                             if !model.showsBcc { Button("Bcc") { model.showsBcc = true }.buttonStyle(.plain) }
@@ -48,8 +48,8 @@ struct ComposeWindow: View {
                         .font(.pm(13))
                         .foregroundStyle(Theme.textSecondary)
                     }
-                    if model.showsCc { RecipientField(label: "Cc", addresses: $model.cc, contacts: model.session.contacts) { EmptyView() } }
-                    if model.showsBcc { RecipientField(label: "Bcc", addresses: $model.bcc, contacts: model.session.contacts) { EmptyView() } }
+                    if model.showsCc { RecipientField(label: "Cc", addresses: $model.cc, text: $model.typedCc, contacts: model.session.contacts) { EmptyView() } }
+                    if model.showsBcc { RecipientField(label: "Bcc", addresses: $model.bcc, text: $model.typedBcc, contacts: model.session.contacts) { EmptyView() } }
                     TextField("Subject", text: $model.subject)
                         .textFieldStyle(.plain)
                         .font(.pm(13.5))
@@ -417,12 +417,44 @@ private struct MoreComposeOptions: View {
 }
 
 /// To, Cc or Bcc: the addresses as chips, a field for typing, and suggestions from the account's contacts.
+/// What's typed in a field of addresses (a message's recipients, an event's guests) becoming addresses. Return takes the
+/// highlighted suggestion, unless what's typed is a whole address that isn't the suggestion's own; leaving the field,
+/// a comma, and sending or saving take whatever addresses are typed.
+enum TypedAddresses {
+    /// The suggestion Return takes, or nil to take what's typed.
+    static func pick(_ suggestion: MailAddress?, typed text: String) -> MailAddress? {
+        guard let suggestion else { return nil }
+        let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let whole = wholeAddress(typed), !suggestion.isSameMailbox(as: whole) { return nil }
+        return suggestion
+    }
+
+    /// The one complete address typed ("sam@example.com", "Sam Rivera <sam@example.com>"), if that's what it is.
+    static func wholeAddress(_ text: String) -> MailAddress? {
+        let parsed = RecipientParser.parse(text)
+        guard parsed.count == 1, let address = parsed.first, isComplete(address.email) else { return nil }
+        return address
+    }
+
+    static func isComplete(_ email: String) -> Bool {
+        let parts = email.split(separator: "@")
+        return parts.count == 2 && !parts[0].isEmpty && parts[1].contains(".") && !parts[1].contains(" ")
+    }
+
+    /// The addresses with every address typed added, once each.
+    static func adding(_ text: String, to addresses: [MailAddress]) -> [MailAddress] {
+        let new = RecipientParser.parse(text)
+        return addresses + new.filter { address in !addresses.contains { $0.isSameMailbox(as: address) } }
+    }
+}
+
 struct RecipientField<Accessory: View>: View {
     let label: String
     @Binding var addresses: [MailAddress]
+    /// What's typed and not yet an address (the window takes it when the message is sent).
+    @Binding var text: String
     let contacts: ContactsViewModel
     @ViewBuilder var accessory: () -> Accessory
-    @State private var text = ""
     @State private var highlighted = 0
     @FocusState private var focused: Bool
 
@@ -443,16 +475,19 @@ struct RecipientField<Accessory: View>: View {
                         .font(.pm(13.5))
                         .frame(minWidth: 120)
                         .focused($focused)
-                        .onSubmit { commit(suggestions.indices.contains(highlighted) && !text.isEmpty ? suggestions[highlighted] : nil) }
+                        .onSubmit {
+                            let suggestion = suggestions.indices.contains(highlighted) && !text.isEmpty ? suggestions[highlighted] : nil
+                            commit(TypedAddresses.pick(suggestion, typed: text))
+                        }
                         .onChange(of: text) { _, new in
                             highlighted = 0
-                            if new.contains(",") || new.contains(";") || new.contains("\n") { commit(nil) }
+                            if RecipientParser.hasSeparator(new) { commit(nil) }
                         }
                         .onChange(of: focused) { _, isFocused in if !isFocused { commit(nil) } }
                         .onKeyPress(.downArrow) { highlighted = min(highlighted + 1, max(0, suggestions.count - 1)); return .handled }
                         .onKeyPress(.upArrow) { highlighted = max(0, highlighted - 1); return .handled }
                         .onKeyPress(.tab) {
-                            if !text.isEmpty { commit(suggestions.first); return .handled }
+                            if !text.isEmpty { commit(TypedAddresses.pick(suggestions.first, typed: text)); return .handled }
                             return .ignored
                         }
                         .onKeyPress(.delete) {
@@ -507,9 +542,8 @@ struct RecipientField<Accessory: View>: View {
             text = ""
             return
         }
-        let parsed = RecipientParser.parse(text)
-        guard !parsed.isEmpty else { return }
-        addresses.append(contentsOf: parsed.filter { new in !addresses.contains { $0.isSameMailbox(as: new) } })
+        guard !RecipientParser.parse(text).isEmpty else { return }
+        addresses = TypedAddresses.adding(text, to: addresses)
         text = ""
     }
 }
@@ -535,19 +569,48 @@ private struct RecipientChip: View {
 }
 
 /// Addresses typed or pasted into a recipient field: "a@b.c, Jamie <jamie@example.com>; c@d.e".
+/// The addresses in what's typed or pasted in a field of addresses, split at commas, semicolons and new lines outside
+/// quotes and angle brackets: `"Park, Casey" <casey@example.com>, sam@example.com` is two.
 enum RecipientParser {
     static func parse(_ text: String) -> [MailAddress] {
-        text.split(whereSeparator: { ",;\n".contains($0) }).compactMap { part in
+        pieces(of: text).compactMap { part in
             let item = part.trimmingCharacters(in: .whitespaces)
             guard !item.isEmpty else { return nil }
             if let open = item.lastIndex(of: "<"), let close = item.lastIndex(of: ">"), open < close {
                 let email = item[item.index(after: open)..<close].trimmingCharacters(in: .whitespaces)
                 let name = item[..<open].trimmingCharacters(in: CharacterSet(charactersIn: " \""))
-                return email.contains("@") ? MailAddress(name: name, email: email) : nil
+                return email.contains("@") ? MailAddress(name: name.isEmpty ? nil : name, email: email) : nil
             }
-            return MailAddress(email: item)
+            return MailAddress(email: item.trimmingCharacters(in: CharacterSet(charactersIn: "\"")))
         }
     }
+
+    /// The text cut at the separators outside quotes and angle brackets.
+    static func pieces(of text: String) -> [String] {
+        var pieces: [String] = []
+        var current = ""
+        var quoted = false
+        var bracketed = false
+        for character in text {
+            if character == "\"" {
+                quoted.toggle()
+            } else if !quoted, character == "<" {
+                bracketed = true
+            } else if !quoted, character == ">" {
+                bracketed = false
+            } else if !quoted, !bracketed, character == "," || character == ";" || character == "\n" {
+                pieces.append(current)
+                current = ""
+                continue
+            }
+            current.append(character)
+        }
+        pieces.append(current)
+        return pieces
+    }
+
+    /// Whether what's typed has a separator outside quotes and angle brackets: an address is finished.
+    static func hasSeparator(_ text: String) -> Bool { pieces(of: text).count > 1 }
 }
 
 /// Lays chips out in rows, wrapping to the next row as they fill one. Each row is at least `minRowHeight` tall, with

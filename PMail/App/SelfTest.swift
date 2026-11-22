@@ -846,14 +846,33 @@ enum SelfTest {
             wait("Casey to be offered") { app.toast?.text == "Add Park, Casey to Contacts?" }
         }
         step {
-            check(app.toast?.text == "Add Park, Casey to Contacts?", "someone new is offered once", app.toast?.text ?? "none")
+            check(app.toast?.text == "Add Park, Casey to Contacts?", "someone new is offered", app.toast?.text ?? "none")
             app.toast = nil
-            sendSelfTest(to: [casey])
-            wait(upTo: 1.5) { false }
+            // Typed in To and not made an address with Return: sending still takes it.
+            guard let composer = app.compose(to: [], subject: "Self-test hello", body: "Hi!") else { return }
+            composer.typedTo = "\"Park, Casey\" <casey@elsewhere.example>"
+            composer.undoSendDelay = 0.1
+            composer.send()
+            check(composer.to.map(\.email) == [casey.email] && composer.typedTo.isEmpty, "an address typed in To and not entered is sent to")
+            wait("Casey to be offered again") { app.toast?.text == "Add Park, Casey to Contacts?" }
         }
         step {
-            check(app.toast?.actionTitle != "Add…", "and not again", app.toast?.text ?? "none")
-            check(!session.contacts.savedContacts.contains { $0.emails.contains { $0.value == casey.email } }, "without being added")
+            check(app.toast?.text == "Add Park, Casey to Contacts?", "and someone new is offered each time until they're added", app.toast?.text ?? "none")
+            check(!session.contacts.savedContacts.contains { $0.emails.contains { $0.value == casey.email } }, "never added without asking")
+            // Return keeps a whole address that's typed, rather than a suggestion it's part of.
+            let jason = MailAddress(name: "Jason Lee", email: "jason@icloud.example")
+            check(TypedAddresses.pick(jason, typed: "son@icloud.example") == nil, "a whole address typed is taken as typed, not a suggestion it's part of")
+            check(TypedAddresses.pick(jason, typed: "jas") == jason && TypedAddresses.pick(jason, typed: "Jason@icloud.example") == jason,
+                  "while part of a name, or the suggestion's own address, takes the suggestion")
+            check(TypedAddresses.adding("son@icloud.example, Sam <sam@example.com>", to: [jason]).map(\.email)
+                  == ["jason@icloud.example", "son@icloud.example", "sam@example.com"], "every address typed is added, once each")
+            check(!TypedAddresses.isComplete("son") && !TypedAddresses.isComplete("son@icloud") && TypedAddresses.isComplete("son@icloud.example"),
+                  "only whole addresses count")
+            let parsed = RecipientParser.parse("\"Park, Casey\" <casey@elsewhere.example>, sam@example.com; <kim@example.com>")
+            check(parsed.map(\.email) == ["casey@elsewhere.example", "sam@example.com", "kim@example.com"] && parsed.first?.name == "Park, Casey"
+                  && parsed.last?.name == nil, "a comma inside a quoted name doesn't split the address", "\(parsed)")
+            check(!RecipientParser.hasSeparator("\"Park,") && RecipientParser.hasSeparator("sam@example.com,"),
+                  "and typing one there doesn't end it")
             if let added = session.contacts.savedContacts.first(where: { $0.givenName == "Taylor" }) { session.contacts.delete(added, quietly: true) }
             wait("Taylor tidied away") { !session.contacts.savedContacts.contains { $0.givenName == "Taylor" } }
         }

@@ -12,6 +12,19 @@ final class ComposeModel: Identifiable {
     var to: [MailAddress] = []
     var cc: [MailAddress] = [] { didSet { if !cc.isEmpty { showsCc = true } } }
     var bcc: [MailAddress] = [] { didSet { if !bcc.isEmpty { showsBcc = true } } }
+    /// What's typed in To, Cc and Bcc that isn't an address yet (Return, a comma or leaving the field makes it one).
+    var typedTo = ""
+    var typedCc = ""
+    var typedBcc = ""
+
+    /// Makes what's typed in To, Cc and Bcc addresses, so clicking Send (or closing the window) doesn't lose it.
+    func takeTypedAddresses() {
+        for (typed, field) in [(typedTo, \ComposeModel.to), (typedCc, \ComposeModel.cc), (typedBcc, \ComposeModel.bcc)]
+            where !typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            self[keyPath: field] = TypedAddresses.adding(typed, to: self[keyPath: field])
+        }
+        (typedTo, typedCc, typedBcc) = ("", "", "")
+    }
     var showsCc = false
     var showsBcc = false
     var subject = ""
@@ -190,6 +203,7 @@ final class ComposeModel: Identifiable {
 
     /// Sends after a few seconds, during which the note along the bottom offers Undo.
     func send() {
+        takeTypedAddresses()
         guard !to.isEmpty || !cc.isEmpty || !bcc.isEmpty else {
             error = "Add at least one recipient."
             return
@@ -267,6 +281,7 @@ final class ComposeModel: Identifiable {
 
     /// Sends the message at `date` instead of now. It waits on this Mac, in Scheduled, until then.
     func schedule(at date: Date) {
+        takeTypedAddresses()
         guard !to.isEmpty || !cc.isEmpty || !bcc.isEmpty else {
             error = "Add at least one recipient."
             return
@@ -391,6 +406,7 @@ final class ComposeModel: Identifiable {
 
     /// Closes the window, keeping what was written as a draft.
     func closeKeepingDraft() {
+        takeTypedAddresses()
         app?.close(self)
         guard !isEmpty, session.services.mail.capabilities.supportsDrafts else { return }
         let message = outgoing()

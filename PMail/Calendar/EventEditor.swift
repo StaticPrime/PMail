@@ -21,6 +21,8 @@ struct EventEditor: View {
     @State private var detailsTab = DetailsTab.details
     @State private var guestsTab = GuestsTab.guests
     @State private var asksCustomRepeat = false
+    /// A guest's address typed and not yet added (saving adds it).
+    @State private var guestText = ""
     @Environment(\.dismiss) private var dismiss
 
     init(app: AppModel, model: CalendarViewModel, contacts: ContactsViewModel, draft: EventDraft) {
@@ -565,7 +567,7 @@ struct EventEditor: View {
 
     private var guestsColumn: some View {
         VStack(alignment: .leading, spacing: 12) {
-            GuestField(guests: $draft.guests, contacts: contacts)
+            GuestField(guests: $draft.guests, text: $guestText, contacts: contacts)
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     if !draft.guests.isEmpty {
@@ -623,6 +625,17 @@ struct EventEditor: View {
     // MARK: Saving
 
     private func save() {
+        // A guest typed but not added with Return is added now, rather than lost.
+        let typed = guestText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if draft.type == .event, !typed.isEmpty {
+            let added = TypedAddresses.adding(typed, to: draft.guests)
+            guard added.dropFirst(draft.guests.count).allSatisfy({ TypedAddresses.isComplete($0.email) }), added.count > draft.guests.count else {
+                error = "“\(typed)” isn’t a complete email address."
+                return
+            }
+            draft.guests = added
+            guestText = ""
+        }
         guard draft.isTask || draft.end > draft.start else {
             error = "The event has to end after it starts."
             return
@@ -660,8 +673,8 @@ struct EventEditor: View {
 /// Adding guests by name or address, with suggestions from contacts.
 private struct GuestField: View {
     @Binding var guests: [MailAddress]
+    @Binding var text: String
     let contacts: ContactsViewModel
-    @State private var text = ""
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -670,7 +683,11 @@ private struct GuestField: View {
             TextField("Add guests", text: $text)
                 .textFieldStyle(.roundedBorder)
                 .focused($focused)
-                .onSubmit { add(suggestions.first) }
+                .onSubmit { add(TypedAddresses.pick(suggestions.first, typed: text)) }
+                .onChange(of: text) { _, new in
+                    if RecipientParser.hasSeparator(new) { add(nil) }
+                }
+                .onChange(of: focused) { _, isFocused in if !isFocused { add(nil) } }
             if focused, !text.isEmpty, !suggestions.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(suggestions, id: \.email) { address in
@@ -694,9 +711,16 @@ private struct GuestField: View {
         }
     }
 
+    /// Adds the suggestion picked, or every whole address typed (what isn't an address stays to be fixed).
     private func add(_ suggestion: MailAddress?) {
-        let new = suggestion.map { [$0] } ?? RecipientParser.parse(text).filter { $0.email.contains("@") }
-        guests.append(contentsOf: new.filter { address in !guests.contains { $0.isSameMailbox(as: address) } })
+        if let suggestion {
+            if !guests.contains(where: { $0.isSameMailbox(as: suggestion) }) { guests.append(suggestion) }
+            text = ""
+            return
+        }
+        let typed = RecipientParser.parse(text)
+        guard !typed.isEmpty, typed.allSatisfy({ TypedAddresses.isComplete($0.email) }) else { return }
+        guests = TypedAddresses.adding(text, to: guests)
         text = ""
     }
 }
