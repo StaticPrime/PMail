@@ -84,6 +84,12 @@ public actor LocalMailStore {
         return (inFolder.count, inFolder.filter(\.summary.isUnread).count)
     }
 
+    /// Messages with a label, in every folder, newest first.
+    public func summaries(withLabel labelID: String) -> [MessageSummary] {
+        loadIfNeeded()
+        return Self.newestFirst(entries.values.map(\.summary).filter { $0.labelIDs.contains(labelID) })
+    }
+
     /// Messages whose subject, sender, recipients or snippet contain every word of `text`, ignoring case and
     /// accents, newest first. With `folderID`, only that folder is searched.
     public func search(_ text: String, in folderID: String? = nil) -> [MessageSummary] {
@@ -140,6 +146,36 @@ public actor LocalMailStore {
         try update(ids) {
             $0.folderID = folderID
             $0.isDraft = Self.isDraftsFolder(folderID)
+        }
+    }
+
+    /// Adds a label to messages, or takes it off them.
+    public func setLabel(_ labelID: String, _ isOn: Bool, for ids: [String]) throws {
+        try update(ids) { summary in
+            if isOn {
+                if !summary.labelIDs.contains(labelID) { summary.labelIDs.append(labelID) }
+            } else {
+                summary.labelIDs.removeAll { $0 == labelID }
+            }
+        }
+    }
+
+    /// Gives messages exactly these labels.
+    public func setLabelIDs(_ labelIDs: [String], for ids: [String]) throws {
+        try update(ids) { $0.labelIDs = labelIDs }
+    }
+
+    /// Changes a label to another on every message that has it, or takes it off them all when `newID` is nil.
+    public func replaceLabel(_ labelID: String, with newID: String?) throws {
+        loadIfNeeded()
+        let ids = entries.values.filter { $0.summary.labelIDs.contains(labelID) }.map(\.summary.id)
+        try update(ids) { summary in
+            var labels: [String] = []
+            for label in summary.labelIDs {
+                guard let kept = label == labelID ? newID : label else { continue }
+                if !labels.contains(kept) { labels.append(kept) }
+            }
+            summary.labelIDs = labels
         }
     }
 

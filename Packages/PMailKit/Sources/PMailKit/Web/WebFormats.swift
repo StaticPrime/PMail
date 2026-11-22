@@ -304,6 +304,40 @@ enum WebColor {
         guard value.count == 6, value.allSatisfy(\.isHexDigit) else { return nil }
         return "#" + value.uppercased()
     }
+
+    /// A color's red, green and blue, 0 to 255 each; nil for anything `hex` turns down.
+    static func components(_ text: String?) -> (red: Int, green: Int, blue: Int)? {
+        guard let hex = hex(text), let value = Int(hex.dropFirst(), radix: 16) else { return nil }
+        return (value >> 16 & 0xFF, value >> 8 & 0xFF, value & 0xFF)
+    }
+
+    /// The palette color closest to a color as people see it (a distance that weighs red, green and blue the way eyes
+    /// do), spelled as the palette spells it. Nil when the color can't be read or the palette is empty.
+    static func nearest(to text: String?, in palette: [String]) -> String? {
+        guard let wanted = components(text) else { return nil }
+        var best: (color: String, distance: Double)?
+        for color in palette {
+            guard let candidate = components(color) else { continue }
+            let meanRed = Double(wanted.red + candidate.red) / 2
+            let red = Double(wanted.red - candidate.red), green = Double(wanted.green - candidate.green)
+            let blue = Double(wanted.blue - candidate.blue)
+            let distance = (2 + meanRed / 256) * red * red + 4 * green * green + (2 + (255 - meanRed) / 256) * blue * blue
+            if distance < best?.distance ?? .infinity { best = (color, distance) }
+        }
+        return best?.color
+    }
+
+    /// Black or white text, whichever reads better on a background ("#000000" or "#ffffff").
+    static func readableText(on background: String) -> String {
+        guard let color = components(background) else { return "#000000" }
+        func linear(_ channel: Int) -> Double {
+            let value = Double(channel) / 255
+            return value <= 0.03928 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        let luminance = 0.2126 * linear(color.red) + 0.7152 * linear(color.green) + 0.0722 * linear(color.blue)
+        // The contrast each would have against the background.
+        return (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) ? "#000000" : "#ffffff"
+    }
 }
 
 /// The raw messages the web services upload.

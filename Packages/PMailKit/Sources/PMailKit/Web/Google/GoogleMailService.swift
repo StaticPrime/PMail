@@ -48,7 +48,7 @@ public actor GoogleMailService: MailService {
 
     public nonisolated var capabilities: MailCapabilities {
         MailCapabilities(usesLabels: true, canStar: true, canMarkImportant: true, hasInboxTabs: true, searchesOnServer: true,
-                         canArchive: true, supportsDrafts: true, canMove: true)
+                         canArchive: true, supportsDrafts: true, canMove: true, canLabel: true, canEditLabels: true)
     }
 
     public nonisolated var inboxTabs: [InboxTab] { Self.tabs }

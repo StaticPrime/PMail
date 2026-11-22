@@ -193,11 +193,11 @@ public actor IMAPMailService: MailService {
         guard !uids.isEmpty else { return [] }
         let fetched = try await client.fetchSummaries(uids)
         let snippets = try await self.snippets(for: fetched, client: client)
-        return fetched.compactMap { response in
+        return await labeled(fetched.compactMap { response in
             guard let uid = response.uid else { return nil }
             return Self.summary(from: response, id: IMAPMessageID(mailbox: mailbox, uidValidity: uidValidity, uid: uid),
                                 snippet: snippets[uid] ?? "")
-        }
+        }, client: client)
     }
 
     /// Snippets from the start of each message's text part: one partial fetch for each part number in use.
@@ -487,7 +487,8 @@ public actor IMAPMailService: MailService {
             guard let uid = response.uid, let raw = response.section("") else { continue }
             var flags = MessageSummary(id: "")
             Self.applyFlags(response.flags ?? [], to: &flags)
-            try await store.add(raw: raw, folderID: folderID, isUnread: flags.isUnread, isStarred: flags.isStarred)
+            let summary = try await store.add(raw: raw, folderID: folderID, isUnread: flags.isUnread, isStarred: flags.isStarred)
+            try await keepLabels(response.flags, of: summary, in: store)
             kept.append(uid)
         }
         try await client.deleteMessages(kept)
@@ -555,6 +556,7 @@ public actor IMAPMailService: MailService {
                 var flags: [String] = []
                 if !summary.isUnread { flags.append("\\Seen") }
                 if summary.isStarred { flags.append("\\Flagged") }
+                flags += try await self.labelFlags(forUploading: summary)
                 _ = try await client.append(raw, to: mailbox, flags: flags)
                 try await store.delete(ids: [id])
             }

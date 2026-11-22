@@ -61,7 +61,8 @@ public protocol MailService: AnyObject, Sendable {
 
     /// Makes a label. `colorHex` is "#RRGGBB", or nil for the account's default.
     func createLabel(named name: String, colorHex: String?) async throws -> MailFolder
-    /// Renames or recolors a label, and returns it as it is now (its ID may change).
+    /// Renames or recolors a label (a nil color leaves its color as it is), and returns it as it is now (its ID may
+    /// change).
     func updateLabel(_ label: MailFolder, name: String, colorHex: String?) async throws -> MailFolder
     /// Deletes a label; the messages that had it keep everything else.
     func deleteLabel(_ label: MailFolder) async throws

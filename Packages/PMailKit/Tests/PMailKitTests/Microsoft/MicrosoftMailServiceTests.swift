@@ -84,7 +84,8 @@ import Testing
     @Test func capabilitiesAndTabs() {
         let mail = service(StubTransport())
         #expect(mail.capabilities == MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: true, hasInboxTabs: true,
-                                                      searchesOnServer: true, canArchive: true, supportsDrafts: true, canMove: true))
+                                                      searchesOnServer: true, canArchive: true, supportsDrafts: true, canMove: true,
+                                                      canLabel: true, canEditLabels: true))
         #expect(mail.inboxTabs.map(\.id) == ["focused", "other"])
         #expect(mail.inboxTabs.map(\.name) == ["Focused", "Other"])
     }
@@ -133,7 +134,7 @@ import Testing
         #expect(request.query("$orderby") == "receivedDateTime desc")
         #expect(request.query("$top") == "25" && request.query("$skip") == "50" && request.query("$count") == "true")
         #expect(request.query("$select") == "id,conversationId,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,isRead,"
-                + "flag,importance,hasAttachments,isDraft,internetMessageId,parentFolderId")
+                + "flag,importance,hasAttachments,isDraft,internetMessageId,parentFolderId,categories")
         #expect(request.value(forHTTPHeaderField: "ConsistencyLevel") == "eventual")
 
         #expect(page.totalCount == 120)
@@ -475,10 +476,6 @@ import Testing
                 == ["archive", "deleteditems", "junkemail", "inbox", "inbox", "AAMkProjects="])
         #expect(requests.last?["method"] == "DELETE" && requests.last?["url"] == "/me/messages/AAMkMsg1=")
         #expect(requests.last?["body"].isNull == true)
-
-        await #expect(throws: PMailError.notSupported("Microsoft accounts file mail in folders and don’t have labels.")) {
-            try await mail.perform(.addLabel("Work"), on: message)
-        }
     }
 
     // MARK: Sending and drafts

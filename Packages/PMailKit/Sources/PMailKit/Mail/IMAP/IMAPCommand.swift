@@ -106,6 +106,14 @@ enum IMAPArgument {
         value.utf8.allSatisfy { $0 >= 0x01 && $0 <= 0x7F && $0 != 0x0D && $0 != 0x0A }
     }
 
+    /// Whether a string can go bare, as an atom (a keyword, say): ASCII with no spaces, control characters or any of
+    /// `(){%*"\]`.
+    static func isAtom(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.allSatisfy { byte in byte > 0x20 && byte < 0x7F && !atomSpecials.contains(byte) }
+    }
+
+    private static let atomSpecials = Set("(){%*\"\\]".utf8)
+
     static func quoted(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
@@ -209,6 +217,9 @@ public indirect enum IMAPSearchKey: Sendable, Hashable {
     case cc(String)
     /// A header field containing the text (an empty text matches every message that has the field).
     case header(String, String)
+    /// Messages with a keyword: a flag without a backslash, such as a label's. Text that can't be a keyword matches
+    /// nothing.
+    case keyword(String)
     case uids([UInt32])
     /// Messages with this UID or a higher one (`UID n:*`). The newest message always matches, even when its UID is
     /// lower, so callers check what comes back.
@@ -253,6 +264,7 @@ public indirect enum IMAPSearchKey: Sendable, Hashable {
             builder.fieldName(name)
             builder.text(" ")
             builder.string(value)
+        case let .keyword(keyword): builder.text(IMAPArgument.isAtom(keyword) ? "KEYWORD " + keyword : "NOT ALL")
         case let .uids(uids): builder.text("UID " + (uids.isEmpty ? "0" : IMAPSequenceSet.string(uids)))
         case let .uidsFrom(first): builder.text("UID \(max(first, 1)):*")
         case let .since(date): builder.text("SINCE " + IMAPDate.day(date))

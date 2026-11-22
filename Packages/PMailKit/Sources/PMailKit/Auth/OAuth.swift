@@ -44,7 +44,8 @@ public struct OAuthProvider: Sendable, Hashable {
                       extraParameters: ["access_type": "offline", "prompt": "consent", "include_granted_scopes": "true"])
     }
 
-    /// Microsoft: mail, calendars (Teams meetings are made on calendar events) and contacts, through Microsoft Graph.
+    /// Microsoft: mail (with the mailbox settings that hold its categories, PMail's labels), calendars (Teams meetings
+    /// are made on calendar events) and contacts, through Microsoft Graph.
     public static func microsoft(clientID: String, tenant: String? = nil, redirectURI: String? = nil) -> OAuthProvider {
         let tenant = tenant.flatMap { $0.isEmpty ? nil : $0 } ?? "common"
         let base = "https://login.microsoftonline.com/\(tenant)/oauth2/v2.0"
@@ -54,7 +55,7 @@ public struct OAuthProvider: Sendable, Hashable {
                              clientID: clientID,
                              redirectURI: redirectURI ?? "msauth.com.pugglesoft.PMail://auth",
                              scopes: ["openid", "profile", "email", "offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send",
-                                      "Calendars.ReadWrite", "Contacts.ReadWrite"],
+                                      "MailboxSettings.ReadWrite", "Calendars.ReadWrite", "Contacts.ReadWrite"],
                              extraParameters: ["prompt": "select_account", "response_mode": "query"])
     }
 

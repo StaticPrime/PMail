@@ -87,7 +87,8 @@ import Testing
     @Test func capabilitiesAndInboxTabs() {
         let mail = service(StubTransport())
         #expect(mail.capabilities == MailCapabilities(usesLabels: true, canStar: true, canMarkImportant: true, hasInboxTabs: true,
-                                                      searchesOnServer: true, canArchive: true, supportsDrafts: true, canMove: true))
+                                                      searchesOnServer: true, canArchive: true, supportsDrafts: true, canMove: true,
+                                                      canLabel: true, canEditLabels: true))
         #expect(mail.inboxTabs.map(\.id) == ["CATEGORY_PERSONAL", "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES",
                                              "CATEGORY_FORUMS"])
         #expect(mail.inboxTabs.map(\.name) == ["Primary", "Promotions", "Social", "Updates", "Forums"])

@@ -1,7 +1,8 @@
 import Foundation
 
 /// A Microsoft account's mail, through Microsoft Graph. Mail lives in folders; flagged messages show in a Starred
-/// folder of their own, and whole messages are fetched, sent and saved as drafts in MIME form.
+/// folder of their own, Outlook categories are the labels, and whole messages are fetched, sent and saved as drafts in
+/// MIME form.
 public actor MicrosoftMailService: MailService {
     /// The account's address.
     public nonisolated let email: String
@@ -18,7 +19,7 @@ public actor MicrosoftMailService: MailService {
     static let headers = ["Prefer": "IdType=\"ImmutableId\""]
     static let listHeaders = ["Prefer": "IdType=\"ImmutableId\"", "ConsistencyLevel": "eventual"]
     static let messageFields = "id,conversationId,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,isRead,"
-        + "flag,importance,hasAttachments,isDraft,internetMessageId,parentFolderId"
+        + "flag,importance,hasAttachments,isDraft,internetMessageId,parentFolderId,categories"
     /// The special folders, by the names Graph knows them by.
     static let wellKnownNames: [(name: String, role: FolderRole)] = [
         ("inbox", .inbox), ("sentitems", .sent), ("drafts", .drafts), ("deleteditems", .trash), ("junkemail", .spam),
@@ -40,7 +41,7 @@ public actor MicrosoftMailService: MailService {
 
     public nonisolated var capabilities: MailCapabilities {
         MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: true, hasInboxTabs: true, searchesOnServer: true,
-                         canArchive: true, supportsDrafts: true, canMove: true)
+                         canArchive: true, supportsDrafts: true, canMove: true, canLabel: true, canEditLabels: true)
     }
 
     public nonisolated var inboxTabs: [InboxTab] { Self.tabs }
@@ -70,7 +71,7 @@ public actor MicrosoftMailService: MailService {
             }.flatMap { $0 }
             all += level
         }
-        return Self.folders(from: all, roles: roles)
+        return Self.folders(from: all, roles: roles) + (await categoryFolders())
     }
 
     /// Folders in tree order (each followed by the folders inside it), then the Starred folder.
@@ -120,11 +121,13 @@ public actor MicrosoftMailService: MailService {
     public func listConversations(_ request: ListRequest) async throws -> ConversationPage {
         let search = request.query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let flagged = request.folderID == Self.flaggedFolderID
+        // A label lists the messages with that category in every folder.
+        let category = Self.categoryName(fromLabelID: request.folderID)
         if let token = request.pageToken, !token.isEmpty, let next = Graph.url(fromLink: token) {
-            return try await page(at: next, flaggedOnly: flagged && !search.isEmpty)
+            return try await page(at: next, flaggedOnly: flagged && !search.isEmpty, category: category)
         }
         let collection: String
-        if let folderID = request.folderID, !folderID.isEmpty, !flagged {
+        if let folderID = request.folderID, !folderID.isEmpty, !flagged, category == nil {
             collection = "mailFolders/\(WebURL.segment(folderID))/messages"
         } else {
             collection = "messages"
@@ -135,6 +138,7 @@ public actor MicrosoftMailService: MailService {
         if search.isEmpty {
             var filters: [String] = []
             if flagged { filters.append("flag/flagStatus eq 'flagged'") }
+            if let category { filters.append("categories/any(c:c eq \(Graph.literal(category)))") }
             if let tabID = request.tabID, ["focused", "other"].contains(tabID), !focusedFilterRefused,
                await isInbox(request.folderID) {
                 tab = tabID
@@ -152,7 +156,7 @@ public actor MicrosoftMailService: MailService {
             query.append(("$search", "\"\(escaped)\""))
         }
         do {
-            return try await page(at: Self.url(collection, query), flaggedOnly: flagged && !search.isEmpty)
+            return try await page(at: Self.url(collection, query), flaggedOnly: flagged && !search.isEmpty, category: category)
         } catch let PMailError.http(status, _) where status == 400 && tab != nil {
             focusedFilterRefused = true  // No Focused Inbox here: list everything instead.
             return try await listConversations(request)
@@ -165,10 +169,19 @@ public actor MicrosoftMailService: MailService {
         return await wellKnownFolders()[folderID] == .inbox
     }
 
-    private func page(at url: URL, flaggedOnly: Bool) async throws -> ConversationPage {
+    /// A page of messages. A category's list leaves out Deleted Items and Junk Email, and checks each message has the
+    /// category (a search can't be narrowed to one on the server).
+    private func page(at url: URL, flaggedOnly: Bool, category: String? = nil) async throws -> ConversationPage {
         let json = try await client.get(url, headers: Self.listHeaders)
         var summaries = json["value"].array.compactMap(Self.summary(from:))
         if flaggedOnly { summaries = summaries.filter(\.isStarred) }
+        if let category {
+            let hidden = Set(await wellKnownFolders().filter { $0.value == .trash || $0.value == .spam }.map(\.key))
+            summaries = summaries.filter { summary in
+                let names = summary.labelIDs.compactMap(Self.categoryName(fromLabelID:))
+                return !hidden.contains(summary.folderID ?? "") && names.contains { Self.sameCategory($0, category) }
+            }
+        }
         return ConversationPage(conversations: Conversation.group(summaries), totalCount: json["@odata.count"].int,
                                 nextPageToken: json["@odata.nextLink"].nonEmpty)
     }
@@ -177,7 +190,8 @@ public actor MicrosoftMailService: MailService {
     static func summary(from json: JSONValue) -> MessageSummary? {
         guard let id = json["id"].nonEmpty else { return nil }
         return MessageSummary(id: id, threadID: json["conversationId"].nonEmpty ?? id, folderID: json["parentFolderId"].nonEmpty,
-                              from: Graph.address(json["from"]), to: json["toRecipients"].array.compactMap(Graph.address),
+                              labelIDs: json["categories"].strings.map(categoryLabelID), from: Graph.address(json["from"]),
+                              to: json["toRecipients"].array.compactMap(Graph.address),
                               cc: json["ccRecipients"].array.compactMap(Graph.address), subject: json["subject"].string ?? "",
                               snippet: HTMLText.snippet(from: json["bodyPreview"].string ?? ""),
                               date: json["receivedDateTime"].string.flatMap { WebDate.parse($0) } ?? Date(),
@@ -327,8 +341,10 @@ public actor MicrosoftMailService: MailService {
             try await client.graphBatch(ids.map {
                 GraphBatchRequest(method: "DELETE", url: Self.batchPath($0), headers: Self.headers)
             })
-        case .addLabel, .removeLabel:
-            throw PMailError.notSupported("Microsoft accounts file mail in folders and don’t have labels.")
+        case let .addLabel(id):
+            try await setCategory(id, on: messages, adding: true)
+        case let .removeLabel(id):
+            try await setCategory(id, on: messages, adding: false)
         }
     }
 
