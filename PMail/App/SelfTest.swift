@@ -175,10 +175,11 @@ enum SelfTest {
             check(mail.unreadInbox == 5, "and the inbox count goes down", "\(mail.unreadInbox)")
             check(mail.openConversation?.isUnread == false, "and the conversation is read")
             let message = mail.openMessages.last!
-            check(!mail.showsImages(for: message) || UserDefaults.standard.bool(forKey: "AlwaysShowPictures"), "pictures from the internet don't load by themselves")
+            check(!mail.showsImages(for: message), "pictures from the internet don't load by themselves")
             let html = MessageHTML.document(for: MailMessage(summary: message.summary, htmlBody: "<p>Hi<img src=\"https://tracker.example/p.gif\"></p>"))
             check(html.contains("Content-Security-Policy") && html.contains("img-src cid: data:;"), "message pages refuse anything from the internet")
-            check(MessageHTML.document(for: message, allowsRemote: true).contains("img-src cid: data: https: http:"), "until pictures are asked for")
+            check(MessageHTML.document(for: message, allowsRemote: true).contains("img-src cid: data: pmail-remote:;"),
+                  "until pictures are asked for, and then only through PMail's loader")
         }
         step {
             // Single-key shortcuts: S stars the open conversation, U goes back to the list.
@@ -932,6 +933,82 @@ enum SelfTest {
             mail.select(tabID: InboxCategory.primary.tabID)
             app.switchAccount(to: SampleData.googleID)
             wait("the Google inbox") { session.id == SampleData.googleID && !mail.isLoadingList }
+        }
+
+        // MARK: Privacy
+        let privacy = PrivacySettings.shared
+        let internet = SampleRemoteFetcher.shared
+        let salePicture = URL(string: "https://images.example.com/sale.jpg")!
+        var askedBefore = 0
+        step {
+            mail.select(folderID: mail.inbox?.id)
+            if let first = mail.inboxTabs.first?.id { mail.select(tabID: first) }
+            wait("the inbox's first tab") { mail.selectedTabID == mail.inboxTabs.first?.id && !mail.isLoadingList }
+        }
+        step {
+            check(privacy.blocksRemoteContent && !privacy.protectsMailActivity && !privacy.usesProxy,
+                  "remote content starts out blocked, with nothing loaded ahead and no proxy")
+            let newsletter = MailMessage(summary: MessageSummary(id: "self-test-news", from: MailAddress(email: "news@shop.example")),
+                                         htmlBody: "<p>Sale<img src=\"https://images.example.com/sale.jpg\"></p>")
+            check(MessageHTML.hasRemoteContent(newsletter) && !mail.showsImages(for: newsletter), "a message's pictures wait to be asked for")
+            privacy.trustedImageSenders.insert("news@shop.example")
+            check(mail.showsImages(for: newsletter), "or show for a sender whose pictures always show")
+            privacy.trustedImageSenders.remove("news@shop.example")
+            privacy.blocksRemoteContent = false
+            check(mail.showsImages(for: newsletter), "with nothing blocked, pictures show as a message opens")
+            privacy.blocksRemoteContent = true
+            privacy.protectsMailActivity = true
+            check(mail.showsImages(for: newsletter), "and with mail activity protected, every message's do")
+            let page = MessageHTML.document(for: newsletter, allowsRemote: true)
+            check(page.contains("img-src cid: data: pmail-remote:;") && !page.contains("images.example.com"),
+                  "through PMail's own loader: the page never reaches the internet itself")
+            check(MessageHTML.document(for: newsletter).contains("x-dns-prefetch-control"), "or looks up its links ahead of a click")
+            askedBefore = internet.requests.count
+            let service = sampleMail
+            let session = session
+            Task {
+                await service?.deliver(from: MailAddress(name: "Shop", email: "news@shop.example"), subject: "Self-test sale", text: "Sale",
+                                       html: "<p>Sale</p><img src=\"https://images.example.com/sale.jpg\" width=\"1\" height=\"1\">",
+                                       at: AppClock.now().addingTimeInterval(180))
+                await app.sync?.check(session)
+            }
+            let cache = session.storage.remoteContent
+            wait("the sale's picture to load ahead") { read { await cache.contains(salePicture) } == true }
+        }
+        step {
+            let cache = session.storage.remoteContent
+            check(read { await cache.contains(salePicture) } == true, "new mail's pictures load as it arrives, before it's opened")
+            check(internet.requests.count - askedBefore == 1, "once", "\(internet.requests.count - askedBefore) requests")
+            wait("the sale in the inbox") { mail.conversations.contains { $0.subject == "Self-test sale" } && !mail.isLoadingList }
+        }
+        step {
+            guard let sale = mail.conversations.first(where: { $0.subject == "Self-test sale" }) else {
+                return check(false, "the sale arrives", mail.conversations.prefix(5).map(\.subject).joined(separator: ", "))
+            }
+            MessageBodyView.remoteContentServed = []
+            mail.open(sale)
+            wait("the sale's page to show its picture", upTo: 10) { MessageBodyView.remoteContentServed.contains(salePicture) }
+        }
+        step {
+            check(MessageBodyView.remoteContentServed.contains(salePicture), "opening it shows the picture, from PMail's copy",
+                  MessageBodyView.remoteContentServed.map(\.absoluteString).joined(separator: " "))
+            check(internet.requests.count - askedBefore == 1, "without asking the internet again", "\(internet.requests.count - askedBefore) requests")
+            let before = internet.requests.count
+            privacy.usesProxy = true
+            privacy.proxy = RemoteContentProxy(host: "")
+            let other = URL(string: "https://images.example.com/other.jpg")!
+            let refused = read { (try? await RemoteContentLoader.shared.data(from: other)) == nil }
+            check(refused == true && internet.requests.count == before, "with the proxy on but not filled in, nothing loads at all")
+            privacy.proxy = RemoteContentProxy()
+            check(RemoteContentLoader.shared.isThroughProxy, "once it is, everything goes through it")
+            let router = URL(string: "http://192.168.1.1/admin")!
+            let local = read { (try? await RemoteContentLoader.shared.data(from: router)) == nil }
+            check(local == true && internet.requests.count == before, "and nothing on the local network loads", "\(internet.requests.map(\.absoluteString))")
+            privacy.usesProxy = false
+            privacy.protectsMailActivity = false
+            check(!RemoteContentLoader.shared.isThroughProxy && privacy.blocksRemoteContent && !privacy.protectsMailActivity, "the settings go back")
+            mail.closeConversation()
+            wait("the inbox list") { mail.openConversation == nil && !mail.isLoadingList }
         }
 
         // MARK: Accounts, windows and menus

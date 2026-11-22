@@ -4,21 +4,30 @@ import SwiftUI
 import WebKit
 
 /// A message's body, drawn by WebKit at its full height inside the conversation's scroll view. The message's own
-/// scripts never run, links open in the browser, and pictures from the internet load only when asked, so senders
-/// can't see when (or whether) a message was read.
+/// scripts never run, links open in the browser, and the page never reaches the internet itself: pictures, style
+/// sheets and fonts from the internet come through PMail's private loader (from the account's copy when there is
+/// one), and only when Settings ▸ Privacy lets them.
 struct MessageBodyView: NSViewRepresentable {
     let message: MailMessage
     let loadsRemoteImages: Bool
+    /// The account's copies of remote content, which pictures come from (and are kept in) when they load.
+    var cache: RemoteContentCache?
     @Binding var height: CGFloat
     var onMailto: (URL) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    #if DEBUG
+    /// The remote content message pages were given, for the self-test.
+    static var remoteContentServed: [URL] = []
+    #endif
 
     func makeNSView(context: Context) -> BodyWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         configuration.setURLSchemeHandler(context.coordinator, forURLScheme: "cid")
+        configuration.setURLSchemeHandler(context.coordinator, forURLScheme: RemoteContent.scheme)
         let controller = configuration.userContentController
         controller.add(context.coordinator, contentWorld: .defaultClient, name: "pmHeight")
         controller.addUserScript(WKUserScript(source: Self.heightScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true,
@@ -41,6 +50,7 @@ struct MessageBodyView: NSViewRepresentable {
 
     static func dismantleNSView(_ webView: BodyWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "pmHeight", contentWorld: .defaultClient)
+        coordinator.cancelLoads()
     }
 
     /// Reports the page's height whenever it changes, from the app's own script world (the page's scripts are off).
@@ -57,6 +67,8 @@ struct MessageBodyView: NSViewRepresentable {
         var parent: MessageBodyView
         var loadedID: String?
         var loadedRemote = false
+        /// Remote content being loaded for the page, by the request it answers.
+        private var loads: [ObjectIdentifier: Task<Void, Never>] = [:]
 
         init(_ parent: MessageBodyView) {
             self.parent = parent
@@ -65,18 +77,21 @@ struct MessageBodyView: NSViewRepresentable {
         func load(into webView: WKWebView) {
             loadedID = parent.message.id
             loadedRemote = parent.loadsRemoteImages
+            cancelLoads()
             let html = MessageHTML.document(for: parent.message, allowsRemote: parent.loadsRemoteImages)
             let controller = webView.configuration.userContentController
             controller.removeAllContentRuleLists()
-            if parent.loadsRemoteImages {
+            // The page itself never reaches the internet (what loads comes through PMail's loader), and nothing loads
+            // until the rules that make sure of it are in place.
+            RemoteContentBlocker.rules { rules in
+                if let rules { controller.add(rules) }
                 webView.loadHTMLString(html, baseURL: nil)
-            } else {
-                // Nothing from the internet until the rules that block it are in place.
-                RemoteContentBlocker.rules { rules in
-                    if let rules { controller.add(rules) }
-                    webView.loadHTMLString(html, baseURL: nil)
-                }
             }
+        }
+
+        func cancelLoads() {
+            loads.values.forEach { $0.cancel() }
+            loads = [:]
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -102,10 +117,11 @@ struct MessageBodyView: NSViewRepresentable {
             }
         }
 
-        // MARK: cid: pictures
+        // MARK: cid: pictures, and remote content through PMail's loader
 
         func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
             guard let url = urlSchemeTask.request.url else { return }
+            if url.scheme?.lowercased() == RemoteContent.scheme { return loadRemote(url, for: urlSchemeTask) }
             let id = (url.absoluteString.dropFirst("cid:".count).removingPercentEncoding ?? "")
                 .trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
             let part = (parent.message.inlineParts + parent.message.attachments).first { $0.contentID == id }
@@ -118,7 +134,47 @@ struct MessageBodyView: NSViewRepresentable {
             urlSchemeTask.didFinish()
         }
 
-        func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {}
+        func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {
+            loads.removeValue(forKey: ObjectIdentifier(urlSchemeTask))?.cancel()
+        }
+
+        /// A picture, style sheet or font from the internet, from the account's copy or loaded privately now. Only
+        /// for a page allowed remote content; otherwise (or for anything PMail won't load) the page gets nothing.
+        private func loadRemote(_ url: URL, for task: any WKURLSchemeTask) {
+            guard loadedRemote, let reference = RemoteContent.reference(from: url) else {
+                task.didFailWithError(URLError(.resourceUnavailable))
+                return
+            }
+            let key = ObjectIdentifier(task)
+            let cache = parent.cache
+            loads[key] = Task { [weak self] in
+                let result: Result<RemoteResource, any Error>
+                do {
+                    result = .success(try await RemoteContentLoader.shared.load(reference, cache: cache))
+                } catch {
+                    result = .failure(error)
+                }
+                // A request WebKit stopped meanwhile mustn't be answered.
+                guard let self, self.loads.removeValue(forKey: key) != nil, !Task.isCancelled else { return }
+                switch result {
+                case let .success(resource):
+                    #if DEBUG
+                    MessageBodyView.remoteContentServed.append(reference.url)
+                    #endif
+                    var headers = ["Content-Type": resource.mimeType + (resource.textEncoding.map { "; charset=\($0)" } ?? ""),
+                                   "Content-Length": String(resource.data.count)]
+                    // Fonts load only when the server says any page may use them.
+                    headers["Access-Control-Allow-Origin"] = "*"
+                    let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)
+                        ?? URLResponse(url: url, mimeType: resource.mimeType, expectedContentLength: resource.data.count, textEncodingName: resource.textEncoding)
+                    task.didReceive(response)
+                    task.didReceive(resource.data)
+                    task.didFinish()
+                case let .failure(error):
+                    task.didFailWithError(error)
+                }
+            }
+        }
     }
 }
 
@@ -133,7 +189,8 @@ final class BodyWebView: WKWebView {
     }
 }
 
-/// The rules that keep a message's pictures, fonts and styles from loading anything from the internet.
+/// The rules that keep a message's page from loading anything from the internet itself. What it's allowed comes
+/// through PMail's loader instead (`pmail-remote:`), which these leave alone.
 enum RemoteContentBlocker {
     private static var compiled: WKContentRuleList?
     private static var waiting: [(WKContentRuleList?) -> Void] = []
@@ -162,12 +219,13 @@ enum RemoteContentBlocker {
 /// The page a message body is shown in.
 enum MessageHTML {
     static func document(for message: MailMessage, allowsRemote: Bool = false) -> String {
-        // The page may show its own pictures (cid: and data:), and the internet's only when asked; it never runs
-        // scripts, opens frames or sends forms.
-        let sources = allowsRemote ? "cid: data: https: http:" : "cid: data:"
-        let policy = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src \(sources); "
-            + "style-src 'unsafe-inline' \(allowsRemote ? "https: http:" : ""); font-src data: \(allowsRemote ? "https: http:" : ""); "
-            + "media-src \(sources); form-action 'none'; frame-src 'none'; script-src 'none'\">"
+        // The page may show its own pictures (cid: and data:), and the internet's only when allowed, through PMail's
+        // loader; it never reaches the internet itself, runs scripts, opens frames or sends forms, and its links
+        // aren't looked up ahead of a click.
+        let remote = allowsRemote ? " \(RemoteContent.scheme):" : ""
+        let policy = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src cid: data:\(remote); "
+            + "style-src 'unsafe-inline'\(remote); font-src data:\(remote); media-src cid: data:; form-action 'none'; frame-src 'none'; "
+            + "script-src 'none'\"><meta http-equiv=\"x-dns-prefetch-control\" content=\"off\">"
         let isHTML = !(message.htmlBody?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         // Formatted mail is drawn for white paper, so it stays light (on a white card in Dark Mode); plain text
         // follows the window's appearance.
@@ -183,7 +241,8 @@ enum MessageHTML {
         \(isHTML ? "" : "@media (prefers-color-scheme: dark) { body { color: #e3e3e3; } a { color: #8ab4f8; } blockquote { color: #aaa; border-color: #555; } }")
         </style>
         """
-        if let html = message.htmlBody, !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if var html = message.htmlBody, !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if allowsRemote { html = RemoteContent.rewrite(html: html).html }
             // Keep the sender's document as it is, with the base style in front.
             if let head = html.range(of: "<head[^>]*>", options: [.regularExpression, .caseInsensitive]) {
                 var result = html
@@ -227,9 +286,10 @@ enum MessageHTML {
         return html + ReplyBuilder.escapeHTML(String(line[last...]))
     }
 
-    /// Whether the body asks for anything from the internet (pictures, mostly), so the "pictures are hidden" note shows.
+    /// Whether the body asks for anything from the internet that PMail would load (pictures, mostly), so the
+    /// "pictures are hidden" note shows.
     static func hasRemoteContent(_ message: MailMessage) -> Bool {
         guard let html = message.htmlBody else { return false }
-        return html.range(of: "(src|background)\\s*=\\s*[\"']?\\s*https?://|url\\(\\s*[\"']?https?://", options: [.regularExpression, .caseInsensitive]) != nil
+        return !RemoteContent.references(in: html).isEmpty
     }
 }

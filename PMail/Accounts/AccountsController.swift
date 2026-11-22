@@ -33,6 +33,8 @@ struct AccountStorage {
     let labelBook: LabelBook
     /// Sorts its inbox into categories when its server doesn't, remembering the senders put in one by hand.
     let sorter: InboxSorter
+    /// Copies of the pictures, style sheets and fonts its mail loads from the internet.
+    let remoteContent: RemoteContentCache
 
     init(folder: URL) {
         cache = AccountCache(folder: folder.appendingPathComponent("Cache", isDirectory: true))
@@ -41,6 +43,7 @@ struct AccountStorage {
         blockedSenders = BlockedSenders(file: folder.appendingPathComponent("BlockedSenders.json"))
         labelBook = LabelBook(file: folder.appendingPathComponent("Labels.json"))
         sorter = InboxSorter(file: folder.appendingPathComponent("Categories.json"))
+        remoteContent = RemoteContentCache(folder: folder.appendingPathComponent("Remote Content", isDirectory: true))
     }
 }
 
@@ -233,7 +236,7 @@ final class AccountsController {
         try? secrets.setSecret(nil, for: id)
         // The copies and waiting messages go; calendars, contacts and mail kept only on this Mac stay in its folder.
         let folder = storageFolder(for: id)
-        for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json"] { try? FileManager.default.removeItem(at: folder.appendingPathComponent(name)) }
+        for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json", "Remote Content"] { try? FileManager.default.removeItem(at: folder.appendingPathComponent(name)) }
         accounts.removeAll { $0.id == id }
         sessions[id] = nil
         save()

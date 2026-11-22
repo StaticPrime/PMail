@@ -10,6 +10,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: ["NSFullScreenMenuItemEverywhere": false, "SingleKeyShortcuts": true, "UndoSendSeconds": 5,
                                                   "NotifyNewMail": true, "CheckMinutes": 2])
+        #if DEBUG
+        if DebugLaunchOptions.usesSampleAccounts {
+            // Sample runs keep their own privacy settings and never load anything from the internet.
+            let privacy = PrivacySettings(store: DebugLaunchOptions.sampleDefaults, passwords: MemoryProxyPassword())
+            privacy.sampleFetcher = SampleRemoteFetcher.shared
+            PrivacySettings.shared = privacy
+        }
+        #endif
+        PrivacySettings.shared.routeChanged()
         let oauth = OAuthConfiguration.load()
         let accounts = makeAccounts(oauth: oauth)
         app = AppModel(accounts: accounts, oauth: oauth)

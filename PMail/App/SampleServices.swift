@@ -319,14 +319,33 @@ actor SampleMailService: MailService {
     func setFailsLikeOffline(_ fails: Bool) { failsLikeOffline = fails }
 
     /// A new message arriving in the inbox, as if from outside (for the self-test).
-    func deliver(from: MailAddress, subject: String, text: String, at date: Date) {
+    func deliver(from: MailAddress, subject: String, text: String, html: String? = nil, at date: Date) {
         counter += 1
         let id = "arrived-\(counter)"
         let labels = capabilities.usesLabels ? ["INBOX", "CATEGORY_PERSONAL", "UNREAD"] : []
         let summary = MessageSummary(id: id, folderID: capabilities.usesLabels ? nil : role(.inbox), labelIDs: labels, from: from,
                                      to: [account.address], subject: subject, snippet: HTMLText.snippet(from: text), date: date,
                                      isUnread: true, messageIDHeader: "<\(id)@example.com>")
-        messages.append(SampleData.Message(summary: summary, text: text))
+        messages.append(SampleData.Message(summary: summary, html: html, text: text))
+    }
+}
+
+/// The internet for sample runs: every picture is the same small made-up one and every style sheet is empty, so
+/// automated runs never reach a real server. It keeps what was asked for, for the self-test.
+nonisolated final class SampleRemoteFetcher: RemoteFetcher, @unchecked Sendable {
+    static let shared = SampleRemoteFetcher()
+    private let lock = NSLock()
+    private var asked: [URL] = []
+
+    var requests: [URL] { lock.withLock { asked } }
+
+    func fetch(_ request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
+        guard let url = request.url else { throw PMailError.notFound }
+        lock.withLock { asked.append(url) }
+        let isStyle = url.pathExtension.lowercased() == "css"
+        let body = isStyle ? Data("body {}".utf8) : SampleData.samplePicture
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": isStyle ? "text/css" : "image/png"])
+        return (body, response!)
     }
 }
 

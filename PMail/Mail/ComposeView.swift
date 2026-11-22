@@ -778,7 +778,7 @@ final class RichTextController {
         textView.insertText(picture, replacementRange: textView.selectedRange())
         // Shown at its own size once it arrives, no wider than the message.
         Task { [weak textView] in
-            guard let (data, _) = try? await URLSession.shared.data(from: url), let image = NSImage(data: data), let textView else { return }
+            guard let data = try? await RemoteContentLoader.shared.data(from: url), let image = NSImage(data: data), let textView else { return }
             let width = min(image.size.width, 480)
             attachment.bounds = CGRect(x: 0, y: 0, width: width, height: image.size.width > 0 ? image.size.height * width / image.size.width : 40)
             attachment.image = image

@@ -4,18 +4,19 @@ import ServiceManagement
 import SwiftUI
 
 /// PMail ▸ Settings, in panes along a toolbar so none grows taller than the screen: General (new mail, opening at
-/// login, the keyboard), Mail (Undo Send, pictures, inbox categories), Accounts (each account's blocked senders and
-/// sender categories) and Signing In.
+/// login, the keyboard), Mail (Undo Send, inbox categories), Privacy (remote content), Accounts (each account's
+/// settings, blocked senders and sender categories) and Signing In.
 final class SettingsWindowController: NSWindowController {
     private static var shared: SettingsWindowController?
 
     enum Pane: Int, CaseIterable {
-        case general, mail, accounts, signingIn
+        case general, mail, privacy, accounts, signingIn
 
         var title: String {
             switch self {
             case .general: "General"
             case .mail: "Mail"
+            case .privacy: "Privacy"
             case .accounts: "Accounts"
             case .signingIn: "Signing In"
             }
@@ -25,6 +26,7 @@ final class SettingsWindowController: NSWindowController {
             switch self {
             case .general: "gearshape"
             case .mail: "envelope"
+            case .privacy: "hand.raised"
             case .accounts: "person.crop.circle"
             case .signingIn: "key"
             }
@@ -34,6 +36,7 @@ final class SettingsWindowController: NSWindowController {
             switch self {
             case .general: AnyView(GeneralSettings(app: app))
             case .mail: AnyView(MailSettings(app: app))
+            case .privacy: AnyView(PrivacySettingsPane())
             case .accounts: AnyView(AccountSettings(app: app))
             case .signingIn: AnyView(SigningInSettings(app: app))
             }
@@ -126,22 +129,19 @@ private struct GeneralSettings: View {
     }
 }
 
-/// Mail: Undo Send, pictures, and sorting inboxes into categories.
+/// Mail: Undo Send, and sorting inboxes into categories.
 private struct MailSettings: View {
     let app: AppModel
     @AppStorage("UndoSendSeconds") private var undoSeconds = 5
-    @AppStorage("AlwaysShowPictures") private var alwaysShowPictures = false
     @AppStorage("SortInboxCategories") private var sortsCategories = true
 
     var body: some View {
         Form {
-            Section("Sending and reading") {
+            Section("Sending") {
                 Picker("Undo Send", selection: $undoSeconds) {
                     ForEach([5, 10, 20, 30], id: \.self) { Text("\($0) seconds").tag($0) }
                 }
-                Toggle("Show pictures in messages without asking", isOn: $alwaysShowPictures)
-                Text("Pictures from the internet can tell senders when you read their mail, so PMail asks first unless this is on.")
-                    .font(.pm(11.5)).foregroundStyle(.secondary)
+                Text("Whether pictures in messages load is set in Privacy.").font(.pm(11.5)).foregroundStyle(.secondary)
             }
             Section("Inbox categories") {
                 Toggle("Sort the inbox into categories", isOn: Binding(get: { sortsCategories }, set: { on in
@@ -263,6 +263,107 @@ private struct AccountSettings: View {
                 Text("Move a conversation to another category and its sender shows here, to change or to sort automatically again.")
                     .font(.pm(11.5)).foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+/// Privacy: pictures and other content from the internet in messages. Loading them privately ahead of time, blocking
+/// them, and sending them through a proxy of the person's own, so senders see the proxy's address instead of theirs.
+private struct PrivacySettingsPane: View {
+    @Bindable private var privacy = PrivacySettings.shared
+    @State private var password = ""
+    @State private var savingPassword: Task<Void, Never>?
+    @State private var checking = false
+    @State private var check: (passed: Bool, text: String)?
+
+    var body: some View {
+        Form {
+            Section("Mail activity") {
+                Toggle("Protect mail activity", isOn: $privacy.protectsMailActivity)
+                Text("New mail’s pictures load in the background as it arrives, whether you open it or not, so senders can’t tell whether or when you read it. They load through PMail’s own loader, with no cookies and nothing that says which app or Mac asked. Senders still see your IP address unless you hide it below.")
+                    .font(.pm(11.5)).foregroundStyle(.secondary)
+                Toggle("Block all remote content", isOn: Binding(get: { !privacy.protectsMailActivity && privacy.blocksRemoteContent },
+                                                               set: { privacy.blocksRemoteContent = $0 }))
+                    .disabled(privacy.protectsMailActivity)
+                Text(privacy.protectsMailActivity
+                    ? "Not needed while mail activity is protected: every message’s pictures load privately."
+                    : "Pictures and other content from the internet load only when you ask: for one message, or always for a sender you choose. With this and Protect Mail Activity both off, pictures load as you open a message, which tells the sender you read it.")
+                    .font(.pm(11.5)).foregroundStyle(.secondary)
+            }
+            Section("Hide IP address") {
+                Toggle("Load remote content through my own proxy", isOn: $privacy.usesProxy)
+                if privacy.usesProxy {
+                    Picker("Type", selection: Binding(get: { privacy.proxy.kind }, set: changeKind)) {
+                        ForEach(RemoteContentProxy.Kind.allCases, id: \.self) { Text($0.name).tag($0) }
+                    }
+                    TextField("Server", text: $privacy.proxy.host, prompt: Text("127.0.0.1"))
+                    TextField("Port", value: $privacy.proxy.port, format: .number.grouping(.never), prompt: Text(String(privacy.proxy.kind.usualPort)))
+                    TextField("User name", text: $privacy.proxy.username, prompt: Text("Optional"))
+                    SecureField("Password", text: $password, prompt: Text("Optional"))
+                        .onChange(of: password) { savePassword(after: .milliseconds(600)) }
+                    HStack(spacing: 8) {
+                        Button("Test Proxy", action: test).disabled(checking || !privacy.proxy.isComplete)
+                        if checking { ProgressView().controlSize(.small) }
+                        if let check {
+                            Image(systemName: check.passed ? "checkmark.circle.fill" : "exclamationmark.circle").foregroundStyle(check.passed ? .green : .orange)
+                            Text(check.text).font(.pm(11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                Text("Senders see your proxy’s address instead of yours, and so can’t tell where you are. Use Tor (SOCKS5 on 127.0.0.1, port 9050, or 9150 while Tor Browser is open) or a proxy from your VPN provider. While this is on, nothing loads directly: if the proxy can’t be reached, pictures don’t load. Your mail servers are still reached directly.")
+                    .font(.pm(11.5)).foregroundStyle(.secondary)
+            }
+            if !privacy.trustedImageSenders.isEmpty {
+                Section("Senders whose pictures always show") {
+                    ForEach(privacy.trustedImageSenders.sorted(), id: \.self) { sender in
+                        HStack {
+                            Text(sender).textSelection(.enabled).lineLimit(1)
+                            Spacer()
+                            Button("Remove") { privacy.trustedImageSenders.remove(sender) }
+                        }
+                    }
+                    Text("Their pictures load even while remote content is blocked.").font(.pm(11.5)).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .settingsPane()
+        .onAppear { password = privacy.proxyPassword }
+        .onDisappear { savePassword(after: .zero) }
+        .onChange(of: privacy.proxy) { check = nil }
+    }
+
+    /// A new type of proxy, moving the port to that type's usual one if it was the old type's.
+    private func changeKind(_ kind: RemoteContentProxy.Kind) {
+        let old = privacy.proxy.kind
+        privacy.proxy.kind = kind
+        if privacy.proxy.port == old.usualPort { privacy.proxy.port = kind.usualPort }
+    }
+
+    /// Keeps the password once typing pauses.
+    private func savePassword(after delay: Duration) {
+        savingPassword?.cancel()
+        let password = password
+        savingPassword = Task {
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            guard !Task.isCancelled else { return }
+            privacy.setProxyPassword(password)
+        }
+    }
+
+    /// Asks the proxy whether it's there, without loading anything from the internet.
+    private func test() {
+        checking = true
+        check = nil
+        let proxy = privacy.proxy
+        let password = password
+        Task {
+            do {
+                try await ProxyCheck.check(proxy, password: proxy.username.isEmpty ? nil : password)
+                check = (true, "PMail reached the proxy.")
+            } catch {
+                check = (false, error.localizedDescription)
+            }
+            checking = false
         }
     }
 }

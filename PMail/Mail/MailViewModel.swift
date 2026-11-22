@@ -52,9 +52,11 @@ final class MailViewModel {
     private(set) var isLoadingConversation = false
     private(set) var conversationError: String?
     @ObservationIgnored private var conversationGeneration = 0
-    /// Senders whose pictures the person chose to load ("Always show images from …"), by address.
+    /// Senders whose pictures the person chose to load ("Always show pictures from …"), by address: the same for
+    /// every account, kept with the privacy settings.
     var trustedImageSenders: Set<String> {
-        didSet { defaults.set(Array(trustedImageSenders), forKey: "TrustedImageSenders") }
+        get { PrivacySettings.shared.trustedImageSenders }
+        set { PrivacySettings.shared.trustedImageSenders = newValue }
     }
     @ObservationIgnored let defaults: UserDefaults
     /// Messages whose pictures the person chose to load this once.
@@ -86,7 +88,6 @@ final class MailViewModel {
         self.service = service
         self.storage = storage
         self.defaults = defaults
-        trustedImageSenders = Set(defaults.stringArray(forKey: "TrustedImageSenders") ?? [])
     }
 
     /// What the account can do. An account with folders rather than labels can only archive into an Archive folder,
@@ -691,12 +692,15 @@ final class MailViewModel {
         if expandedMessageIDs.contains(id) { expandedMessageIDs.remove(id) } else { expandedMessageIDs.insert(id) }
     }
 
-    /// Whether a message's remote pictures load: never by default, so senders can't see when it's read.
+    /// Whether a message's pictures from the internet load as it's shown (through PMail's private loader, from its
+    /// copy when it has one), as Settings ▸ Privacy says: always while mail activity is protected; otherwise, while
+    /// remote content is blocked, only when asked for this message or its sender.
     func showsImages(for message: MailMessage) -> Bool {
-        if imagesShownFor.contains(message.id) || UserDefaults.standard.bool(forKey: "AlwaysShowPictures") { return true }
-        guard let sender = message.summary.from?.email.lowercased() else { return false }
-        return trustedImageSenders.contains(sender)
+        PrivacySettings.shared.loadsRemoteContent(from: message.summary.from?.email, shownByHand: imagesShownFor.contains(message.id))
     }
+
+    /// The account's copies of what its mail loads from the internet.
+    var remoteContentCache: RemoteContentCache { storage.remoteContent }
 
     // MARK: Actions
 

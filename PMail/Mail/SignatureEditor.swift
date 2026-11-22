@@ -141,7 +141,8 @@ private struct SignatureTextView: NSViewRepresentable {
     }
 }
 
-/// Pictures in text that are shown from the web (a signature's logo): fetched and drawn once they arrive.
+/// Pictures in text that are shown from the web (a signature's logo): fetched privately, through the proxy in
+/// Settings ▸ Privacy when there is one, and drawn once they arrive.
 enum RemotePictures {
     static func load(in textView: NSTextView) {
         guard let storage = textView.textStorage else { return }
@@ -154,7 +155,7 @@ enum RemotePictures {
         }
         for (attachment, url) in wanted {
             Task { [weak textView] in
-                guard let (data, _) = try? await URLSession.shared.data(from: url), let image = NSImage(data: data), let textView else { return }
+                guard let data = try? await RemoteContentLoader.shared.data(from: url), let image = NSImage(data: data), let textView else { return }
                 attachment.image = image
                 // Wherever it is now (the text may have changed meanwhile).
                 guard let storage = textView.textStorage else { return }

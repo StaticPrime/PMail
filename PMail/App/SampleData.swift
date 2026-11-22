@@ -124,7 +124,7 @@ enum SampleData {
         return daysAgo == 0 && result > today ? today.addingTimeInterval(-Double((hour * 60 + minute) % 300) * 60 - 60) : result
     }
 
-    private static let samplePicture: Data = {
+    nonisolated static let samplePicture: Data = {
         // A small orange paw on cream, drawn once, for pictures inside messages and attachments.
         let size = 120
         var pixels = [UInt8](repeating: 0, count: size * size * 4)

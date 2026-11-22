@@ -4,8 +4,9 @@ import Observation
 import PMailKit
 
 /// Keeps every account up to date while PMail runs: checks each inbox for new mail every few minutes (or the moment
-/// the server says so, where it can), sends messages whose time has come and the Outbox once the network is back,
-/// brings snoozed conversations back, and posts notifications.
+/// the server says so, where it can), loads new mail's pictures privately when mail activity is protected, sends
+/// messages whose time has come and the Outbox once the network is back, brings snoozed conversations back, and posts
+/// notifications.
 @Observable
 final class SyncController {
     @ObservationIgnored private weak var app: AppModel?
@@ -50,6 +51,12 @@ final class SyncController {
         }
         timer?.tolerance = 5
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.tick() }
+        // Copies of remote content go after half a year, or the oldest once an account's pass half a gigabyte.
+        let caches = app?.accounts.sessions.values.map(\.storage.remoteContent) ?? []
+        Task.detached(priority: .background) {
+            let cutoff = Date().addingTimeInterval(-182 * 86_400)
+            for cache in caches { await cache.prune(savedBefore: cutoff, maxBytes: 512 * 1024 * 1024) }
+        }
     }
 
     func stop() {
@@ -113,6 +120,8 @@ final class SyncController {
             if let unread = result.inboxUnread { unreadCounts[id] = max(0, unread - blocked.filter(\.isUnread).count) }
             let fresh = result.messages.filter { $0.isUnread && !blockedIDs.contains($0.id) }
             if session.isActivated, pushed || !result.messages.isEmpty || !blocked.isEmpty { session.mail.serverChanged() }
+            // (Not on the first check, which finds the whole inbox.)
+            if state != nil { prefetchRemoteContent(of: result.messages.filter { !blockedIDs.contains($0.id) }, in: session) }
             // The first check only learns where the inbox is; announcing it would announce the whole inbox.
             if state != nil, !fresh.isEmpty, UserDefaults.standard.bool(forKey: "NotifyNewMail"), !isShowingInbox(of: session) {
                 notifier.notify(newMail: fresh, in: session.account)
@@ -121,6 +130,26 @@ final class SyncController {
             unsupported.insert(id)
         } catch {
             // A failed check is tried again next time; the window reports its own errors.
+        }
+    }
+
+    // MARK: Protecting mail activity
+
+    /// With mail activity protected (Settings ▸ Privacy), loads the pictures, style sheets and fonts in new mail as it
+    /// arrives, through PMail's private loader into the account's copies, so senders see everyone's mail fetched as
+    /// it arrives and can't tell whether or when it's read: opening it later asks the internet for nothing. A big
+    /// message (with attachments, most likely) is left to load its pictures when it's opened.
+    func prefetchRemoteContent(of messages: [MessageSummary], in session: AccountSession) {
+        guard PrivacySettings.shared.protectsMailActivity, isOnline else { return }
+        let wanted = messages.filter { ($0.size ?? 0) <= 5_000_000 }.prefix(50)
+        guard !wanted.isEmpty else { return }
+        let service = session.services.mail
+        let cache = session.storage.remoteContent
+        Task {
+            for summary in wanted {
+                guard let html = try? await service.loadMessage(summary).htmlBody, !html.isEmpty else { continue }
+                await RemoteContentLoader.shared.prefetch(html: html, into: cache)
+            }
         }
     }
 

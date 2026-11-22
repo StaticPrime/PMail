@@ -242,7 +242,7 @@ private struct ExpandedMessage: View {
                     .padding(.top, 8)
                 }
                 let onCard = colorScheme == .dark && !(message.htmlBody?.isEmpty ?? true)
-                MessageBodyView(message: message, loadsRemoteImages: mail.showsImages(for: message), height: $bodyHeight) { url in
+                MessageBodyView(message: message, loadsRemoteImages: mail.showsImages(for: message), cache: mail.remoteContentCache, height: $bodyHeight) { url in
                     app.handleMailto(url)
                 }
                 .frame(height: bodyHeight)
