@@ -55,7 +55,7 @@ PMail is free, needs no account of its own and has no tracking: it talks only to
 - **Replies and forwards.** Replies go to the right people (Reply all leaves you out and keeps everyone else; replying to your own message goes to the people it went to), with "Re:" and the original quoted underneath (folded away; click ••• to see it), and stay in their conversation. Forwards bring the original's attachments.
 - **Sending.** Send (or ⌘Return) closes the window and sends a few seconds later; Undo in the note along the bottom stops it and opens it again. Settings sets how long the wait is (5 to 30 seconds).
 - **Links from other apps.** PMail opens `mailto:` links as new messages, so it can be your Mac's email app.
-- **Settings.** PMail ▸ Settings (⌘,) has four panes: General (new mail, opening at login, the keyboard), Mail (Undo Send, pictures, inbox categories), Accounts (each account's blocked senders and the senders put in a category) and Signing In.
+- **Settings.** PMail ▸ Settings (⌘,) has four panes: General (new mail, opening at login, the keyboard), Mail (Undo Send, pictures, inbox categories), Accounts (for the account picked: the settings its account menu also offers, so the name on sent mail, the signature, its servers, signing in again and removing it, then its own blocked senders and the senders put in a category; every account keeps its own) and Signing In.
 
 ### Keeping up to date
 

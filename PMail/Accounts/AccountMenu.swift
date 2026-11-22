@@ -119,6 +119,73 @@ private struct MenuRow: View {
 }
 
 /// An account's settings: the name on sent mail, the signature, its servers, signing in again and removing it.
+/// Who the account is: its picture, address and kind.
+struct AccountHeader: View {
+    let account: Account
+
+    var body: some View {
+        HStack(spacing: 14) {
+            AccountAvatar(account: account, size: 40)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(account.email).font(.pm(16, .medium))
+                HStack(spacing: 5) {
+                    ProviderLogo(kind: account.kind, size: 13)
+                    Text(account.kind == .other ? "Mail account" : "\(account.kind.displayName) account").font(.pm(12)).foregroundStyle(Theme.textSecondary)
+                }
+            }
+        }
+    }
+}
+
+/// An account's own settings: the name on sent mail, the signature, its servers, signing in again and removing it.
+/// The account menu's sheet and Settings ▸ Accounts both show these.
+struct AccountSettingsSections: View {
+    let app: AppModel
+    @Binding var account: Account
+    /// Runs before leaving for the sign-in sheet or removing the account (the sheet closes itself).
+    var beforeLeaving: () -> Void = {}
+
+    var body: some View {
+        Section("Sending") {
+            TextField("Name on sent mail", text: $account.name)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Signature").font(.pm(12)).foregroundStyle(Theme.textSecondary)
+                TextEditor(text: $account.signature).font(.pm(13)).frame(height: 90)
+            }
+        }
+        if let incoming = account.incoming {
+            Section("Servers") {
+                LabeledContent("Incoming (\(incoming.mailProtocol.displayName))", value: "\(incoming.host):\(incoming.port), \(incoming.security.displayName)")
+                if let outgoing = account.outgoing {
+                    LabeledContent("Outgoing (SMTP)", value: "\(outgoing.host):\(outgoing.port), \(outgoing.security.displayName)")
+                }
+                if let calendar = account.calendarServer { LabeledContent("Calendar", value: calendar.host ?? calendar.absoluteString) }
+                if let contacts = account.contactsServer { LabeledContent("Contacts", value: contacts.host ?? contacts.absoluteString) }
+            }
+        }
+        Section {
+            Button("Sign In Again…") {
+                beforeLeaving()
+                (NSApp.delegate as? AppDelegate)?.showMainWindow(nil)
+                app.sheet = .addAccount(account.kind)
+            }
+            Button("Remove This Account…", role: .destructive) { confirmRemove() }
+        }
+    }
+
+    private func confirmRemove() {
+        let alert = NSAlert()
+        alert.messageText = "Remove \(account.email) from PMail?"
+        alert.informativeText = "Its mail, calendars and contacts stay on the server; PMail just stops showing them and forgets its password or sign-in."
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        beforeLeaving()
+        app.removeAccount(account.id)
+    }
+}
+
 struct AccountSettingsView: View {
     let app: AppModel
     @State var account: Account
@@ -126,44 +193,14 @@ struct AccountSettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 14) {
-                AccountAvatar(account: account, size: 40)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(account.email).font(.pm(16, .medium))
-                    HStack(spacing: 5) {
-                        ProviderLogo(kind: account.kind, size: 13)
-                        Text(account.kind == .other ? "Mail account" : "\(account.kind.displayName) account").font(.pm(12)).foregroundStyle(Theme.textSecondary)
-                    }
-                }
+            HStack {
+                AccountHeader(account: account)
                 Spacer()
                 IconButton(symbol: "xmark", help: "Close") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             .padding(20)
             Form {
-                Section("Sending") {
-                    TextField("Name on sent mail", text: $account.name)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Signature").font(.pm(12)).foregroundStyle(Theme.textSecondary)
-                        TextEditor(text: $account.signature).font(.pm(13)).frame(height: 90)
-                    }
-                }
-                if let incoming = account.incoming {
-                    Section("Servers") {
-                        LabeledContent("Incoming (\(incoming.mailProtocol.displayName))", value: "\(incoming.host):\(incoming.port), \(incoming.security.displayName)")
-                        if let outgoing = account.outgoing {
-                            LabeledContent("Outgoing (SMTP)", value: "\(outgoing.host):\(outgoing.port), \(outgoing.security.displayName)")
-                        }
-                        if let calendar = account.calendarServer { LabeledContent("Calendar", value: calendar.host ?? calendar.absoluteString) }
-                        if let contacts = account.contactsServer { LabeledContent("Contacts", value: contacts.host ?? contacts.absoluteString) }
-                    }
-                }
-                Section {
-                    Button("Sign In Again…") {
-                        dismiss()
-                        app.sheet = .addAccount(account.kind)
-                    }
-                    Button("Remove This Account…", role: .destructive) { confirmRemove() }
-                }
+                AccountSettingsSections(app: app, account: $account) { dismiss() }
             }
             .formStyle(.grouped)
             HStack {
@@ -179,17 +216,5 @@ struct AccountSettingsView: View {
         }
         .frame(width: 560, height: account.incoming == nil ? 480 : 600)
         .background(Theme.surface)
-    }
-
-    private func confirmRemove() {
-        let alert = NSAlert()
-        alert.messageText = "Remove \(account.email) from PMail?"
-        alert.informativeText = "Its mail, calendars and contacts stay on the server; PMail just stops showing them and forgets its password or sign-in."
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        dismiss()
-        app.removeAccount(account.id)
     }
 }

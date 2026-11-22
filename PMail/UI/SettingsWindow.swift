@@ -156,13 +156,21 @@ private struct MailSettings: View {
     }
 }
 
-/// Accounts: for the account picked, the senders blocked from Report spam and the senders put in a category.
+/// Accounts: everything about the account picked — the settings its account menu also offers (the name on sent mail,
+/// the signature, its servers, signing in again, removing it), and its own blocked senders and senders put in a
+/// category. Every account keeps its own; changing the picker shows another account's.
 private struct AccountSettings: View {
     let app: AppModel
     @State private var accountID: UUID?
+    /// The picked account as edited here, saved a moment after each change.
+    @State private var draft: Account?
+    @State private var saving: Task<Void, Never>?
 
-    /// The account showing: the one picked, else the one in the window.
-    private var account: UUID? { accountID ?? app.accounts.currentID ?? app.accounts.accounts.first?.id }
+    /// The account showing: the one picked (while it's still there), else the one in the window.
+    private var account: UUID? {
+        if let accountID, app.accounts.accounts.contains(where: { $0.id == accountID }) { return accountID }
+        return app.accounts.currentID ?? app.accounts.accounts.first?.id
+    }
 
     var body: some View {
         let mail = account.flatMap { app.accounts.session(for: $0) }?.mail
@@ -174,15 +182,34 @@ private struct AccountSettings: View {
                     Picker("Account", selection: Binding(get: { account }, set: { accountID = $0 })) {
                         ForEach(app.accounts.accounts) { account in Text(account.email).tag(Optional(account.id)) }
                     }
+                    if let draft { AccountHeader(account: draft).padding(.vertical, 4) }
+                }
+                if draft != nil {
+                    AccountSettingsSections(app: app, account: Binding(get: { draft ?? Account(kind: .other, name: "", email: "") }, set: save))
                 }
                 blockedSection(mail)
                 categoriesSection(mail)
             }
         }
-        .settingsPane()
+        .formStyle(.grouped)
+        // The pane holds a lot: a fixed height that fits on the screen, scrolling inside.
+        .frame(width: 520, height: min(620, (NSScreen.main?.visibleFrame.height ?? 800) - 160))
         .task(id: account) {
+            saving?.cancel()
+            draft = account.flatMap { id in app.accounts.accounts.first { $0.id == id } }
             await mail?.loadBlockedSenders()
             await mail?.loadSenderCategories()
+        }
+    }
+
+    /// Keeps an edit and saves it once typing pauses.
+    private func save(_ edited: Account) {
+        draft = edited
+        saving?.cancel()
+        saving = Task {
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            app.accounts.update(edited)
         }
     }
 

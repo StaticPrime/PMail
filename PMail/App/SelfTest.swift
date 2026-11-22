@@ -652,6 +652,9 @@ enum SelfTest {
         }
         step {
             check(mail.blockedSenders.map(\.id) == ["address:deals@offers.example"], "the sender is blocked on this account")
+            if let otherBook = app.accounts.session(for: SampleData.iCloudID)?.storage.blockedSenders {
+                check((read { await otherBook.all() } ?? [BlockedSender.address("x@y.z")]).isEmpty, "and only this one: other accounts keep their own")
+            }
             check(actions().filter { $0 == "markSpam" }.count > spamMark, "and the conversation went to Spam on the server")
             spamMark = actions().filter { $0 == "markSpam" }.count
             notifiedBefore = notifier?.newMail.count ?? 0
@@ -849,6 +852,9 @@ enum SelfTest {
         step {
             check(app.toast?.text.contains("goes to Promotions from now on") == true, "and says the sender's mail goes there", app.toast?.text ?? "")
             check(mail.senderCategories.values.contains(.promotions), "the sender is remembered, for Settings")
+            if let otherSorter = app.accounts.session(for: SampleData.googleID)?.storage.sorter {
+                check((read { await otherSorter.senderCategories() } ?? ["x": .social]).isEmpty, "on this account only")
+            }
             mail.select(tabID: InboxCategory.promotions.tabID)
             wait("Promotions") { mail.selectedTabID == InboxCategory.promotions.tabID && !mail.isLoadingList }
         }
