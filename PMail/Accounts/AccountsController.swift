@@ -39,6 +39,16 @@ struct AccountStorage {
     let junkMarks: JunkMarks
     /// Everyone it has sent mail to, whose mail is never taken for junk.
     let recipients: PreviousRecipients
+    /// Calendar and contact changes made while their servers couldn't be reached, waiting to be sent.
+    let calendarChanges: PendingChanges<CalendarChange>
+    let contactChanges: PendingChanges<ContactChange>
+
+    /// Drafts saved (or thrown away) while the mail server couldn't be reached, waiting to go to Drafts.
+    let waitingDrafts: PendingChanges<WaitingDraft>
+
+    static let calendarChangesFile = "Waiting Calendar Changes.json"
+    static let contactChangesFile = "Waiting Contact Changes.json"
+    static let waitingDraftsFile = "Waiting Drafts.json"
 
     init(folder: URL) {
         cache = AccountCache(folder: folder.appendingPathComponent("Cache", isDirectory: true))
@@ -50,6 +60,9 @@ struct AccountStorage {
         remoteContent = RemoteContentCache(folder: folder.appendingPathComponent("Remote Content", isDirectory: true))
         junkMarks = JunkMarks(file: folder.appendingPathComponent("JunkMarks.json"))
         recipients = PreviousRecipients(file: folder.appendingPathComponent("Recipients.json"))
+        calendarChanges = PendingChanges(file: folder.appendingPathComponent(Self.calendarChangesFile))
+        contactChanges = PendingChanges(file: folder.appendingPathComponent(Self.contactChangesFile))
+        waitingDrafts = PendingChanges(file: folder.appendingPathComponent(Self.waitingDraftsFile))
     }
 }
 
@@ -72,9 +85,9 @@ final class AccountSession: Identifiable {
         self.services = services
         self.storage = storage
         mail = MailViewModel(account: account, service: services.mail, storage: storage, defaults: defaults)
-        calendar = CalendarViewModel(account: account, service: services.calendar, cache: storage.cache, defaults: defaults,
-                                     today: { AppClock.now() })
-        contacts = ContactsViewModel(account: account, service: services.contacts, cache: storage.cache)
+        calendar = CalendarViewModel(account: account, service: services.calendar, cache: storage.cache, changes: storage.calendarChanges,
+                                     defaults: defaults, today: { AppClock.now() })
+        contacts = ContactsViewModel(account: account, service: services.contacts, cache: storage.cache, changes: storage.contactChanges)
         attach(app)
     }
 
@@ -95,6 +108,16 @@ final class AccountSession: Identifiable {
     }
 
     var isActivated: Bool { activated }
+
+    /// Sends calendar and contact changes made while offline, then, for an account that's been shown, gets its latest
+    /// calendars and contacts without showing it's busy. The sync runs it beside each mail check, without waiting.
+    func refreshCalendarAndContacts() async {
+        await calendar.sendWaitingChanges()
+        await contacts.sendWaitingChanges()
+        guard activated else { return }
+        calendar.refreshQuietly()
+        contacts.refreshQuietly()
+    }
 
     /// Bumped when the signature changed on the server, so an open signature editor shows the new one.
     var signatureRevision = 0
@@ -243,7 +266,10 @@ final class AccountsController {
         // The copies and waiting messages go; calendars, contacts, tasks and mail kept only on this Mac stay in its folder.
         let folder = storageFolder(for: id)
         for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json", "Remote Content", "JunkMarks.json",
-                     "Recipients.json", EventTypeBook.fileName] { try? FileManager.default.removeItem(at: folder.appendingPathComponent(name)) }
+                     "Recipients.json", EventTypeBook.fileName, AccountStorage.calendarChangesFile, AccountStorage.contactChangesFile,
+                     AccountStorage.waitingDraftsFile] {
+            try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
+        }
         accounts.removeAll { $0.id == id }
         sessions[id] = nil
         save()

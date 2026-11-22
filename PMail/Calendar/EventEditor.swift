@@ -642,8 +642,12 @@ struct EventEditor: View {
         let saving = draft
         Task {
             do {
-                try await model.save(saving)
-                app.show(saving.isNew ? (saving.isTask ? "Task saved." : "Event saved.") : "Changes saved.")
+                let outcome = try await model.save(saving)
+                if outcome == .waiting {
+                    app.show("Saved on this Mac. It’ll go to your \(saving.isTask ? "tasks" : "calendar") when you’re back online.")
+                } else {
+                    app.show(saving.isNew ? (saving.isTask ? "Task saved." : "Event saved.") : "Changes saved.")
+                }
                 dismiss()
             } catch {
                 isSaving = false

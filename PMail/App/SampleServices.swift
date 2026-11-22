@@ -214,6 +214,7 @@ actor SampleMailService: MailService {
     }
 
     func saveDraft(_ message: OutgoingMessage, replacing draft: MessageSummary?) async throws -> MessageSummary? {
+        if failsLikeOffline { throw PMailError.connectionFailed("the network is off") }
         if let draft { messages.removeAll { $0.summary.id == draft.id } }
         counter += 1
         let id = "draft-\(counter)"
@@ -225,8 +226,12 @@ actor SampleMailService: MailService {
     }
 
     func deleteDraft(_ draft: MessageSummary) async throws {
+        if failsLikeOffline { throw PMailError.connectionFailed("the network is off") }
         messages.removeAll { $0.summary.id == draft.id }
     }
+
+    /// The drafts on the pretend server (for the self-test).
+    var drafts: [MessageSummary] { messages.map(\.summary).filter(\.isDraft) }
 
     func unreadCounts(inTabs tabs: [InboxTab]) async throws -> [String: Int] {
         await pause()
@@ -402,6 +407,17 @@ actor SampleCalendarService: CalendarService {
     private var counter = 0
     /// For each repeating event made here, the occurrences changed or deleted on their own, by their starts.
     private var taken: [String: Set<Date>] = [:]
+    /// Acts as if the network were down (for the self-test).
+    private var failsLikeOffline = false
+
+    func setFailsLikeOffline(_ fails: Bool) { failsLikeOffline = fails }
+
+    /// An event made somewhere else, as if on another device (for the self-test).
+    func arrive(_ event: CalendarEvent) { events.append(event) }
+
+    private func reach() throws {
+        if failsLikeOffline { throw PMailError.connectionFailed("The network is down.") }
+    }
 
     init(account: Account, calendars: [CalendarInfo], events: [CalendarEvent], holds: [String: Set<EventType>] = [:]) {
         self.account = account
@@ -421,11 +437,13 @@ actor SampleCalendarService: CalendarService {
 
     func loadCalendars() async throws -> [CalendarInfo] {
         await pause()
+        try reach()
         return calendars
     }
 
     func loadEvents(in calendarIDs: [String], from start: Date, to end: Date) async throws -> [CalendarEvent] {
         await pause()
+        try reach()
         var found: [CalendarEvent] = []
         for event in events where calendarIDs.contains(event.calendarID) {
             if event.seriesID == nil, let rule = RepeatRule(lines: event.recurrence, start: event.start) {
@@ -470,6 +488,7 @@ actor SampleCalendarService: CalendarService {
 
     func create(_ event: CalendarEvent, addingConference: Bool) async throws -> CalendarEvent {
         await pause()
+        try reach()
         counter += 1
         var saved = kept(event)
         saved.id = "created-\(counter)"
@@ -480,6 +499,7 @@ actor SampleCalendarService: CalendarService {
 
     func update(_ event: CalendarEvent, scope: RecurrenceScope, addingConference: Bool) async throws -> CalendarEvent {
         await pause()
+        try reach()
         var saved = kept(event)
         if addingConference, saved.conference == nil, let meeting = meeting(for: event.calendarID) { saved.conference = meeting }
         // An occurrence of a repeating event made here: the whole series changes (keeping its own times), or this one
@@ -503,6 +523,7 @@ actor SampleCalendarService: CalendarService {
 
     func delete(_ event: CalendarEvent, scope: RecurrenceScope) async throws {
         await pause()
+        try reach()
         if scope == .allEvents, let series = event.seriesID {
             events.removeAll { $0.seriesID == series || $0.id == series }
         } else if let series = event.seriesID, events.contains(where: { $0.id == series }) {
@@ -524,6 +545,7 @@ actor SampleCalendarService: CalendarService {
 
     func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
         await pause()
+        try reach()
         if let index = events.firstIndex(where: { $0.id == event.id }) { events[index].myResponse = response }
     }
 
@@ -583,18 +605,33 @@ actor SampleTaskService: TaskService {
 actor SampleContactsService: ContactsService {
     private var contacts: [Contact]
     private var counter = 0
+    /// Acts as if the network were down (for the self-test).
+    private var failsLikeOffline = false
 
     init(contacts: [Contact]) {
         self.contacts = contacts
     }
 
+    func setFailsLikeOffline(_ fails: Bool) { failsLikeOffline = fails }
+
+    /// A contact made somewhere else, as if on another device (for the self-test).
+    func arrive(_ contact: Contact) { contacts.append(contact) }
+
+    var allContacts: [Contact] { contacts }
+
+    private func reach() throws {
+        if failsLikeOffline { throw PMailError.connectionFailed("The network is down.") }
+    }
+
     func loadContacts() async throws -> [Contact] {
         await pause()
+        try reach()
         return contacts
     }
 
     func create(_ contact: Contact) async throws -> Contact {
         await pause()
+        try reach()
         counter += 1
         var saved = contact
         saved.id = "sample-created-\(counter)"
@@ -604,6 +641,7 @@ actor SampleContactsService: ContactsService {
 
     func update(_ contact: Contact) async throws -> Contact {
         await pause()
+        try reach()
         guard let index = contacts.firstIndex(where: { $0.id == contact.id }) else { throw PMailError.notFound }
         contacts[index] = contact
         return contact
@@ -611,6 +649,7 @@ actor SampleContactsService: ContactsService {
 
     func delete(_ contact: Contact) async throws {
         await pause()
+        try reach()
         contacts.removeAll { $0.id == contact.id }
     }
 }

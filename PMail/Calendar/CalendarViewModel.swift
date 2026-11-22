@@ -39,6 +39,12 @@ struct Reminder: Hashable {
     var minutes: Int { max(0, amount) * unit.rawValue }
 }
 
+/// What became of a save: it reached the server, or it's kept on this Mac until the server can be reached.
+enum SaveOutcome {
+    case saved
+    case waiting
+}
+
 /// An event being made or changed in the event editor.
 struct EventDraft: Identifiable, Hashable {
     var id = UUID()
@@ -135,14 +141,19 @@ final class CalendarViewModel {
     private(set) var needsSignIn = false
     /// Why the account's tasks couldn't be shown (it may need signing in again, to allow them), if they couldn't.
     private(set) var tasksProblem: String?
+    /// Changes made while the calendar couldn't be reached, waiting to be sent (kept in the account's folder).
+    @ObservationIgnored let pending: PendingChanges<CalendarChange>?
+    /// What's waiting, as the window shows it.
+    private(set) var waiting: [CalendarChange] = []
     /// The event whose details are showing in a popover.
     var selectedEventID: String?
 
-    init(account: Account, service: any CalendarService, cache: AccountCache? = nil, calendar: Calendar = .current,
-         defaults: UserDefaults = .standard, today: @escaping () -> Date = Date.init) {
+    init(account: Account, service: any CalendarService, cache: AccountCache? = nil, changes: PendingChanges<CalendarChange>? = nil,
+         calendar: Calendar = .current, defaults: UserDefaults = .standard, today: @escaping () -> Date = Date.init) {
         self.account = account
         self.service = service
         self.cache = cache
+        pending = changes
         self.defaults = defaults
         grid = CalendarGrid(calendar: calendar)
         formatting = MailFormatting(calendar: calendar)
@@ -163,10 +174,11 @@ final class CalendarViewModel {
 
     func start() {
         Task {
-            // What was loaded last time shows at once.
+            waiting = await pending?.all() ?? []
+            // What was loaded last time shows at once, with the changes made offline.
             if calendars.isEmpty, let cached = await cache?.calendars() {
                 calendars = cached
-                if let stored = await cache?.events() { events = stored.events }
+                if let stored = await cache?.events() { events = CalendarChange.applying(waiting, to: stored.events) }
             }
             do {
                 let loaded = try await service.loadCalendars()
@@ -194,9 +206,24 @@ final class CalendarViewModel {
         loadIfNeeded()
     }
 
+    /// Gets the latest calendars and events without showing it's busy (beside each mail check), keeping what's showing
+    /// when the server can't be reached.
+    func refreshQuietly() {
+        guard !calendars.isEmpty else { return }
+        Task {
+            if let loaded = try? await service.loadCalendars() {
+                calendars = loaded
+                tasksProblem = (service as? CalendarWithTasks)?.tasksProblem
+                await cache?.save(calendars: loaded)
+            }
+            loadedInterval = nil
+            loadIfNeeded(quietly: true)
+        }
+    }
+
     /// Loads events when what's showing goes past what's loaded: a few weeks either side, so moving a week or a
-    /// month along rarely waits.
-    func loadIfNeeded() {
+    /// month along rarely waits. Quietly (a refresh in the background), it shows no progress and no errors.
+    func loadIfNeeded(quietly: Bool = false) {
         let visible = visibleInterval
         if let loadedInterval, loadedInterval.start <= visible.start, loadedInterval.end >= visible.end { return }
         guard !calendars.isEmpty else { return }
@@ -205,7 +232,7 @@ final class CalendarViewModel {
         let interval = DateInterval(start: start, end: end)
         loadGeneration += 1
         let generation = loadGeneration
-        isLoading = true
+        if !quietly { isLoading = true }
         let ids = calendars.map(\.id)
         let changes = changeCount
         Task {
@@ -213,8 +240,11 @@ final class CalendarViewModel {
                 let loaded = try await service.loadEvents(in: ids, from: interval.start, to: interval.end)
                 guard generation == loadGeneration else { return }
                 // Something was saved, changed or deleted while this loaded, which it may not include: load again.
-                guard changes == changeCount else { return reload() }
-                events = loaded
+                guard changes == changeCount else {
+                    loadedInterval = nil
+                    return loadIfNeeded(quietly: quietly)
+                }
+                events = CalendarChange.applying(waiting, to: loaded)
                 tasksProblem = (service as? CalendarWithTasks)?.tasksProblem
                 loadedInterval = interval
                 isLoading = false
@@ -224,9 +254,9 @@ final class CalendarViewModel {
             } catch {
                 guard generation == loadGeneration else { return }
                 isLoading = false
-                if MailViewModel.isConnectionProblem(error), !events.isEmpty {
+                if MailViewModel.isConnectionProblem(error), !events.isEmpty || quietly {
                     isOffline = true
-                } else {
+                } else if !quietly {
                     self.error = describe(error)
                 }
                 needsSignIn = (error as? PMailError)?.needsSignIn ?? false
@@ -477,8 +507,10 @@ final class CalendarViewModel {
         return draft
     }
 
-    /// Saves a draft: makes the event (or task), or changes it, creating its video meeting if asked.
-    func save(_ draft: EventDraft) async throws {
+    /// Saves a draft: makes the event (or task), or changes it, creating its video meeting if asked. When the calendar
+    /// can't be reached, the change is kept on this Mac and sent once it can.
+    @discardableResult
+    func save(_ draft: EventDraft) async throws -> SaveOutcome {
         if draft.isTask { return try await saveTask(draft) }
         var event = draft.original ?? CalendarEvent(calendarID: draft.calendarID, start: draft.start, end: draft.end)
         event.calendarID = draft.calendarID
@@ -523,10 +555,24 @@ final class CalendarViewModel {
         let saved: CalendarEvent
         // A new rule for a repeating event is for the whole series.
         let scope = draft.changesRepeat && draft.original?.isRecurring == true ? .allEvents : draft.scope
+        let later: CalendarChange
         if draft.original == nil {
-            saved = try await service.create(event, addingConference: draft.addsNativeConference)
+            var made = event
+            made.id = LocalID.make()
+            later = .create(made, addingConference: draft.addsNativeConference)
         } else {
-            saved = try await service.update(event, scope: scope, addingConference: draft.addsNativeConference)
+            later = .update(event, scope: scope, addingConference: draft.addsNativeConference)
+        }
+        if waits(event.id), await keep(later) { return .waiting }
+        do {
+            if draft.original == nil {
+                saved = try await service.create(event, addingConference: draft.addsNativeConference)
+            } else {
+                saved = try await service.update(event, scope: scope, addingConference: draft.addsNativeConference)
+            }
+        } catch let error where PMailError.isConnectionProblem(error) {
+            if await keep(later) { return .waiting }
+            throw error
         }
         changeCount += 1
         // A repeating event's other times come with the next load.
@@ -537,10 +583,11 @@ final class CalendarViewModel {
             events.removeAll { $0.id == saved.id || $0.id == draft.original?.id }
             events.append(saved)
         }
+        return .saved
     }
 
     /// Saves a task: on its day in its list, with its notes and whether it's done.
-    private func saveTask(_ draft: EventDraft) async throws {
+    private func saveTask(_ draft: EventDraft) async throws -> SaveOutcome {
         let day = calendar.startOfDay(for: draft.start)
         var task = draft.original ?? CalendarEvent(calendarID: draft.calendarID, start: day, end: day, type: .task)
         task.calendarID = draft.calendarID
@@ -551,11 +598,22 @@ final class CalendarViewModel {
         task.notes = draft.notes.isEmpty ? nil : draft.notes
         task.isCompleted = draft.isCompleted
         task.type = .task
-        let saved = draft.original == nil ? try await service.create(task, addingConference: false)
-            : try await service.update(task, scope: .thisEvent, addingConference: false)
+        var made = task
+        made.id = LocalID.make()
+        let later: CalendarChange = draft.original == nil ? .create(made, addingConference: false) : .update(task, scope: .thisEvent, addingConference: false)
+        if waits(task.id), await keep(later) { return .waiting }
+        let saved: CalendarEvent
+        do {
+            saved = draft.original == nil ? try await service.create(task, addingConference: false)
+                : try await service.update(task, scope: .thisEvent, addingConference: false)
+        } catch let error where PMailError.isConnectionProblem(error) {
+            if await keep(later) { return .waiting }
+            throw error
+        }
         changeCount += 1
         events.removeAll { $0.id == saved.id || $0.id == draft.original?.id }
         events.append(saved)
+        return .saved
     }
 
     /// Ticks a task off (or back on): here at once, then in its list.
@@ -566,12 +624,15 @@ final class CalendarViewModel {
         var changed = task
         changed.isCompleted = done
         let service = self.service
+        let later = CalendarChange.update(changed, scope: .thisEvent, addingConference: false)
         Task {
+            if waits(task.id), await keep(later) { return }
             do {
                 let saved = try await service.update(changed, scope: .thisEvent, addingConference: false)
                 changeCount += 1
                 if let index = events.firstIndex(where: { $0.id == task.id }) { events[index] = saved }
             } catch {
+                if PMailError.isConnectionProblem(error), await keep(later) { return }
                 if let index = events.firstIndex(where: { $0.id == task.id }) { events[index].isCompleted = !done }
                 app?.report(error, doing: done ? "Marking the task done" : "Marking the task not done")
             }
@@ -588,12 +649,23 @@ final class CalendarViewModel {
         changeCount += 1
         selectedEventID = nil
         let service = self.service
+        let later = CalendarChange.delete(event, scope: scope)
+        let done = event.isTask ? "Task deleted." : "Event deleted."
+        let waitingText = "Deleted on this Mac. It’ll be deleted from your calendar when you’re back online."
         Task {
+            if waits(event.id), await keep(later) {
+                app?.show(LocalID.isLocal(event.id) ? done : waitingText)
+                return
+            }
             do {
                 try await service.delete(event, scope: scope)
                 changeCount += 1
-                app?.show(event.isTask ? "Task deleted." : "Event deleted.")
+                app?.show(done)
             } catch {
+                if PMailError.isConnectionProblem(error), await keep(later) {
+                    app?.show(waitingText)
+                    return
+                }
                 events = snapshot
                 app?.report(error, doing: "Deleting the event")
             }
@@ -604,14 +676,58 @@ final class CalendarViewModel {
         if let index = events.firstIndex(where: { $0.id == event.id }) { events[index].myResponse = response }
         changeCount += 1
         let service = self.service
+        let later = CalendarChange.respond(event, response: response)
         Task {
+            if waits(event.id), await keep(later) { return }
             do {
                 try await service.respond(to: event, with: response)
                 changeCount += 1
             } catch {
+                if PMailError.isConnectionProblem(error), await keep(later) { return }
                 app?.report(error, doing: "Answering the invitation")
                 reload()
             }
+        }
+    }
+
+    // MARK: Changes made offline
+
+    /// Whether a change waits instead of going now: the Mac is offline, the event was made here and hasn't reached
+    /// the server, or it has changes waiting already (so they go in order).
+    private func waits(_ id: String) -> Bool {
+        app?.sync?.isOnline == false || LocalID.isLocal(id) || waiting.contains { $0.event.id == id }
+    }
+
+    /// Keeps a change on this Mac until the calendar can be reached, and shows it. False when there's nowhere to keep it.
+    private func keep(_ change: CalendarChange) async -> Bool {
+        guard let pending else { return false }
+        await pending.add(change, merging: CalendarChange.adding)
+        waiting = await pending.all()
+        events = CalendarChange.applying([change], to: events)
+        changeCount += 1
+        return true
+    }
+
+    /// Whether an event has changes waiting to be sent.
+    func isWaiting(_ event: CalendarEvent) -> Bool { waiting.contains { $0.event.id == event.id } }
+
+    /// Sends the changes made offline, oldest first, shows them as the server saved them, and says what it turned down.
+    func sendWaitingChanges() async {
+        guard let pending, !(await pending.all()).isEmpty else { return }
+        let result = await pending.send(using: service)
+        waiting = await pending.all()
+        guard result.sent > 0 || !result.refused.isEmpty else { return }
+        changeCount += 1
+        for (id, saved) in result.saved {
+            if let index = events.firstIndex(where: { $0.id == id }) { events[index] = saved }
+        }
+        events.removeAll { result.deleted.contains($0.id) }
+        for refusal in result.refused {
+            app?.show("“\(refusal.title.isEmpty ? "(No title)" : refusal.title)” couldn’t be saved to your calendar: \(refusal.reason)")
+        }
+        if !calendars.isEmpty {
+            loadedInterval = nil
+            loadIfNeeded(quietly: true)
         }
     }
 

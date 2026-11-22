@@ -4,9 +4,10 @@ import Observation
 import PMailKit
 
 /// Keeps every account up to date while PMail runs: checks each inbox for new mail every few minutes (or the moment
-/// the server says so, where it can), deals with junk and blocked senders' mail as it arrives, loads new mail's
-/// pictures privately when mail activity is protected, sends messages whose time has come and the Outbox once the
-/// network is back, brings snoozed conversations back, and posts notifications.
+/// the server says so, where it can), and beside each check, on its own, sends calendar and contact changes made
+/// offline and gets the latest calendars and contacts. It deals with junk and blocked senders' mail as it arrives,
+/// loads new mail's pictures privately when mail activity is protected, sends messages whose time has come and the
+/// Outbox once the network is back, brings snoozed conversations back, and posts notifications.
 @Observable
 final class SyncController {
     @ObservationIgnored private weak var app: AppModel?
@@ -16,6 +17,7 @@ final class SyncController {
     @ObservationIgnored private var pushTask: Task<Void, Never>?
     @ObservationIgnored private var pushAccount: UUID?
     @ObservationIgnored private var lastCheck: [UUID: Date] = [:]
+    @ObservationIgnored private var lastRefresh: [UUID: Date] = [:]
     @ObservationIgnored private var checking: Set<UUID> = []
     @ObservationIgnored private var sending: Set<UUID> = []
     @ObservationIgnored private var unsupported: Set<UUID> = []
@@ -42,13 +44,21 @@ final class SyncController {
     }
 
     func start() {
-        let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] path in
-            let online = path.status == .satisfied
-            DispatchQueue.main.async { self?.networkChanged(online: online) }
+        #if DEBUG
+        // Sample runs don't follow the Mac's own network: the self-test says when it's offline.
+        let watchesNetwork = !DebugLaunchOptions.usesSampleAccounts
+        #else
+        let watchesNetwork = true
+        #endif
+        if watchesNetwork {
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self] path in
+                let online = path.status == .satisfied
+                DispatchQueue.main.async { self?.networkChanged(online: online) }
+            }
+            monitor.start(queue: DispatchQueue(label: "com.pugglesoft.PMail.network"))
+            self.monitor = monitor
         }
-        monitor.start(queue: DispatchQueue(label: "com.pugglesoft.PMail.network"))
-        self.monitor = monitor
         timer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -73,6 +83,11 @@ final class SyncController {
         pushTask?.cancel()
     }
 
+    #if DEBUG
+    /// Pretends the network went away or came back (for the self-test).
+    func pretendNetwork(online: Bool) { networkChanged(online: online) }
+    #endif
+
     private func networkChanged(online: Bool) {
         let cameBack = online && !isOnline
         isOnline = online
@@ -80,6 +95,7 @@ final class SyncController {
             // Back online: send what waited, catch up, and let the open views know. The push loop may be sleeping off
             // its failures, so it starts over.
             lastCheck = [:]
+            lastRefresh = [:]
             pushTask?.cancel()
             pushTask = nil
             tick()
@@ -116,6 +132,9 @@ final class SyncController {
         checking.insert(id)
         lastCheck[id] = now()
         defer { checking.remove(id) }
+        refreshCalendarAndContacts(of: session, unlessRecent: pushed)
+        // Drafts kept on this Mac go to the server's Drafts, on their own.
+        Task { await session.mail.sendWaitingDrafts() }
         let storage = session.storage
         let state = await storage.cache.syncState()
         do {
@@ -140,6 +159,16 @@ final class SyncController {
         } catch {
             // A failed check is tried again next time; the window reports its own errors.
         }
+    }
+
+    /// Sends an account's calendar and contact changes made offline and gets its latest calendars and contacts, beside
+    /// its mail check but on its own, so the mail doesn't wait for them. When the server pushed the check (new mail can
+    /// come often), only if the last time was a while ago.
+    func refreshCalendarAndContacts(of session: AccountSession, unlessRecent: Bool = false) {
+        let id = session.id
+        if unlessRecent, now().timeIntervalSince(lastRefresh[id] ?? .distantPast) < checkInterval { return }
+        lastRefresh[id] = now()
+        Task { await session.refreshCalendarAndContacts() }
     }
 
     // MARK: Protecting mail activity

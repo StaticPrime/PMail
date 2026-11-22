@@ -39,6 +39,11 @@ final class ComposeModel: Identifiable {
     var labelIDs: Set<String> = []
     /// The draft saved on the server, replaced each time it's saved again.
     @ObservationIgnored private var savedDraft: MessageSummary?
+    /// The draft kept on this Mac (saved while the server couldn't be reached) this window is editing, if any.
+    @ObservationIgnored private(set) var waitingDraftID: UUID?
+
+    /// Its row's ID in Drafts, while it's kept on this Mac.
+    var waitingDraftSummaryID: String? { waitingDraftID.map { WaitingDraft.summaryPrefix + $0.uuidString } }
     @ObservationIgnored private var lastSavedFingerprint = ""
     @ObservationIgnored private var sendTask: Task<Void, Never>?
     /// Seconds a sent message waits, so Undo can still stop it.
@@ -221,8 +226,9 @@ final class ComposeModel: Identifiable {
             if !labelIDs.isEmpty { labelSentCopy(of: message) }
             if let savedDraft {
                 try? await service.deleteDraft(savedDraft)
-                session.mail.draftsChanged()
             }
+            await forgetWaitingDraft()
+            if savedDraft != nil || waitingDraftID != nil { session.mail.draftsChanged() }
             isSending = false
             app?.show("Message sent.")
             session.mail.didSend()
@@ -241,6 +247,11 @@ final class ComposeModel: Identifiable {
         isSending = false
         do {
             try await session.storage.queue.save(QueuedMessage(message: message, queuedAt: AppClock.now(), draft: savedDraft))
+            // It's in the Outbox now, not a draft kept on this Mac.
+            if waitingDraftID != nil {
+                await forgetWaitingDraft()
+                session.mail.draftsChanged()
+            }
             session.mail.queueChanged()
             app?.show("You’re offline. The message is in your Outbox and will be sent when PMail can reach the server.", duration: 8)
         } catch {
@@ -310,6 +321,22 @@ final class ComposeModel: Identifiable {
         }
     }
 
+    /// Fills the window with a draft kept on this Mac to carry on writing: saving it again replaces it (and, once the
+    /// server can be reached, the server's copy it stands for).
+    func load(waiting draft: WaitingDraft) {
+        guard let message = draft.message else { return }
+        load(message)
+        savedDraft = draft.replaces
+        waitingDraftID = draft.id
+        lastSavedFingerprint = Self.fingerprint(outgoing())
+    }
+
+    /// The draft kept on this Mac this window is editing reached the server: saving it again replaces that copy.
+    func draftReachedServer(_ saved: MessageSummary) {
+        savedDraft = saved
+        waitingDraftID = nil
+    }
+
     /// Fills the window with a saved draft to carry on writing: saving replaces that draft, and sending or discarding
     /// deletes it. Closing it unchanged leaves the draft as it was.
     func load(draft message: MailMessage, files: [OutgoingAttachment]) {
@@ -371,25 +398,73 @@ final class ComposeModel: Identifiable {
         let previous = savedDraft
         let service = session.services.mail
         Task {
+            // Offline, or already kept on this Mac (so its versions go in order), it waits on this Mac.
+            let offline = app?.sync?.isOnline == false
+            if offline || waitingDraftID != nil {
+                let id = await keepDraft(message, replacing: previous, announcing: offline)
+                if !offline {
+                    await session.mail.sendWaitingDrafts()
+                    let stillWaiting = await session.storage.waitingDrafts.all().contains { $0.id == id }
+                    app?.show(stillWaiting ? "Draft saved on this Mac. It’ll go to your Drafts folder when PMail can reach the server." : "Draft saved.")
+                }
+                return
+            }
             do {
                 savedDraft = try await service.saveDraft(message, replacing: previous)
                 app?.show("Draft saved.")
                 session.mail.draftsChanged()
+            } catch where MailViewModel.isConnectionProblem(error) {
+                await keepDraft(message, replacing: previous, announcing: true)
             } catch {
                 app?.report(error, doing: "Saving the draft")
             }
         }
     }
 
-    /// Closes the window and throws away what was written (and any saved draft).
+    /// Keeps the draft on this Mac, in place of the version kept before, until the server can be reached.
+    @discardableResult
+    private func keepDraft(_ message: OutgoingMessage, replacing previous: MessageSummary?, announcing: Bool) async -> UUID {
+        let id = waitingDraftID ?? UUID()
+        waitingDraftID = id
+        await session.storage.waitingDrafts.add(WaitingDraft(id: id, message: message, replaces: previous, savedAt: AppClock.now()),
+                                                merging: WaitingDraft.adding)
+        if announcing { app?.show("You’re offline. The draft is saved on this Mac and goes to your Drafts folder when you’re back online.", duration: 6) }
+        session.mail.draftsChanged()
+        return id
+    }
+
+    /// Takes the draft kept on this Mac out (it was sent, or went to the Outbox).
+    private func forgetWaitingDraft() async {
+        guard let id = waitingDraftID else { return }
+        await session.storage.waitingDrafts.remove { $0.id == id }
+        waitingDraftID = nil
+    }
+
+    /// Closes the window and throws away what was written (and any saved draft: the server's copy is deleted once it
+    /// can be reached).
     func discard() {
         sendTask?.cancel()
         app?.close(self)
-        if let savedDraft {
+        let serverDraft = savedDraft
+        if serverDraft != nil || waitingDraftID != nil {
             let service = session.services.mail
             let mail = session.mail
+            let drafts = session.storage.waitingDrafts
+            let offline = app?.sync?.isOnline == false
             Task {
-                try? await service.deleteDraft(savedDraft)
+                await forgetWaitingDraft()
+                if let serverDraft {
+                    let deletion = WaitingDraft(message: nil, replaces: serverDraft, savedAt: AppClock.now())
+                    if offline {
+                        await drafts.add(deletion, merging: WaitingDraft.adding)
+                    } else {
+                        do {
+                            try await service.deleteDraft(serverDraft)
+                        } catch where MailViewModel.isConnectionProblem(error) {
+                            await drafts.add(deletion, merging: WaitingDraft.adding)
+                        } catch {}
+                    }
+                }
                 mail.draftsChanged()
             }
         }

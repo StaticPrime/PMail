@@ -561,6 +561,119 @@ enum SelfTest {
             check(calendar.draft(for: saved ?? CalendarEvent(calendarID: "", start: .now, end: .now)).notesHTML == "<b>Agenda</b><br>Bring snacks",
                   "and comes back to the editor")
             if let saved { calendar.delete(saved, scope: .thisEvent) }
+        }
+
+        // MARK: Calendars and contacts with each mail check, and changes made offline
+        var sampleCalendar: SampleCalendarService? { (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService }
+        var sampleContacts: SampleContactsService? { session.services.contacts as? SampleContactsService }
+        step {
+            // Made on another device: the next mail check brings them.
+            let begin = AppClock.now().addingTimeInterval(3 * 3_600)
+            let arrived = CalendarEvent(id: "arrived-elsewhere", calendarID: "primary", title: "Self-test from elsewhere", start: begin,
+                                        end: begin.addingTimeInterval(1_800))
+            let calendarService = sampleCalendar, contactsService = sampleContacts, session = session
+            Task {
+                await calendarService?.arrive(arrived)
+                await contactsService?.arrive(Contact(id: "arrived-contact", givenName: "Elsewhere", familyName: "Pug"))
+                await app.sync?.check(session)
+            }
+            wait("the mail check to bring them") {
+                session.calendar.events.contains { $0.title == "Self-test from elsewhere" } && session.contacts.savedContacts.contains { $0.givenName == "Elsewhere" }
+            }
+        }
+        step {
+            check(session.calendar.events.contains { $0.title == "Self-test from elsewhere" }, "checking for mail brings an event made elsewhere")
+            check(session.contacts.savedContacts.contains { $0.givenName == "Elsewhere" }, "and a contact")
+            // Offline: the network goes, and none of the servers can be reached.
+            app.sync?.pretendNetwork(online: false)
+            let calendarService = sampleCalendar, contactsService = sampleContacts, mailService = sampleMail
+            Task {
+                await calendarService?.setFailsLikeOffline(true)
+                await contactsService?.setFailsLikeOffline(true)
+                await mailService?.setFailsLikeOffline(true)
+            }
+            wait(upTo: 0.3) { false }
+        }
+        step {
+            let calendar = session.calendar, contacts = session.contacts
+            guard var draft = calendar.newDraft() else { return check(false, "an event can be started offline") }
+            draft.title = "Self-test offline"
+            Task { _ = try? await calendar.save(draft) }
+            Task { await contacts.save(Contact(id: "new-offline", givenName: "Offline", familyName: "Pug"), isNew: true) }
+            if let elsewhere = calendar.events.first(where: { $0.title == "Self-test from elsewhere" }) { calendar.delete(elsewhere, scope: .thisEvent) }
+            if let composer = app.compose(to: [SampleData.person("Sam Rivera")], subject: "Self-test offline draft", body: "Written on a plane.") {
+                composer.closeKeepingDraft()
+            }
+            wait("the changes made offline") {
+                calendar.events.contains { $0.title == "Self-test offline" } && contacts.savedContacts.contains { $0.givenName == "Offline" }
+                    && mail.waitingDrafts.contains { $0.message?.subject == "Self-test offline draft" }
+                    && calendar.waiting.contains { $0.event.title == "Self-test from elsewhere" }
+            }
+        }
+        step {
+            let calendar = session.calendar, contacts = session.contacts
+            let made = calendar.events.first { $0.title == "Self-test offline" }
+            check(made.map { LocalID.isLocal($0.id) && calendar.isWaiting($0) } == true, "an event made offline shows, waiting to be sent")
+            check(contacts.savedContacts.first { $0.givenName == "Offline" }.map { LocalID.isLocal($0.id) && contacts.isWaiting($0) } == true,
+                  "and so does a contact")
+            check(!calendar.events.contains { $0.title == "Self-test from elsewhere" }, "an event deleted offline goes at once, its deletion waiting")
+            let folder = DebugLaunchOptions.sampleStorage.appendingPathComponent(session.id.uuidString)
+            check([AccountStorage.calendarChangesFile, AccountStorage.contactChangesFile, AccountStorage.waitingDraftsFile]
+                .allSatisfy { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }, "all kept in the account's folder on this Mac")
+            if let made {
+                var renamed = calendar.draft(for: made)
+                renamed.title = "Self-test offline, renamed"
+                Task { _ = try? await calendar.save(renamed) }
+            }
+            mail.select(folderID: mail.folders.first { $0.role == .drafts }?.id)
+            wait("Drafts, and the renamed event") {
+                mail.conversations.first?.id.hasPrefix(WaitingDraft.summaryPrefix) == true && calendar.events.contains { $0.title == "Self-test offline, renamed" }
+            }
+        }
+        step {
+            let calendar = session.calendar
+            check(mail.conversations.first?.subject == "Self-test offline draft", "a draft saved offline is at the top of Drafts",
+                  mail.conversations.first?.subject ?? "none")
+            check(calendar.waiting.count == 2 && calendar.waiting.contains { $0.event.title == "Self-test offline, renamed" },
+                  "changing it again offline changes what waits", "\(calendar.waiting.count)")
+            // Back online: everything waiting goes, beside the next mail check.
+            let calendarService = sampleCalendar, contactsService = sampleContacts, mailService = sampleMail
+            Task {
+                await calendarService?.setFailsLikeOffline(false)
+                await contactsService?.setFailsLikeOffline(false)
+                await mailService?.setFailsLikeOffline(false)
+                app.sync?.pretendNetwork(online: true)
+            }
+            wait("what waited to go", upTo: 8) {
+                session.calendar.waiting.isEmpty && session.contacts.waiting.isEmpty && mail.waitingDrafts.isEmpty
+                    && session.calendar.events.contains { $0.title == "Self-test offline, renamed" && !LocalID.isLocal($0.id) }
+            }
+        }
+        step {
+            let calendarService = sampleCalendar, contactsService = sampleContacts, mailService = sampleMail
+            let onServer = read { await calendarService?.allEvents ?? [] } ?? []
+            check(onServer.contains { $0.title == "Self-test offline, renamed" } && !onServer.contains { $0.title == "Self-test from elsewhere" },
+                  "back online, the changes reach the calendar", "\(onServer.filter { $0.title.hasPrefix("Self-test") }.map(\.title))")
+            let contactsOnServer = read { await contactsService?.allContacts ?? [] } ?? []
+            check(contactsOnServer.contains { $0.givenName == "Offline" && !LocalID.isLocal($0.id) }, "the contacts")
+            let draftsOnServer = read { await mailService?.drafts ?? [] } ?? []
+            check(draftsOnServer.contains { $0.subject == "Self-test offline draft" }, "and Drafts")
+            check(session.contacts.savedContacts.first { $0.givenName == "Offline" }.map { !LocalID.isLocal($0.id) } == true, "showing as the servers saved them")
+            let folder = DebugLaunchOptions.sampleStorage.appendingPathComponent(session.id.uuidString)
+            check(![AccountStorage.calendarChangesFile, AccountStorage.contactChangesFile, AccountStorage.waitingDraftsFile]
+                .contains { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }, "with nothing left waiting")
+            // Tidy up.
+            if let event = session.calendar.events.first(where: { $0.title == "Self-test offline, renamed" }) { session.calendar.delete(event, scope: .thisEvent) }
+            for name in ["Offline", "Elsewhere"] {
+                if let contact = session.contacts.savedContacts.first(where: { $0.givenName == name }) { session.contacts.delete(contact) }
+            }
+            Task { for draft in draftsOnServer where draft.subject == "Self-test offline draft" { try? await mailService?.deleteDraft(draft) } }
+            mail.select(folderID: mail.inbox?.id)
+            app.show(.calendar)
+            wait("the inbox, and the contacts tidied") {
+                mail.selectedFolderID == mail.inbox?.id && !mail.isLoadingList
+                    && !session.contacts.savedContacts.contains { $0.givenName == "Offline" || $0.givenName == "Elsewhere" }
+            }
             check(!session.calendar.events.contains { $0.title == "Self-test sync" }, "deleting an event")
             // Microsoft: the same account switch changes mail, calendar and contacts together.
             app.switchAccount(to: SampleData.microsoftID)

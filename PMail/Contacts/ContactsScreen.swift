@@ -259,6 +259,11 @@ struct ContactPage: View {
                             if !contact.labels.isEmpty {
                                 HStack(spacing: 6) { ForEach(contact.labels, id: \.self) { Chip(text: $0) } }
                             }
+                            if model.isWaiting(contact) {
+                                Label("Saved on this Mac. It’ll go to your contacts when you’re back online.", systemImage: "clock.arrow.circlepath")
+                                    .font(.pm(12.5))
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
                         }
                     }
                     HStack(spacing: 28) {

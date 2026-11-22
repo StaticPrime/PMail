@@ -44,6 +44,8 @@ final class MailViewModel {
     /// When each snoozed conversation comes back, and the queued message behind each Scheduled or Outbox row.
     private(set) var snoozeTimes: [String: Date] = [:]
     @ObservationIgnored private var queuedItems: [String: QueuedMessage] = [:]
+    /// Drafts saved (or thrown away) while the server couldn't be reached, waiting to go to Drafts.
+    @ObservationIgnored private(set) var waitingDrafts: [WaitingDraft] = []
 
     // Reading
     private(set) var openConversation: Conversation?
@@ -252,6 +254,7 @@ final class MailViewModel {
 
     func start() {
         Task {
+            waitingDrafts = await storage.waitingDrafts.all()
             // What was loaded last time shows at once, while the server is asked.
             if serviceFolders.isEmpty, let cached = await storage.cache.folders() {
                 serviceFolders = cached
@@ -298,12 +301,14 @@ final class MailViewModel {
     }
 
     /// Fetches folders and the current page again.
+    /// Loads the folders and the list again; the account's calendars and contacts come along, on their own.
     func refresh() {
         Task {
             await loadFolders(thenList: false)
             await refreshLocalFolders()
             loadList()
         }
+        if let session { app?.sync?.refreshCalendarAndContacts(of: session) }
     }
 
     /// New mail came in, or the server said something changed: counts and the list showing are fetched again
@@ -366,7 +371,9 @@ final class MailViewModel {
             } catch {
                 guard generation == listGeneration else { return }
                 isLoadingList = false
-                if Self.isConnectionProblem(error), !conversations.isEmpty {
+                if Self.isConnectionProblem(error), !conversations.isEmpty || (showsDrafts && !waitingDrafts.isEmpty) {
+                    // Drafts kept on this Mac show even when the server's copy of the list can't be had.
+                    if conversations.isEmpty { show(ConversationPage(conversations: [])) }
                     connectionTrouble = true
                 } else {
                     listError = describe(error)
@@ -389,6 +396,12 @@ final class MailViewModel {
                 conversation.messages.removeAll { leaving.contains($0.id) }
                 return conversation.messages.isEmpty ? nil : conversation
             }
+        }
+        // Drafts kept on this Mac go at the top of Drafts, in place of the server's copies they replace (or delete).
+        if showsDrafts, pageIndex == 0, !waitingDrafts.isEmpty {
+            let replaced = Set(waitingDrafts.compactMap { $0.replaces?.id })
+            shown.removeAll { conversation in conversation.messages.contains { replaced.contains($0.id) } }
+            shown = waitingDrafts.reversed().compactMap { draft in draft.summary.map { Conversation(id: draft.summaryID, messages: [$0]) } } + shown
         }
         conversations = shown
         totalCount = page.totalCount.map { max(0, $0 - (page.conversations.count - shown.count)) }
@@ -602,6 +615,10 @@ final class MailViewModel {
     var openSnoozeTime: Date? { openConversation.flatMap { snoozeTimes[$0.id] } }
 
     func open(_ conversation: Conversation) {
+        if let waiting = waitingDrafts.first(where: { $0.summaryID == conversation.id }) {
+            editWaitingDraft(waiting)
+            return
+        }
         // A draft opens in a window to carry on writing, not to be read.
         if queuedItems[conversation.id] == nil, let draft = draftToEdit(in: conversation) {
             editDraft(draft)
@@ -1034,8 +1051,41 @@ final class MailViewModel {
 
     /// A draft was saved, sent or thrown away: Drafts lists it again if it's showing, and the counts follow.
     func draftsChanged() {
-        if showsDrafts { loadList() }
-        Task { await loadFolders(thenList: false) }
+        Task {
+            waitingDrafts = await storage.waitingDrafts.all()
+            if showsDrafts { loadList() }
+            await loadFolders(thenList: false)
+        }
+    }
+
+    // MARK: Drafts kept on the Mac
+
+    /// Opens a draft kept on this Mac in a window to carry on writing (or brings forward the window already editing it).
+    func editWaitingDraft(_ draft: WaitingDraft) {
+        guard let app, let session, draft.message != nil else { return }
+        if let open = app.composers.first(where: { $0.waitingDraftID == draft.id }) {
+            app.open(open)
+            return
+        }
+        let compose = ComposeModel(app: app, session: session)
+        compose.load(waiting: draft)
+        app.open(compose)
+    }
+
+    /// Saves the drafts kept on this Mac to the server's Drafts (and deletes the ones thrown away offline), once it
+    /// can be reached. A window still open on one carries on with the server's copy.
+    func sendWaitingDrafts() async {
+        guard !(await storage.waitingDrafts.all()).isEmpty else { return }
+        let result = await storage.waitingDrafts.send(using: service)
+        waitingDrafts = await storage.waitingDrafts.all()
+        guard result.sent > 0 || !result.refused.isEmpty else { return }
+        for (summaryID, saved) in result.saved {
+            app?.composers.first { $0.waitingDraftSummaryID == summaryID }?.draftReachedServer(saved)
+        }
+        for refusal in result.refused {
+            app?.show("“\(refusal.title.isEmpty ? "A draft" : refusal.title)” couldn’t be saved to Drafts: \(refusal.reason)")
+        }
+        draftsChanged()
     }
 
     /// Sends a waiting action to the server: thrown-away drafts are deleted as drafts, anything else is the action.

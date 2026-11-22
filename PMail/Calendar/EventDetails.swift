@@ -55,6 +55,14 @@ struct EventDetailsView: View {
                     }
                 }
             }
+            if model.isWaiting(event) {
+                row(icon: "clock.arrow.circlepath") {
+                    Text("Saved on this Mac. It’ll go to your \(event.isTask ? "tasks" : "calendar") when you’re back online.")
+                        .font(.pm(12.5))
+                        .foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             if event.type != .event {
                 row(icon: event.type.symbol) {
                     VStack(alignment: .leading, spacing: 3) {
