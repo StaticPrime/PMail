@@ -87,7 +87,10 @@ struct JunkMailSettingsPane: View {
             HStack {
                 Button("Reset…") { confirmsReset = true }
                 Spacer()
+                // Advanced is what junk gets when that's chosen above.
                 Button("Advanced…") { editsRule = true }
+                    .disabled(!filters || !custom)
+                    .help(custom ? "Set up what happens to junk mail" : "Choose “Do what’s set up under Advanced” to set it up")
             }
             Text(learnedText).font(.pm(11.5)).foregroundStyle(.secondary)
         }
