@@ -377,7 +377,9 @@ struct ICalendarReader {
             status: ICalendarEventProperties.status(of: component), myResponse: myResponse,
             availability: ICalendarEventProperties.availability(of: component),
             reminderMinutes: ICalendarEventProperties.reminders(of: component), webLink: webLink, uid: component.uid,
-            visibility: ICalendarEventProperties.visibility(of: component))
+            visibility: ICalendarEventProperties.visibility(of: component),
+            notesHTML: component.properties("X-ALT-DESC").first { $0.parameter("FMTTYPE")?.lowercased() == "text/html" }
+                .flatMap { EventDescription.simplified($0.text) })
     }
 
     // MARK: Times

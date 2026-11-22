@@ -51,6 +51,8 @@ struct EventDraft: Identifiable, Hashable {
     var isAllDay = false
     var location = ""
     var notes = ""
+    /// The description with its formatting, as simple HTML, when it has any (`EventDescription`).
+    var notesHTML: String?
     var guests: [MailAddress] = []
     /// Make the calendar's own video meeting (Meet or Teams) when saving.
     var addsNativeConference = false
@@ -460,7 +462,7 @@ final class CalendarViewModel {
 
     func draft(for event: CalendarEvent) -> EventDraft {
         var draft = EventDraft(original: event, calendarID: event.calendarID, title: event.title, start: event.start, end: event.end,
-                               isAllDay: event.isAllDay, location: event.location ?? "", notes: event.notes ?? "",
+                               isAllDay: event.isAllDay, location: event.location ?? "", notes: event.notes ?? "", notesHTML: event.notesHTML,
                                guests: event.attendees.filter { !$0.address.isSameMailbox(as: account.email) }.map(\.address),
                                conference: event.conference, reminders: event.reminderMinutes.map(Reminder.init(minutes:)),
                                colorHex: event.colorHex, availability: event.availability, type: event.type,
@@ -486,6 +488,7 @@ final class CalendarViewModel {
         event.isAllDay = draft.isAllDay
         event.location = draft.location.isEmpty ? nil : draft.location
         event.notes = draft.notes.isEmpty ? nil : draft.notes
+        event.notesHTML = draft.notes.isEmpty ? nil : draft.notesHTML
         let me = Attendee(address: account.address, response: .accepted, isOrganizer: true)
         let existing = Dictionary(event.attendees.map { ($0.address.email.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
         event.attendees = draft.guests.isEmpty ? [] : [existing[account.email.lowercased()] ?? me]

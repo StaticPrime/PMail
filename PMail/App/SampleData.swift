@@ -503,13 +503,14 @@ enum SampleData {
         var counter = 0
         func add(_ calendarID: String, _ title: String, _ start: Date, _ end: Date, allDay: Bool = false, location: String? = nil, notes: String? = nil,
                  attendees: [Attendee] = [], conference: Conference? = nil, myResponse: AttendeeResponse? = nil, recurring: Bool = false,
-                 type: EventType = .event, declines: Bool = false) {
+                 type: EventType = .event, declines: Bool = false, notesHTML: String? = nil) {
             counter += 1
             events.append(CalendarEvent(id: "sample-event-\(account.kind.rawValue)-\(counter)", calendarID: calendarID, title: title, start: start, end: end,
                                         isAllDay: allDay, location: location, notes: notes, attendees: attendees,
                                         organizer: attendees.first(where: \.isOrganizer)?.address, conference: conference,
                                         recurrence: recurring ? ["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"] : [], seriesID: recurring ? "series-\(title)" : nil,
-                                        myResponse: myResponse, reminderMinutes: allDay ? [] : [10], type: type, declinesInvitations: declines))
+                                        myResponse: myResponse, reminderMinutes: allDay ? [] : [10], type: type, declinesInvitations: declines,
+                                        notesHTML: notesHTML))
         }
         switch account.kind {
         case .google:
@@ -519,8 +520,11 @@ enum SampleData {
                 add("primary", "Team standup", at(day, 9, 30), at(day, 9, 45), attendees: guests(["Alex Kim", "Priya Shah", "Leo Martins"]),
                     conference: meet("abc-defg-hij"), recurring: true)
             }
-            add("primary", "Design review", at(4, 14), at(4, 15), location: "Room 4B / video", notes: "Bring the onboarding flows.",
-                attendees: guests(["Alex Kim", "Priya Shah", "Leo Martins"], [.accepted, .tentative, .needsAction]), conference: meet("rvw-qxpz-tme"))
+            add("primary", "Design review", at(4, 14), at(4, 15), location: "Room 4B / video",
+                notes: "Agenda\n• Onboarding flows\n• Settings redesign\nBring the latest mockups, and see the design notes.",
+                attendees: guests(["Alex Kim", "Priya Shah", "Leo Martins"], [.accepted, .tentative, .needsAction]), conference: meet("rvw-qxpz-tme"),
+                notesHTML: "<b>Agenda</b><ul><li>Onboarding flows</li><li>Settings redesign</li></ul>Bring the <i>latest</i> mockups, and see "
+                    + "<a href=\"https://docs.example.com/design-notes\">the design notes</a>.")
             add("primary", "1:1 with Alex", at(2, 11), at(2, 11, 30), attendees: guests(["Alex Kim"]), conference: meet("one-onea-lex"))
             add("primary", "Roadmap planning", at(3, 10), at(3, 12), attendees: guests(["Priya Shah", "Zoe Anderson", "Aisha Rahman"]), conference: meet("map-plan-q4x"))
             add("primary", "Interview: product designer", at(3, 11), at(3, 12), attendees: guests(["Zoe Anderson"]), conference: meet("hir-inga-dsn"))

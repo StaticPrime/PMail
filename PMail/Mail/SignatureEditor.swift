@@ -109,6 +109,7 @@ private struct SignatureTextView: NSViewRepresentable {
         textView.typingAttributes = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor]
         textView.isAutomaticLinkDetectionEnabled = true
         textView.textContainerInset = NSSize(width: 4, height: 6)
+        textView.keepsListMarkersInText()
         textView.textStorage?.setAttributedString(initial)
         textView.delegate = context.coordinator
         textView.setAccessibilityLabel("Signature")

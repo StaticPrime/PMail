@@ -238,6 +238,9 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
     public var location: String?
     /// The description, as plain text.
     public var notes: String?
+    /// The description with its formatting (bold, italic, underline, links, lists) as simple HTML, when it has any
+    /// (`EventDescription`); `notes` is always its plain text.
+    public var notesHTML: String?
     public var attendees: [Attendee]
     public var organizer: MailAddress?
     public var conference: Conference?
@@ -288,7 +291,7 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
                 webLink: URL? = nil, uid: String? = nil, resourceHref: String? = nil, etag: String? = nil, type: EventType = .event,
                 isCompleted: Bool = false, isTypeLocal: Bool = false, declinesInvitations: Bool = false, declineMessage: String? = nil,
                 visibility: EventVisibility = .default, guestsCanModify: Bool = false, guestsCanInviteOthers: Bool = true,
-                guestsCanSeeOtherGuests: Bool = true) {
+                guestsCanSeeOtherGuests: Bool = true, notesHTML: String? = nil) {
         self.id = id
         self.calendarID = calendarID
         self.title = title
@@ -322,6 +325,7 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
         self.guestsCanModify = guestsCanModify
         self.guestsCanInviteOthers = guestsCanInviteOthers
         self.guestsCanSeeOtherGuests = guestsCanSeeOtherGuests
+        self.notesHTML = notesHTML
     }
 
     /// Whether this is one occurrence of a repeating event.
@@ -359,7 +363,8 @@ extension CalendarEvent {
                   visibility: try c.decodeIfPresent(EventVisibility.self, forKey: .visibility) ?? .default,
                   guestsCanModify: try c.decodeIfPresent(Bool.self, forKey: .guestsCanModify) ?? false,
                   guestsCanInviteOthers: try c.decodeIfPresent(Bool.self, forKey: .guestsCanInviteOthers) ?? true,
-                  guestsCanSeeOtherGuests: try c.decodeIfPresent(Bool.self, forKey: .guestsCanSeeOtherGuests) ?? true)
+                  guestsCanSeeOtherGuests: try c.decodeIfPresent(Bool.self, forKey: .guestsCanSeeOtherGuests) ?? true,
+                  notesHTML: try c.decodeIfPresent(String.self, forKey: .notesHTML))
     }
 }
 

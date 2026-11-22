@@ -531,6 +531,36 @@ enum SelfTest {
                     && weekday != 1 && weekday != 7
             }, "on weekdays from 9 to 5")
             check(suggestions.first.map { calendar.calendar.component(.hour, from: $0.start) } == 9, "starting with the first free hour")
+        }
+
+        // Formatted descriptions
+        step {
+            let calendar = session.calendar
+            let review = calendar.events.first { $0.title == "Design review" }
+            let shown = RichNotes.attributed(fromHTML: review?.notesHTML ?? "")
+            check(shown.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true && String(shown[$0.range].characters) == "Agenda" },
+                  "a formatted description shows its bold")
+            check(shown.runs.contains { $0.link?.host == "docs.example.com" } && String(shown.characters).contains("• Onboarding flows"),
+                  "with its link and its list")
+            guard var draft = calendar.newDraft() else { return }
+            draft.title = "Self-test notes"
+            let text = NSMutableAttributedString(string: "Agenda", attributes: [.font: NSFont.boldSystemFont(ofSize: 13)])
+            text.append(NSAttributedString(string: "\nBring snacks", attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+            draft.notes = RichTextHTML.plainText(from: text)
+            draft.notesHTML = EventDescription.html(from: text)
+            Task {
+                do { try await calendar.save(draft) } catch { check(false, "saving a formatted description", "\(error)") }
+            }
+            wait("the formatted event") { calendar.events.contains { $0.title == "Self-test notes" } }
+        }
+        step {
+            let calendar = session.calendar
+            let saved = calendar.events.first { $0.title == "Self-test notes" }
+            check(saved?.notesHTML == "<b>Agenda</b><br>Bring snacks" && saved?.notes == "Agenda\nBring snacks",
+                  "a formatted description is saved as simple HTML, with its plain text", saved?.notesHTML ?? "none")
+            check(calendar.draft(for: saved ?? CalendarEvent(calendarID: "", start: .now, end: .now)).notesHTML == "<b>Agenda</b><br>Bring snacks",
+                  "and comes back to the editor")
+            if let saved { calendar.delete(saved, scope: .thisEvent) }
             check(!session.calendar.events.contains { $0.title == "Self-test sync" }, "deleting an event")
             // Microsoft: the same account switch changes mail, calendar and contacts together.
             app.switchAccount(to: SampleData.microsoftID)

@@ -962,6 +962,7 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isContinuousSpellCheckingEnabled = UserDefaults.standard.object(forKey: "ComposeSpellCheck") as? Bool ?? true
         textView.importsGraphics = true
         textView.textContainerInset = NSSize(width: 4, height: 6)
+        textView.keepsListMarkersInText()
         textView.delegate = context.coordinator
         textView.setAccessibilityLabel("Message")
         textView.textStorage?.setAttributedString(model.body)
@@ -1002,6 +1003,14 @@ struct RichTextEditor: NSViewRepresentable {
         func textViewDidChangeSelection(_ notification: Notification) {
             controller.selectionChanged()
         }
+    }
+}
+
+extension NSTextView {
+    /// Lists are written with their markers in the text ("\t•\t", as the editor and reading HTML write them), so the
+    /// text system mustn't draw markers of its own as well (which it does by default from macOS 26 on).
+    func keepsListMarkersInText() {
+        if #available(macOS 26.0, *) { textContentStorage?.includesTextListMarkers = true }
     }
 }
 

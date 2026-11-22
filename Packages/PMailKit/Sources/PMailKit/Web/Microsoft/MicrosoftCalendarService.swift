@@ -141,6 +141,8 @@ public actor MicrosoftCalendarService: CalendarService {
         if end < start { end = start }
         let location = json["location"]["displayName"].nonEmpty
         let notes = notesText(json["body"])
+        let notesHTML = json["body"]["contentType"].string?.lowercased() == "html"
+            ? json["body"]["content"].string.flatMap(EventDescription.simplified) : nil
         let organizer = Graph.address(json["organizer"])
         let reminders = json["isReminderOn"].bool == true ? [max(json["reminderMinutesBeforeStart"].int ?? 15, 0)] : []
         // Graph often names zones its own way ("Pacific Standard Time"); only zone names the Mac knows are kept.
@@ -159,7 +161,7 @@ public actor MicrosoftCalendarService: CalendarService {
                              etag: json["changeKey"].nonEmpty ?? json["@odata.etag"].nonEmpty,
                              type: json["showAs"].string == "oof" ? .outOfOffice : .event,
                              visibility: ["private", "confidential"].contains(json["sensitivity"].string ?? "") ? .private : .default,
-                             guestsCanSeeOtherGuests: json["hideAttendees"].bool != true)
+                             guestsCanSeeOtherGuests: json["hideAttendees"].bool != true, notesHTML: notesHTML)
     }
 
     // MARK: Repeating
@@ -428,8 +430,9 @@ public actor MicrosoftCalendarService: CalendarService {
         if changed(\.location), !(isNew && edited.location == nil) {
             body["location"] = ["displayName": .string(edited.location ?? "")]
         }
-        if changed(\.notes), !(isNew && edited.notes == nil) {
-            body["body"] = ["contentType": "text", "content": .string(edited.notes ?? "")]
+        if changed(\.notes) || changed(\.notesHTML), !(isNew && edited.notes == nil) {
+            body["body"] = edited.notesHTML.map { ["contentType": "html", "content": .string($0)] }
+                ?? ["contentType": "text", "content": .string(edited.notes ?? "")]
         }
         if includeTimes, changed(\.start) || changed(\.end) || changed(\.isAllDay) {
             body["isAllDay"] = .bool(edited.isAllDay)

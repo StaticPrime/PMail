@@ -132,7 +132,8 @@ struct EventDetailsView: View {
             }
             if let notes = event.notes?.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty {
                 row(icon: "text.alignleft") {
-                    Text(LinkedText.attributed(notes)).font(.pm(12.5)).foregroundStyle(Theme.textPrimary).textSelection(.enabled)
+                    Text(event.notesHTML.map(RichNotes.attributed(fromHTML:)) ?? LinkedText.attributed(notes))
+                        .font(.pm(12.5)).foregroundStyle(Theme.textPrimary).textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxHeight: 180)
                 }

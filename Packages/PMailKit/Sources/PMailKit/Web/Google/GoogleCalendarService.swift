@@ -160,7 +160,9 @@ public actor GoogleCalendarService: CalendarService {
         let attendeeEntries = item["attendees"].array
         let me = attendeeEntries.first { $0["self"].bool == true }
         let myResponse = me.flatMap { $0["organizer"].bool == true ? nil : response(from: $0["responseStatus"].string) }
-        let notes = item["description"].string.map(WebText.plainText(fromPossibleHTML:)).flatMap { $0.isEmpty ? nil : $0 }
+        let description = item["description"].string
+        let notes = description.map(WebText.plainText(fromPossibleHTML:)).flatMap { $0.isEmpty ? nil : $0 }
+        let notesHTML = description.flatMap { WebText.looksLikeHTML($0) ? EventDescription.simplified($0) : nil }
         let location = item["location"].nonEmpty
         let usesDefaults = item["reminders"]["useDefault"].bool ?? true
         let reminders = usesDefaults ? defaultReminders : popupMinutes(item["reminders"]["overrides"])
@@ -187,7 +189,7 @@ public actor GoogleCalendarService: CalendarService {
                              visibility: visibility(item["visibility"].string),
                              guestsCanModify: item["guestsCanModify"].bool ?? false,
                              guestsCanInviteOthers: item["guestsCanInviteOthers"].bool ?? true,
-                             guestsCanSeeOtherGuests: item["guestsCanSeeOtherGuests"].bool ?? true)
+                             guestsCanSeeOtherGuests: item["guestsCanSeeOtherGuests"].bool ?? true, notesHTML: notesHTML)
     }
 
     /// Google's visibility; "confidential" shows as private.
@@ -461,7 +463,10 @@ public actor GoogleCalendarService: CalendarService {
         var body: [String: JSONValue] = [:]
         if changed(\.title), !(isNew && edited.title.isEmpty) { body["summary"] = .string(edited.title) }
         if changed(\.location), !(isNew && edited.location == nil) { body["location"] = .string(edited.location ?? "") }
-        if changed(\.notes), !(isNew && edited.notes == nil) { body["description"] = .string(edited.notes ?? "") }
+        // A formatted description goes as Google's simple HTML.
+        if changed(\.notes) || changed(\.notesHTML), !(isNew && edited.notes == nil) {
+            body["description"] = .string(edited.notesHTML ?? edited.notes ?? "")
+        }
         if includeTimes, changed(\.start) || changed(\.end) || changed(\.isAllDay) || changed(\.timeZone) {
             let end = edited.isAllDay && edited.end <= edited.start ? edited.start.addingTimeInterval(86_400) : edited.end
             body["start"] = timeJSON(edited.start, allDay: edited.isAllDay, zone: edited.timeZone, isNew: isNew)

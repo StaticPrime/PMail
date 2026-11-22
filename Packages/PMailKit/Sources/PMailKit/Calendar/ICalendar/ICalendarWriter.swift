@@ -281,7 +281,7 @@ struct ICalendarWriter {
         switch field {
         case .title: return first.title == second.title
         case .location: return (first.location ?? "") == (second.location ?? "")
-        case .notes: return (first.notes ?? "") == (second.notes ?? "")
+        case .notes: return (first.notes ?? "") == (second.notes ?? "") && first.notesHTML == second.notesHTML
         case .conference: return first.conference?.joinURL == second.conference?.joinURL
         case .status: return first.status == second.status
         case .availability: return first.availability == second.availability
@@ -314,8 +314,12 @@ struct ICalendarWriter {
             component.removeProperties("X-APPLE-STRUCTURED-LOCATION")
         case .notes:
             component.setText("DESCRIPTION", event.notes)
-            // A formatted copy of the old description would show instead of the new one in some programs.
+            // The formatted copy (programs that read it show it instead of DESCRIPTION), or none, so an old one
+            // doesn't show instead of the new description.
             component.removeProperties("X-ALT-DESC")
+            if let html = event.notesHTML {
+                component.setProperty(.text("X-ALT-DESC", "<html><body>\(html)</body></html>", parameters: [ICalendarParameter("FMTTYPE", "text/html")]))
+            }
         case .conference:
             writeConference(event.conference, old: old?.conference, into: &component)
         case .status:

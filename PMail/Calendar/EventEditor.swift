@@ -224,17 +224,25 @@ struct EventEditor: View {
                 eventRows
             }
             field(icon: "text.alignleft") {
-                TextEditor(text: $draft.notes)
-                    .font(.pm(13))
-                    .frame(minHeight: 130)
-                    .padding(4)
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.divider))
-                    .overlay(alignment: .topLeading) {
-                        if draft.notes.isEmpty {
-                            Text("Add description").font(.pm(13)).foregroundStyle(Theme.textTertiary).padding(.horizontal, 9).padding(.vertical, 4)
-                                .allowsHitTesting(false)
+                if draft.isTask {
+                    // A task's notes are plain text, which is all task lists keep.
+                    TextEditor(text: $draft.notes)
+                        .font(.pm(13))
+                        .frame(minHeight: 130)
+                        .padding(4)
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.divider))
+                        .overlay(alignment: .topLeading) {
+                            if draft.notes.isEmpty {
+                                Text("Add description").font(.pm(13)).foregroundStyle(Theme.textTertiary).padding(.horizontal, 9).padding(.vertical, 4)
+                                    .allowsHitTesting(false)
+                            }
                         }
+                } else {
+                    EventNotesEditor(initialHTML: draft.notesHTML, initialText: draft.notes) { plain, html in
+                        draft.notes = plain
+                        draft.notesHTML = html
                     }
+                }
             }
         }
     }

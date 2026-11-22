@@ -371,6 +371,10 @@ enum WebEvents {
             edited.location = link
         } else {
             edited.notes = [event.notes, link].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+            if let html = event.notesHTML {
+                let escaped = RichTextHTML.escape(link)
+                edited.notesHTML = html + "<br><br><a href=\"\(escaped)\">\(escaped)</a>"
+            }
         }
         return edited
     }
