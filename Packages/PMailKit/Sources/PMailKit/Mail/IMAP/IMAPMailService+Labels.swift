@@ -258,13 +258,26 @@ extension IMAPMailService {
                 let current = group.filter { $0.1.uidValidity == (selected.uidValidity ?? 0) }
                 if current.count < group.count { skipped = true }
                 guard !current.isEmpty else { continue }
-                let takesKeywords = Self.takesKeywords(selected)
+                // A server known to drop label keywords keeps its labels in the book, whatever it says it takes.
+                let ignored = await labelBook.keywordsIgnored()
+                let takesKeywords = Self.takesKeywords(selected) && !ignored
                 // A mailbox the server only opens read-only says nothing about what it takes elsewhere.
-                if !selected.isReadOnly { try await labelBook.noteKeywords(allowed: takesKeywords) }
-                if takesKeywords {
+                if !selected.isReadOnly { try await labelBook.noteKeywords(allowed: Self.takesKeywords(selected)) }
+                if takesKeywords, adding {
+                    let after = try await client.uidStoreReportingFlags(current.map { $0.1.uid }, adding: true, flags: [label])
+                    // A server can say it takes keywords and still not keep them: what didn't stay goes in the book,
+                    // and so does every label from now on, so a label always lists its conversations.
+                    let dropped = current.filter { pair in
+                        !(after[pair.1.uid] ?? []).contains { $0.caseInsensitiveCompare(label) == .orderedSame }
+                    }
+                    if !dropped.isEmpty {
+                        try await labelBook.noteKeywordsIgnored()
+                        unkeyed += try await labelBook.assign(label, to: try await self.withMessageIDs(dropped, client: client))
+                    }
+                } else if takesKeywords {
                     try await client.uidStore(current.map { $0.1.uid }, adding: adding, flags: [label])
                     // Kept in the book from before (from a mailbox that didn't take keywords), it goes from there too.
-                    if !adding { try await labelBook.unassign(label, from: current.map { $0.0 }) }
+                    try await labelBook.unassign(label, from: current.map { $0.0 })
                 } else if adding {
                     unkeyed += try await labelBook.assign(label, to: try await self.withMessageIDs(current, client: client))
                 } else {

@@ -137,6 +137,8 @@ public actor LabelBook {
         var forgotten: [String] = []
         /// Whether the server has taken label keywords (nil until PMail has asked to change a message's flags).
         var keywordsAllowed: Bool?
+        /// The server said it takes keywords but a label keyword didn't stay on the message: labels are kept here.
+        var keywordsIgnored: Bool?
 
         init() {}
 
@@ -147,6 +149,7 @@ public actor LabelBook {
             assignments = (try? container.decode([String: Assignment].self, forKey: .assignments)) ?? [:]
             forgotten = (try? container.decode([String].self, forKey: .forgotten)) ?? []
             keywordsAllowed = try? container.decodeIfPresent(Bool.self, forKey: .keywordsAllowed)
+            keywordsIgnored = try? container.decodeIfPresent(Bool.self, forKey: .keywordsIgnored)
         }
     }
 
@@ -297,10 +300,25 @@ public actor LabelBook {
         try save()
     }
 
-    /// Whether the server has taken label keywords: nil until a mailbox has been opened to change flags.
+    /// Whether the server has taken label keywords: nil until a mailbox has been opened to change flags, and false
+    /// once one didn't stay on a message even though the server said it would.
     func keywordsAllowed() -> Bool? {
         loadIfNeeded()
-        return contents.keywordsAllowed
+        return contents.keywordsIgnored == true ? false : contents.keywordsAllowed
+    }
+
+    /// Whether label keywords are known not to stay on this server's messages, whatever it says it takes.
+    func keywordsIgnored() -> Bool {
+        loadIfNeeded()
+        return contents.keywordsIgnored == true
+    }
+
+    /// Notes that a label keyword didn't stay on a message: labels go in the book from now on.
+    func noteKeywordsIgnored() throws {
+        loadIfNeeded()
+        guard contents.keywordsIgnored != true else { return }
+        contents.keywordsIgnored = true
+        try save()
     }
 
     // MARK: Labels kept on this Mac for messages

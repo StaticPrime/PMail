@@ -77,7 +77,9 @@ import Testing
         let stream = ScriptedByteStream(greeting: Script.greeting(), script: [
             Script.signIn("A1"),
             Self.select("A2", keywords: true),
-            Script.ok("A3", "UID STORE 11:12 +FLAGS.SILENT (PMail_Work)"),
+            // Adding asks for the flags back, to see that the keyword stayed.
+            Script.ok("A3", "UID STORE 11:12 +FLAGS (PMail_Work)",
+                      untagged: [#"* 2 FETCH (UID 11 FLAGS (\Seen PMail_Work))"#, "* 3 FETCH (UID 12 FLAGS (PMail_Work))"]),
             Script.ok("A4", "UID STORE 12 -FLAGS.SILENT (PMail_Work)"),
             // Listing the label: every mailbox but Trash and Junk is searched for its keyword.
             Script.list("A5"),
@@ -246,6 +248,41 @@ import Testing
         await #expect(throws: PMailError.notSupported("A message without a Message-ID can’t be labeled on this server.")) {
             try await imap.perform(.addLabel(work.id), on: [MessageSummary(id: IMAPMessageID.inbox(13))])
         }
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
+
+    /// A server that says it takes keywords but doesn't keep them: the label is kept on this Mac instead (and every
+    /// label after it), and listing the label still finds its conversation on the server.
+    @Test func keywordsAServerDropsAreKeptOnThisMac() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let book = LabelBook(file: folder.appendingPathComponent("labels.json"))
+        let stream = ScriptedByteStream(greeting: Script.greeting(), script: [
+            Script.signIn("A1"),
+            Self.select("A2", keywords: true),
+            // The server answers without the keyword, and doesn't report the second message at all.
+            Script.ok("A3", "UID STORE 11:12 +FLAGS (PMail_Work)", untagged: [#"* 2 FETCH (UID 11 FLAGS (\Seen))"#]),
+            Script.ok("A4", "UID FETCH 12 (UID FLAGS)", untagged: ["* 3 FETCH (UID 12 FLAGS (PMail_Work))"]),
+            // Later labels go straight to the book; listing finds the messages by Message-ID.
+            Script.list("A5"),
+            Self.examine("A6"),
+            Script.ok("A7", #"UID SEARCH HEADER Message-ID "park@example.com""#, untagged: ["* SEARCH 11"]),
+            Script.ok("A8", "UID FETCH 11 \(Self.summaryFetch)", untagged: [
+                Self.row(2, uid: 11, flags: #"\Seen"#, subject: "Park day", messageID: "<park@example.com>"),
+            ]),
+        ])
+        let imap = service([stream], book: book)
+        let work = try await imap.createLabel(named: "Work", colorHex: nil)
+        let park = MessageSummary(id: IMAPMessageID.inbox(11), messageIDHeader: "<park@example.com>")
+        let lunch = MessageSummary(id: IMAPMessageID.inbox(12), messageIDHeader: "<lunch@example.com>")
+        try await imap.perform(.addLabel(work.id), on: [park, lunch])
+        #expect(await book.keywordsIgnored(), "the server is known to drop them")
+        #expect(await book.keywordsAllowed() == false)
+        #expect(await book.messages(withLabel: work.id).map(\.key) == ["park@example.com"], "the dropped one is kept here")
+
+        let page = try await imap.listConversations(ListRequest(folderID: work.id))
+        #expect(page.conversations.flatMap(\.messages).map(\.subject) == ["Park day"], "the label lists its conversation")
+        #expect(page.conversations.first?.messages.first?.labelIDs == [work.id])
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 

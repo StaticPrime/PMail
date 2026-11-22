@@ -393,6 +393,30 @@ public actor IMAPClient {
         }
     }
 
+    /// Adds or removes flags and returns each message's flags afterwards, as the server reports them (fetching them for
+    /// any message it didn't report), so a caller can tell whether a flag stayed.
+    public func uidStoreReportingFlags(_ uids: [UInt32], adding: Bool, flags: [String]) async throws -> [UInt32: [String]] {
+        guard !uids.isEmpty, !flags.isEmpty else { return [:] }
+        return try await exclusively {
+            let change = (adding ? "+" : "-") + "FLAGS (\(flags.joined(separator: " ")))"
+            let result = try await self.run([.text("UID STORE \(IMAPSequenceSet.string(uids)) \(change)")])
+            try self.check(result)
+            var reported: [UInt32: [String]] = [:]
+            for case let .fetch(response) in result.untagged {
+                if let uid = response.uid, let flags = response.flags { reported[uid] = flags }
+            }
+            let unreported = uids.filter { reported[$0] == nil }
+            if !unreported.isEmpty {
+                let fetched = try await self.run([.text("UID FETCH \(IMAPSequenceSet.string(unreported)) (UID FLAGS)")])
+                try self.check(fetched)
+                for case let .fetch(response) in fetched.untagged {
+                    if let uid = response.uid, let flags = response.flags { reported[uid] = flags }
+                }
+            }
+            return reported
+        }
+    }
+
     /// Copies messages to another mailbox; returns the COPYUID code when the server gives one.
     @discardableResult
     public func uidCopy(_ uids: [UInt32], to mailbox: String) async throws -> IMAPResponseCode? {
