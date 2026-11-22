@@ -93,7 +93,7 @@ struct ConversationView: View {
                 .textSelection(.enabled)
             ForEach(chips, id: \.id) { folder in
                 Chip(text: mail.displayName(for: folder), color: Theme.color(hexString: folder.colorHex),
-                     onRemove: (folder.kind == .label && folder.role == nil) || (mail.capabilities.usesLabels && folder.role != .inbox) ? {
+                     onRemove: !mail.showsTrash && ((folder.kind == .label && folder.role == nil) || (mail.capabilities.usesLabels && folder.role != .inbox)) ? {
                          if let conversation = mail.openConversation { mail.perform(.removeLabel(folder.id), on: [conversation]) }
                      } : nil)
             }
@@ -188,7 +188,7 @@ private struct ExpandedMessage: View {
                     }
                     // A message waiting to be sent has nothing to star or reply to yet.
                     if mail.openQueuedItem == nil, !summary.isDraft {
-                        if mail.capabilities.canStar {
+                        if mail.capabilities.canStar, !mail.showsTrash {
                             IconButton(symbol: summary.isStarred ? "star.fill" : "star", help: summary.isStarred ? "Starred" : "Not starred",
                                        size: 30, iconSize: 14, tint: summary.isStarred ? Theme.star : Theme.icon) {
                                 mail.perform(summary.isStarred ? .unstar : .star, onMessage: summary)

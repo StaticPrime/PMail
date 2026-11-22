@@ -200,7 +200,7 @@ final class MailViewModel {
     /// Folders messages can be moved to, for the Move menu.
     var moveTargets: [MailFolder] {
         folders.filter { $0.isSelectable && $0.id != selectedFolderID && $0.role != .starred && $0.role != .important
-            && $0.role != .drafts && $0.role != .snoozed && $0.role != .scheduled && $0.role != .outbox
+            && $0.role != .sent && $0.role != .drafts && $0.role != .snoozed && $0.role != .scheduled && $0.role != .outbox
             // Labels are put on, not moved into (apart from accounts whose folders are labels).
             && ($0.kind != .label || capabilities.usesLabels) }
     }
@@ -701,6 +701,7 @@ final class MailViewModel {
     /// Stars, marks or files conversations. Archiving, deleting, spam and moves leave the list at once and reach
     /// the server after a few seconds, unless Undo is clicked first.
     func perform(_ action: MailAction, on conversations: [Conversation]) {
+        guard allows(action) else { return }
         let messages: [MessageSummary]
         switch action {
         case .star:
@@ -726,6 +727,7 @@ final class MailViewModel {
 
     /// Acts on one message from the conversation (its star, or Delete this message).
     func perform(_ action: MailAction, onMessage message: MessageSummary) {
+        guard allows(action) else { return }
         switch action {
         case .markRead, .markUnread, .star, .unstar, .markImportant, .markNotImportant:
             setFlags(action, on: [message])
@@ -1255,8 +1257,28 @@ final class MailViewModel {
 
     // MARK: Snoozing
 
-    /// Whether conversations here can be snoozed (it needs archiving, and they're not PMail's own).
-    var canSnooze: Bool { capabilities.canArchive && !Self.isLocal(selectedFolderID) }
+    /// Whether conversations here can be snoozed (it needs archiving, they're not PMail's own, and they're not in
+    /// the Trash).
+    var canSnooze: Bool { capabilities.canArchive && !Self.isLocal(selectedFolderID) && !showsTrash }
+
+    /// Whether the list showing is the Trash, where conversations are only put back, moved out, marked read or unread,
+    /// or deleted for good: not archived, snoozed, starred or labeled.
+    var showsTrash: Bool { currentFolder?.role == .trash && activeSearch == nil }
+
+    /// Whether an action makes sense on the conversations showing (the Trash refuses archiving, stars, importance and
+    /// labels).
+    func allows(_ action: MailAction) -> Bool {
+        // Sent holds what was sent, and Drafts, Scheduled, Outbox and Snoozed fill themselves: nothing is moved into them.
+        if case let .move(target) = action, let role = folder(target)?.role,
+           [.sent, .drafts, .scheduled, .outbox, .snoozed].contains(role) {
+            return false
+        }
+        guard showsTrash else { return true }
+        switch action {
+        case .archive, .star, .unstar, .addLabel, .removeLabel, .markImportant, .markNotImportant: return false
+        default: return true
+        }
+    }
 
     /// Puts conversations away until `date`: out of the inbox now, back (unread, with a notification) then.
     func snooze(_ conversations: [Conversation], until date: Date) {

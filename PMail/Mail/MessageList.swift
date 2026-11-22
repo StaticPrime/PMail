@@ -126,7 +126,7 @@ struct ConversationActions: View {
     @ViewBuilder
     private func standardActions(role: FolderRole?) -> some View {
         HStack(spacing: 2) {
-            if mail.capabilities.canArchive, role != .archive {
+            if mail.capabilities.canArchive, role != .archive, role != .trash {
                 IconButton(symbol: "archivebox", help: "Archive (E)") { mail.perform(.archive, on: targets) }
             }
             if role == .spam {
@@ -182,7 +182,7 @@ struct ConversationActions: View {
                 .frame(width: 36, height: 36)
                 .help("Move to category")
             }
-            if mail.hasLabels {
+            if mail.hasLabels, !mail.showsTrash {
                 Menu {
                     LabelChoices(mail: mail, targets: targets)
                 } label: {
@@ -291,7 +291,7 @@ struct MessageRow: View {
         HStack(spacing: 0) {
             CheckBox(isOn: checked, help: checked ? "Deselect" : "Select") { mail.toggleChecked(conversation.id) }
                 .padding(.leading, 8)
-            if mail.capabilities.canStar, !mail.showsDrafts {
+            if mail.capabilities.canStar, !mail.showsDrafts, !mail.showsTrash {
                 Button {
                     mail.perform(conversation.isStarred ? .unstar : .star, on: [conversation])
                 } label: {
@@ -415,7 +415,7 @@ private struct HoverActions: View {
 
     private var hoverButtons: some View {
         HStack(spacing: 0) {
-            if mail.capabilities.canArchive, mail.currentFolder?.role != .archive {
+            if mail.capabilities.canArchive, mail.currentFolder?.role != .archive, !mail.showsTrash {
                 IconButton(symbol: "archivebox", help: "Archive", size: 32, iconSize: 14) { mail.perform(.archive, on: [conversation]) }
             }
             IconButton(symbol: "trash", help: "Delete", size: 32, iconSize: 14) { mail.perform(.trash, on: [conversation]) }
@@ -482,17 +482,17 @@ private struct RowMenu: View {
                 }
             }
         }
-        if mail.capabilities.canArchive { Button("Archive") { mail.perform(.archive, on: targets) } }
+        if mail.capabilities.canArchive, !mail.showsTrash { Button("Archive") { mail.perform(.archive, on: targets) } }
         Button("Delete") { mail.perform(.trash, on: targets) }
         Button(targets.contains(where: \.isUnread) ? "Mark as read" : "Mark as unread") {
             mail.perform(targets.contains(where: \.isUnread) ? .markRead : .markUnread, on: targets)
         }
-        if mail.capabilities.canStar {
+        if mail.capabilities.canStar, !mail.showsTrash {
             Button(targets.allSatisfy(\.isStarred) ? "Remove star" : "Add star") {
                 mail.perform(targets.allSatisfy(\.isStarred) ? .unstar : .star, on: targets)
             }
         }
-        if mail.hasLabels {
+        if mail.hasLabels, !mail.showsTrash {
             Menu("Label as") { LabelChoices(mail: mail, targets: targets) }
         }
         if mail.sortsInboxOnMac, mail.currentFolder?.role == .inbox {

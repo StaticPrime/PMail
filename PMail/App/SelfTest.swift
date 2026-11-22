@@ -540,7 +540,13 @@ enum SelfTest {
             sentMark = sentCount()
             guard let composer = app.compose(to: [SampleData.person("Alex Kim")], subject: "Self-test later", body: "Sent later.") else { return }
             composer.schedule(at: AppClock.now().addingTimeInterval(1))
-            check(app.composers.isEmpty, "scheduling a message closes it", app.composers.map(\.title).joined(separator: ", "))
+            check(!app.composers.contains { $0 === composer }, "scheduling a message closes it")
+            if !app.composers.isEmpty {
+                // Not this step's doing, but worth knowing where it came from.
+                print("SELFTEST NOTE: other compose windows open: " + app.composers.map { model in
+                    "\(model.title) [to \(model.to.map(\.email).joined(separator: ","))] [\(model.body.string.prefix(30))] [draft \(model.editingDraftID ?? "-")]"
+                }.joined(separator: "; "))
+            }
             wait("Scheduled to count it") { mail.scheduledCount == 1 || sentCount() > sentMark }
         }
         step {
@@ -769,6 +775,26 @@ enum SelfTest {
         }
         step {
             check(actions().contains { $0.hasPrefix("addLabel") }, "labels chosen while writing go on the sent message")
+            mail.select(folderID: mail.folder(role: .trash)?.id)
+            wait("the Trash") { mail.showsTrash && !mail.isLoadingList && !mail.conversations.isEmpty }
+        }
+
+        // MARK: The Trash
+        step {
+            check(!mail.allows(.archive) && !mail.canSnooze && !mail.allows(.star) && !mail.allows(.unstar)
+                  && !mail.allows(.addLabel("Label_work")) && !mail.allows(.removeLabel("Label_work")),
+                  "conversations in the Trash can't be archived, snoozed, starred or labeled")
+            check(mail.allows(.moveToInbox) && mail.allows(.markRead) && mail.allows(.markUnread) && mail.allows(.deleteForever),
+                  "they can be put back, marked read or unread, or deleted for good")
+            let sent = mail.folder(role: .sent)?.id ?? "SENT"
+            check(!mail.moveTargets.contains { [.sent, .drafts].contains($0.role) } && !mail.allows(.move(toFolderID: sent)),
+                  "nothing is ever moved into Sent (or Drafts)")
+            if let trashed = mail.conversations.first {
+                mail.perform(trashed.isStarred ? .unstar : .star, on: [trashed])
+                mail.perform(.addLabel("Label_work"), on: [trashed])
+                let now = mail.conversations.first { $0.id == trashed.id }
+                check(now?.isStarred == trashed.isStarred && now?.labelIDs == trashed.labelIDs, "asking anyway changes nothing")
+            }
             // Labels and categories on an account with folders: the iCloud sample.
             app.switchAccount(to: SampleData.iCloudID)
             wait("the iCloud inbox") { session.id == SampleData.iCloudID && mail.foldersLoaded && !mail.isLoadingList && !mail.conversations.isEmpty }

@@ -168,7 +168,19 @@ struct MailSidebar: View {
             let conversations = mail.conversations.filter { ids.contains($0.id) }
             guard !conversations.isEmpty, folder.id != mail.selectedFolderID else { return false }
             let isLabel = folder.kind == .label && folder.role == nil || mail.capabilities.usesLabels && folder.role == nil
-            mail.perform(isLabel ? .addLabel(folder.id) : .move(toFolderID: folder.id), on: conversations)
+            if folder.role == .starred {
+                // Dropped on Starred: starred (not in the Trash).
+                guard mail.allows(.star) else { return false }
+                mail.perform(.star, on: conversations)
+            } else if isLabel {
+                // Nothing in the Trash takes a label; it can be moved out of it.
+                guard mail.allows(.addLabel(folder.id)) else { return false }
+                mail.perform(.addLabel(folder.id), on: conversations)
+            } else {
+                // Only where mail can be moved: never Sent, Drafts, Scheduled, Outbox or Snoozed.
+                guard mail.moveTargets.contains(where: { $0.id == folder.id }) else { return false }
+                mail.perform(.move(toFolderID: folder.id), on: conversations)
+            }
             return true
         }
     }

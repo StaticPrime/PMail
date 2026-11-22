@@ -156,6 +156,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         guard !targets.isEmpty else { return }
         // Not offered where the account has nowhere to put the mail (no Archive or spam folder).
         if case .archive = action, !mail.capabilities.canArchive { return }
+        // The Trash doesn't archive, star or label.
+        guard mail.allows(action) else { return }
         if case .markSpam = action, !mail.canReportSpam { return }
         // Report spam asks whether to block the sender too.
         if case .markSpam = action { return mail.reportSpam(targets) }
@@ -286,6 +288,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         let typing = window.map(Self.isEditingText) ?? false
         // Drafts are only edited or thrown away.
         let inDrafts = mail?.showsDrafts == true
+        let inTrash = mail?.showsTrash == true
         switch menuItem.action {
         case #selector(pmNewMessage(_:)), #selector(pmNewContact(_:)), #selector(pmRefresh(_:)), #selector(pmFind(_:)),
              #selector(pmAccountSettings(_:)), #selector(pmRemoveAccount(_:)):
@@ -307,7 +310,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         case #selector(pmReply(_:)), #selector(pmReplyAll(_:)), #selector(pmForward(_:)):
             return app.module == .mail && mail?.openMessages.contains { !$0.summary.isDraft } == true
         case #selector(pmArchive(_:)):
-            return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canArchive == true && !inDrafts
+            return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canArchive == true && !inDrafts && !inTrash
         case #selector(pmTrash(_:)):
             return !typing && app.module == .mail && !targets.isEmpty
         case #selector(pmSpam(_:)):
@@ -317,7 +320,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             return !typing && app.module == .mail && !targets.isEmpty && !inDrafts
         case #selector(pmToggleStar(_:)):
             menuItem.title = !targets.isEmpty && targets.allSatisfy(\.isStarred) ? "Remove Star" : "Add Star"
-            return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canStar == true && !inDrafts
+            return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canStar == true && !inDrafts && !inTrash
         case #selector(pmMoveTo(_:)):
             return !typing && app.module == .mail && !targets.isEmpty && capabilities?.canMove == true && !inDrafts
         case #selector(pmSendMessage(_:)):
