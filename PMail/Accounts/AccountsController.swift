@@ -11,7 +11,16 @@ struct AccountServices {
 
 /// Makes the services an account uses: the real ones for its kind, or (in debug runs) made-up ones.
 protocol ServiceFactory {
-    func services(for account: Account, secrets: any SecretStore) -> AccountServices
+    /// The account's services. `storage` is what the account keeps on the Mac; its label book and inbox sorter are
+    /// shared with the services, so the window and the services see the same labels and categories.
+    func services(for account: Account, secrets: any SecretStore, storage: AccountStorage?) -> AccountServices
+}
+
+extension ServiceFactory {
+    /// Services for checking an account (signing in, the factory checks), with nothing of the window's to share.
+    func services(for account: Account, secrets: any SecretStore) -> AccountServices {
+        services(for: account, secrets: secrets, storage: nil)
+    }
 }
 
 /// What an account keeps on the Mac: a copy of what it last loaded, messages waiting to be sent, and snoozes.
@@ -20,12 +29,18 @@ struct AccountStorage {
     let queue: MailQueue
     let snoozes: SnoozeBook
     let blockedSenders: BlockedSenders
+    /// Its labels' names and colors (and, for a server that can't keep them, which messages have them).
+    let labelBook: LabelBook
+    /// Sorts its inbox into categories when its server doesn't, remembering the senders put in one by hand.
+    let sorter: InboxSorter
 
     init(folder: URL) {
         cache = AccountCache(folder: folder.appendingPathComponent("Cache", isDirectory: true))
         queue = MailQueue(folder: folder.appendingPathComponent("Outbox", isDirectory: true))
         snoozes = SnoozeBook(file: folder.appendingPathComponent("Snoozes.json"))
         blockedSenders = BlockedSenders(file: folder.appendingPathComponent("BlockedSenders.json"))
+        labelBook = LabelBook(file: folder.appendingPathComponent("Labels.json"))
+        sorter = InboxSorter(file: folder.appendingPathComponent("Categories.json"))
     }
 }
 
@@ -123,8 +138,9 @@ final class AccountsController {
     }
 
     private func makeSession(_ account: Account) -> AccountSession {
-        AccountSession(account: account, services: factory.services(for: account, secrets: secrets),
-                       storage: AccountStorage(folder: storageFolder(for: account.id)), app: app, defaults: defaults)
+        let storage = AccountStorage(folder: storageFolder(for: account.id))
+        return AccountSession(account: account, services: factory.services(for: account, secrets: secrets, storage: storage),
+                              storage: storage, app: app, defaults: defaults)
     }
 
     func session(for id: UUID) -> AccountSession? { sessions[id] }
@@ -187,7 +203,7 @@ final class AccountsController {
         try? secrets.setSecret(nil, for: id)
         // The copies and waiting messages go; calendars, contacts and mail kept only on this Mac stay in its folder.
         let folder = storageFolder(for: id)
-        for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json"] { try? FileManager.default.removeItem(at: folder.appendingPathComponent(name)) }
+        for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json"] { try? FileManager.default.removeItem(at: folder.appendingPathComponent(name)) }
         accounts.removeAll { $0.id == id }
         sessions[id] = nil
         save()

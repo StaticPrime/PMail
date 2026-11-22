@@ -153,11 +153,15 @@ struct ComposeWindow: View {
             SplitSendButton(isSending: model.isSending) { model.send() } schedule: { date in model.schedule(at: date) }
                 .padding(.trailing, 8)
             IconButton(symbol: "textformat", help: model.showsFormatting ? "Hide formatting options" : "Formatting options", size: 34, iconSize: 15,
-                       tint: model.showsFormatting ? Theme.accent : Theme.icon) { model.showsFormatting.toggle() }
+                       tint: model.showsFormatting && !model.isPlainText ? Theme.accent : Theme.icon, isDisabled: model.isPlainText) {
+                model.showsFormatting.toggle()
+            }
             IconButton(symbol: "paperclip", help: "Attach files", size: 34, iconSize: 15) { chooseFiles() }
             IconButton(symbol: "link", help: "Insert link (⌘K)", size: 34, iconSize: 15) { editor.insertLink() }
             IconButton(symbol: "face.smiling", help: "Insert emoji", size: 34, iconSize: 15) { editor.showEmoji() }
-            IconButton(symbol: "photo", help: "Insert a picture", size: 34, iconSize: 15) { chooseFiles(images: true) }
+            IconButton(symbol: "photo", help: model.isPlainText ? "Attach a picture" : "Insert a picture", size: 34, iconSize: 15) { choosePictures() }
+            IconButton(symbol: "signature", help: "Insert signature", size: 34, iconSize: 15) { insertSignature() }
+            MoreComposeOptions(app: app, model: model, editor: editor)
             Spacer()
             IconButton(symbol: "trash", help: "Discard draft", size: 34, iconSize: 15) { model.discard() }
         }
@@ -173,53 +177,229 @@ struct ComposeWindow: View {
         panel.prompt = "Attach"
         if panel.runModal() == .OK { model.attach(panel.urls) }
     }
+
+    /// Pictures go in the text where the cursor is (attached instead in plain text mode).
+    private func choosePictures() {
+        guard !model.isPlainText else { return chooseFiles(images: true) }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "Insert"
+        if panel.runModal() == .OK { for url in panel.urls { editor.insertPicture(url) } }
+    }
+
+    private func insertSignature() {
+        let signature = model.account.signature.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !signature.isEmpty else {
+            return app.show("This account has no signature yet. Add one in its settings, from the account menu at the top right.")
+        }
+        editor.insertText("\n-- \n" + signature)
+    }
 }
 
-/// Bold, italic, underline, strikethrough, lists and clearing formatting, for the editor.
+/// The formatting bar: font, size, bold, italic, underline, text and highlight colors, alignment, lists, indenting,
+/// quoting, strikethrough and clearing formatting.
 private struct FormattingBar: View {
     let editor: RichTextController
+    @State private var showsColors = false
 
     var body: some View {
         HStack(spacing: 0) {
+            Menu {
+                ForEach(RichTextHTML.fonts, id: \.name) { choice in
+                    Button(choice.name) { editor.setFont(choice) }
+                }
+            } label: {
+                // One run of text, so the menu keeps the arrow after the name.
+                Text("\(editor.currentFontName)  \(Image(systemName: "chevron.down"))")
+                    .font(.pm(13))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                    .frame(width: 112, alignment: .leading)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Font")
+            separator
+            Menu {
+                ForEach(RichTextController.sizes, id: \.name) { size in
+                    Button(size.name) { editor.setSize(size.points) }
+                }
+            } label: {
+                Text("\(Image(systemName: "textformat.size")) \(Image(systemName: "chevron.down"))").foregroundStyle(Theme.icon)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Size")
+            separator
             IconButton(symbol: "bold", help: "Bold (⌘B)", size: 30, iconSize: 13) { editor.toggleTrait(.boldFontMask) }
             IconButton(symbol: "italic", help: "Italic (⌘I)", size: 30, iconSize: 13) { editor.toggleTrait(.italicFontMask) }
             IconButton(symbol: "underline", help: "Underline (⌘U)", size: 30, iconSize: 13) { editor.toggleAttribute(.underlineStyle) }
-            IconButton(symbol: "strikethrough", help: "Strikethrough", size: 30, iconSize: 13) { editor.toggleAttribute(.strikethroughStyle) }
-            Divider().frame(height: 18).padding(.horizontal, 6)
-            Menu {
-                ForEach([("Default", NSColor.textColor), ("Red", NSColor.systemRed), ("Orange", NSColor.systemOrange),
-                         ("Green", NSColor.systemGreen), ("Blue", NSColor.systemBlue), ("Purple", NSColor.systemPurple),
-                         ("Gray", NSColor.systemGray)], id: \.0) { name, color in
-                    Button(name) { editor.setColor(color) }
+            Button { showsColors.toggle() } label: {
+                HStack(spacing: 3) {
+                    VStack(spacing: 1) {
+                        Text("A").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                        Rectangle().fill(Color(nsColor: editor.currentColor)).frame(width: 14, height: 3)
+                    }
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.icon)
                 }
-            } label: {
-                Image(systemName: "paintpalette").foregroundStyle(Theme.icon)
+                .frame(width: 34, height: 30)
+                .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: 30)
-            .help("Text color")
+            .buttonStyle(.plain)
+            .help("Text and highlight color")
+            .popover(isPresented: $showsColors, arrowEdge: .bottom) { ColorPalette(editor: editor) { showsColors = false } }
+            separator
             Menu {
-                Button("Small") { editor.setSize(11) }
-                Button("Normal") { editor.setSize(13) }
-                Button("Large") { editor.setSize(17) }
-                Button("Huge") { editor.setSize(24) }
+                Button { editor.setAlignment(.left) } label: { Label("Align left", systemImage: "text.alignleft") }
+                Button { editor.setAlignment(.center) } label: { Label("Center", systemImage: "text.aligncenter") }
+                Button { editor.setAlignment(.right) } label: { Label("Align right", systemImage: "text.alignright") }
             } label: {
-                Image(systemName: "textformat.size").foregroundStyle(Theme.icon)
+                Text("\(Image(systemName: "text.alignleft")) \(Image(systemName: "chevron.down"))").foregroundStyle(Theme.icon)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-            .frame(width: 30)
-            .help("Size")
-            Divider().frame(height: 18).padding(.horizontal, 6)
-            IconButton(symbol: "list.bullet", help: "Bulleted list", size: 30, iconSize: 13) { editor.toggleList(ordered: false) }
+            .fixedSize()
+            .help("Align")
             IconButton(symbol: "list.number", help: "Numbered list", size: 30, iconSize: 13) { editor.toggleList(ordered: true) }
-            Divider().frame(height: 18).padding(.horizontal, 6)
-            IconButton(symbol: "textformat.alt", help: "Remove formatting", size: 30, iconSize: 13) { editor.clearFormatting() }
-            Spacer()
+            IconButton(symbol: "list.bullet", help: "Bulleted list", size: 30, iconSize: 13) { editor.toggleList(ordered: false) }
+            IconButton(symbol: "decrease.indent", help: "Indent less", size: 30, iconSize: 13) { editor.indent(by: -1) }
+            IconButton(symbol: "increase.indent", help: "Indent more", size: 30, iconSize: 13) { editor.indent(by: 1) }
+            IconButton(symbol: "text.quote", help: "Quote", size: 30, iconSize: 13) { editor.toggleQuote() }
+            separator
+            IconButton(symbol: "strikethrough", help: "Strikethrough", size: 30, iconSize: 13) { editor.toggleAttribute(.strikethroughStyle) }
+            Menu {
+                Button { editor.clearFormatting() } label: { Label("Remove formatting", systemImage: "textformat.alt") }
+            } label: {
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.icon)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 26)
+            .help("More formatting")
+            Spacer(minLength: 0)
         }
-        .frame(height: 36)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.composeHeader))
+        .padding(.horizontal, 10)
+        .frame(height: 38)
+        .background(Capsule().fill(Theme.composeHeader))
+    }
+
+    private var separator: some View {
+        Divider().frame(height: 18).padding(.horizontal, 5)
+    }
+}
+
+/// Highlight and text colors, in two grids.
+private struct ColorPalette: View {
+    let editor: RichTextController
+    let done: () -> Void
+
+    /// Eight columns: a row of grays, the bright colors, then lighter and darker shades of them.
+    static let rows: [[NSColor]] = {
+        let grays = [0.0, 0.26, 0.4, 0.6, 0.73, 0.85, 0.94, 1.0].map { NSColor(white: $0, alpha: 1) }
+        let hues: [CGFloat] = [0, 30, 52, 120, 180, 215, 270, 310].map { $0 / 360 }
+        let shades: [(saturation: CGFloat, brightness: CGFloat)] = [(1, 1), (0.22, 1), (0.42, 1), (0.65, 0.95), (1, 0.72), (1, 0.48)]
+        return [grays] + shades.map { shade in hues.map { NSColor(hue: $0, saturation: shade.saturation, brightness: shade.brightness, alpha: 1) } }
+    }()
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 22) {
+            column("Background color", reset: "No highlight") { editor.setHighlight($0) }
+            column("Text color", reset: "Default color") { editor.setColor($0 ?? .textColor) }
+        }
+        .padding(16)
+        .background(Theme.surfaceRaised)
+    }
+
+    private func column(_ title: String, reset: String, choose: @escaping (NSColor?) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.pm(12.5, .medium)).foregroundStyle(Theme.textPrimary)
+            Grid(horizontalSpacing: 3, verticalSpacing: 3) {
+                ForEach(Self.rows.indices, id: \.self) { row in
+                    GridRow {
+                        ForEach(Self.rows[row].indices, id: \.self) { column in
+                            let color = Self.rows[row][column]
+                            Button {
+                                choose(color)
+                                done()
+                            } label: {
+                                RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: color))
+                                    .overlay(RoundedRectangle(cornerRadius: 2).stroke(Theme.divider, lineWidth: 0.5))
+                                    .frame(width: 17, height: 17)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    if row == 1 { GridRow { Color.clear.frame(height: 4).gridCellColumns(8) } }
+                }
+            }
+            Button(reset) {
+                choose(nil)
+                done()
+            }
+            .buttonStyle(.plain)
+            .font(.pm(12))
+            .foregroundStyle(Theme.accent)
+        }
+    }
+}
+
+/// The ⋮ menu: opening new messages full size, plain text, printing, spell checking and labels for the message.
+private struct MoreComposeOptions: View {
+    let app: AppModel
+    let model: ComposeModel
+    let editor: RichTextController
+    @AppStorage("ComposeFullScreen") private var defaultsToFullScreen = false
+    @AppStorage("ComposeSpellCheck") private var checksSpelling = true
+
+    var body: some View {
+        Menu {
+            Toggle(isOn: $defaultsToFullScreen) { Label("Default to full screen", systemImage: "arrow.up.left.and.arrow.down.right") }
+            Toggle(isOn: Binding(get: { model.isPlainText }, set: { setPlainText($0) })) {
+                Label("Plain text mode", systemImage: "textformat.abc")
+            }
+            Divider()
+            Button { editor.printMessage(model) } label: { Label("Print…", systemImage: "printer") }
+            Toggle(isOn: Binding(get: { checksSpelling }, set: { on in
+                checksSpelling = on
+                editor.setSpellChecking(on)
+            })) { Label("Spell check", systemImage: "textformat.abc.dottedunderline") }
+            if model.session.mail.hasLabels {
+                Divider()
+                Menu {
+                    ForEach(model.session.mail.labels, id: \.folder.id) { item in
+                        Toggle(item.folder.name, isOn: Binding(get: { model.labelIDs.contains(item.folder.id) }, set: { on in
+                            if on { model.labelIDs.insert(item.folder.id) } else { model.labelIDs.remove(item.folder.id) }
+                        }))
+                    }
+                    if model.session.mail.labels.isEmpty { Text("No labels yet") }
+                } label: {
+                    Label("Label", systemImage: "tag")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis").rotationEffect(.degrees(90)).foregroundStyle(Theme.icon)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 34, height: 34)
+        .help("More options")
+    }
+
+    /// Plain text drops the formatting, after asking when there's some to lose.
+    private func setPlainText(_ on: Bool) {
+        if on, model.hasFormatting {
+            let alert = NSAlert()
+            alert.messageText = "Switch to plain text?"
+            alert.informativeText = "The formatting, and any pictures in the text, will be taken out of this message."
+            alert.addButton(withTitle: "Switch to Plain Text")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        model.setPlainText(on)
     }
 }
 
@@ -409,6 +589,24 @@ final class RichTextController {
 
     private var baseFont: NSFont { NSFont.systemFont(ofSize: 13) }
 
+    /// The sizes offered, as the bar names them.
+    static let sizes: [(name: String, points: CGFloat)] = [("Small", 10), ("Normal", 13), ("Large", 18), ("Huge", 32)]
+
+    /// The font and color at the cursor (or the start of the selection), shown on the bar.
+    var currentFontName = "Sans Serif"
+    var currentColor = NSColor.textColor
+
+    /// Follows the cursor, for the bar.
+    func selectionChanged() {
+        guard let textView else { return }
+        let range = textView.selectedRange()
+        let attributes = range.length > 0 && range.location < (textView.textStorage?.length ?? 0)
+            ? textView.textStorage?.attributes(at: range.location, effectiveRange: nil) ?? [:] : textView.typingAttributes
+        let font = attributes[.font] as? NSFont
+        currentFontName = RichTextHTML.fontChoice(forFamily: font?.familyName)?.name ?? "Sans Serif"
+        currentColor = attributes[.foregroundColor] as? NSColor ?? .textColor
+    }
+
     private func applying(_ change: (NSMutableAttributedString, NSRange) -> Void, typing: (inout [NSAttributedString.Key: Any]) -> Void) {
         guard let textView, let storage = textView.textStorage else { return }
         let range = textView.selectedRange()
@@ -453,6 +651,147 @@ final class RichTextController {
     func setColor(_ color: NSColor) {
         applying({ storage, range in storage.addAttribute(.foregroundColor, value: color, range: range) },
                  typing: { attributes in attributes[.foregroundColor] = color })
+        currentColor = color
+    }
+
+    /// Highlights the text with a color behind it, or takes the highlight off (nil).
+    func setHighlight(_ color: NSColor?) {
+        applying({ storage, range in
+            if let color { storage.addAttribute(.backgroundColor, value: color, range: range) } else { storage.removeAttribute(.backgroundColor, range: range) }
+        }, typing: { attributes in attributes[.backgroundColor] = color })
+    }
+
+    /// Changes the font, keeping each run's size, bold and italic.
+    func setFont(_ choice: RichTextHTML.FontChoice) {
+        let manager = NSFontManager.shared
+        func convert(_ font: NSFont) -> NSFont {
+            let traits = manager.traits(of: font).intersection([.boldFontMask, .italicFontMask])
+            var converted: NSFont
+            if let family = choice.family {
+                converted = manager.font(withFamily: family, traits: traits, weight: 5, size: font.pointSize)
+                    ?? NSFont(name: family, size: font.pointSize) ?? font
+            } else {
+                converted = NSFont.systemFont(ofSize: font.pointSize)
+                if traits.contains(.boldFontMask) { converted = manager.convert(converted, toHaveTrait: .boldFontMask) }
+                if traits.contains(.italicFontMask) { converted = manager.convert(converted, toHaveTrait: .italicFontMask) }
+            }
+            return converted
+        }
+        applying({ storage, range in
+            storage.enumerateAttribute(.font, in: range) { value, subrange, _ in
+                storage.addAttribute(.font, value: convert(value as? NSFont ?? self.baseFont), range: subrange)
+            }
+        }, typing: { attributes in attributes[.font] = convert(attributes[.font] as? NSFont ?? baseFont) })
+        currentFontName = choice.name
+    }
+
+    /// Changes the chosen paragraphs' style (the one with the cursor when nothing is chosen), and the typing style.
+    private func changingParagraphs(_ change: (NSMutableParagraphStyle) -> Void) {
+        guard let textView, let storage = textView.textStorage else { return }
+        let string = storage.string as NSString
+        let range = string.paragraphRange(for: textView.selectedRange())
+        if range.length > 0, textView.shouldChangeText(in: range, replacementString: nil) {
+            storage.beginEditing()
+            var location = range.location
+            while location < NSMaxRange(range) {
+                let paragraph = string.paragraphRange(for: NSRange(location: location, length: 0))
+                let current = storage.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil) as? NSParagraphStyle
+                let style = (current?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+                change(style)
+                storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
+                location = NSMaxRange(paragraph)
+                if paragraph.length == 0 { break }
+            }
+            storage.endEditing()
+            textView.didChangeText()
+        }
+        let typing = ((textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+        change(typing)
+        textView.typingAttributes[.paragraphStyle] = typing
+        textView.window?.makeFirstResponder(textView)
+    }
+
+    func setAlignment(_ alignment: NSTextAlignment) {
+        changingParagraphs { $0.alignment = alignment }
+    }
+
+    /// Moves the chosen paragraphs in (or back out) a step.
+    func indent(by steps: Int) {
+        changingParagraphs { style in
+            guard style.textLists.isEmpty else { return }
+            let indent = max(0, style.headIndent + CGFloat(steps) * RichTextHTML.indentStep)
+            style.headIndent = indent
+            style.firstLineHeadIndent = indent
+        }
+    }
+
+    /// Quotes the chosen paragraphs (a bar down their left side), or takes the quote off.
+    func toggleQuote() {
+        guard let textView, let storage = textView.textStorage else { return }
+        let location = min(textView.selectedRange().location, max(0, storage.length - 1))
+        let style = storage.length > 0 ? storage.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle
+            : textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle
+        let quoted = style?.textBlocks.contains { $0 is RichTextHTML.QuoteBlock } ?? false
+        let block = RichTextHTML.QuoteBlock()
+        changingParagraphs { style in
+            style.textBlocks = quoted ? style.textBlocks.filter { !($0 is RichTextHTML.QuoteBlock) } : [block]
+        }
+    }
+
+    /// Puts a picture in the text at the cursor, shown no wider than the message.
+    func insertPicture(_ url: URL) {
+        guard let textView, let data = try? Data(contentsOf: url), let image = NSImage(data: data) else { return }
+        let type = UTType(filenameExtension: url.pathExtension) ?? .png
+        let attachment = NSTextAttachment(data: data, ofType: type.identifier)
+        let wrapper = FileWrapper(regularFileWithContents: data)
+        wrapper.preferredFilename = url.lastPathComponent
+        attachment.fileWrapper = wrapper
+        attachment.image = image
+        let width = min(image.size.width, 480)
+        let scale = image.size.width > 0 ? width / image.size.width : 1
+        attachment.bounds = CGRect(x: 0, y: 0, width: width, height: image.size.height * scale)
+        let picture = NSMutableAttributedString(attachment: attachment)
+        picture.addAttributes(textView.typingAttributes, range: NSRange(location: 0, length: picture.length))
+        textView.window?.makeFirstResponder(textView)
+        textView.insertText(picture, replacementRange: textView.selectedRange())
+    }
+
+    /// Types text at the cursor (a signature), with the current style.
+    func insertText(_ text: String) {
+        guard let textView else { return }
+        textView.window?.makeFirstResponder(textView)
+        textView.insertText(NSAttributedString(string: text, attributes: textView.typingAttributes), replacementRange: textView.selectedRange())
+    }
+
+    func setSpellChecking(_ on: Bool) {
+        textView?.isContinuousSpellCheckingEnabled = on
+    }
+
+    /// Prints the message as it stands: its subject and recipients, then the text.
+    func printMessage(_ model: ComposeModel) {
+        let page = NSPrintInfo.shared.copy() as? NSPrintInfo ?? NSPrintInfo()
+        page.horizontalPagination = .fit
+        page.isVerticallyCentered = false
+        let width = page.paperSize.width - page.leftMargin - page.rightMargin
+        let printable = NSMutableAttributedString()
+        let label: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.darkGray]
+        printable.append(NSAttributedString(string: (model.subject.isEmpty ? "(no subject)" : model.subject) + "\n",
+                                            attributes: [.font: NSFont.boldSystemFont(ofSize: 16), .foregroundColor: NSColor.black]))
+        printable.append(NSAttributedString(string: "From: \(model.account.address.formatted)\n", attributes: label))
+        if !model.to.isEmpty { printable.append(NSAttributedString(string: "To: \(model.to.map(\.formatted).joined(separator: ", "))\n", attributes: label)) }
+        if !model.cc.isEmpty { printable.append(NSAttributedString(string: "Cc: \(model.cc.map(\.formatted).joined(separator: ", "))\n", attributes: label)) }
+        printable.append(NSAttributedString(string: "\n"))
+        printable.append(model.body)
+        let view = NSTextView(frame: NSRect(x: 0, y: 0, width: width, height: 100))
+        view.textStorage?.setAttributedString(printable)
+        view.sizeToFit()
+        let operation = NSPrintOperation(view: view, printInfo: page)
+        operation.jobTitle = model.subject.isEmpty ? "New Message" : model.subject
+        if let window = textView?.window {
+            operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
+        } else {
+            operation.run()
+        }
     }
 
     func setSize(_ size: CGFloat) {
@@ -549,7 +888,7 @@ struct RichTextEditor: NSViewRepresentable {
     let model: ComposeModel
     let controller: RichTextController
 
-    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+    func makeCoordinator() -> Coordinator { Coordinator(model: model, controller: controller) }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = ComposeTextView.scrollableTextView()
@@ -566,7 +905,8 @@ struct RichTextEditor: NSViewRepresentable {
         textView.typingAttributes = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor]
         textView.isAutomaticQuoteSubstitutionEnabled = true
         textView.isAutomaticLinkDetectionEnabled = true
-        textView.isContinuousSpellCheckingEnabled = true
+        textView.isContinuousSpellCheckingEnabled = UserDefaults.standard.object(forKey: "ComposeSpellCheck") as? Bool ?? true
+        textView.importsGraphics = true
         textView.textContainerInset = NSSize(width: 4, height: 6)
         textView.delegate = context.coordinator
         textView.setAccessibilityLabel("Message")
@@ -591,15 +931,21 @@ struct RichTextEditor: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         let model: ComposeModel
+        let controller: RichTextController
         var revision = 0
 
-        init(model: ComposeModel) {
+        init(model: ComposeModel, controller: RichTextController) {
             self.model = model
+            self.controller = controller
         }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             model.body = NSAttributedString(attributedString: textView.attributedString())
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            controller.selectionChanged()
         }
     }
 }

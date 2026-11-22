@@ -397,7 +397,7 @@ enum SelfTest {
         step {
             let created = session.calendar.events.first { $0.title == "Self-test FaceTime" }
             check(created?.conference?.kind == .faceTime && created?.conference?.joinURL.host == "facetime.apple.com", "a pasted FaceTime link joins the event")
-            check(mail.inboxTabs.isEmpty && mail.capabilities.usesLabels == false, "iCloud mail has folders, no tabs")
+            check(mail.capabilities.usesLabels == false && mail.sortsInboxOnMac, "iCloud mail has folders, with its inbox sorted on the Mac")
             app.switchAccount(to: SampleData.googleID)
             app.show(.contacts)
             wait("the first account's contacts") { app.current?.account.kind == .google && app.current?.contacts.loaded == true }
@@ -540,7 +540,7 @@ enum SelfTest {
             sentMark = sentCount()
             guard let composer = app.compose(to: [SampleData.person("Alex Kim")], subject: "Self-test later", body: "Sent later.") else { return }
             composer.schedule(at: AppClock.now().addingTimeInterval(1))
-            check(app.composers.isEmpty, "scheduling a message closes it")
+            check(app.composers.isEmpty, "scheduling a message closes it", app.composers.map(\.title).joined(separator: ", "))
             wait("Scheduled to count it") { mail.scheduledCount == 1 || sentCount() > sentMark }
         }
         step {
@@ -620,9 +620,12 @@ enum SelfTest {
             mail.select(folderID: mail.inbox?.id)
             let service = sampleMail
             let deals = MailAddress(name: "Great Deals", email: "deals@offers.example")
-            Task { await service?.deliver(from: deals, subject: "Self-test offer", text: "Buy now!", at: AppClock.now().addingTimeInterval(60)) }
             let session = session
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { Task { await app.sync?.check(session) } }
+            // Delivered, then checked for, in that order, so the check has come and gone before the next step blocks anyone.
+            Task {
+                await service?.deliver(from: deals, subject: "Self-test offer", text: "Buy now!", at: AppClock.now().addingTimeInterval(60))
+                await app.sync?.check(session)
+            }
             wait("the offer to arrive") { mail.conversations.contains { $0.subject == "Self-test offer" } }
         }
 
@@ -654,15 +657,26 @@ enum SelfTest {
             notifiedBefore = notifier?.newMail.count ?? 0
             let service = sampleMail
             let deals = MailAddress(name: "Great Deals", email: "deals@offers.example")
-            Task { await service?.deliver(from: deals, subject: "Self-test offer again", text: "Last chance!", at: AppClock.now().addingTimeInterval(120)) }
             let session = session
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { Task { await app.sync?.check(session) } }
-            wait("the blocked mail to go to Spam") { actions().filter { $0 == "markSpam" }.count > spamMark }
+            Task {
+                await service?.deliver(from: deals, subject: "Self-test offer again", text: "Last chance!", at: AppClock.now().addingTimeInterval(120))
+                await app.sync?.check(session)
+            }
+            wait("the blocked mail to go to Spam") {
+                guard let service else { return false }
+                return (read { await service.labels(ofSubject: "Self-test offer again") } ?? []).contains("SPAM")
+            }
         }
         step {
-            check(actions().filter { $0 == "markSpam" }.count > spamMark, "new mail from a blocked sender goes straight to Spam")
+            let service = sampleMail
+            let labels = service.flatMap { service in read { await service.labels(ofSubject: "Self-test offer again") } } ?? []
+            check(labels.contains("SPAM") && !labels.contains("INBOX"), "new mail from a blocked sender goes straight to Spam", labels.joined(separator: " "))
             check((notifier?.newMail.count ?? 0) == notifiedBefore, "without a notification")
-            check(!mail.conversations.contains { $0.subject == "Self-test offer again" }, "and never shows in the inbox's list")
+            mail.loadList()
+            wait("the inbox to load again") { !mail.isLoadingList }
+        }
+        step {
+            check(!mail.conversations.contains { $0.subject == "Self-test offer again" }, "and it isn't in the inbox")
             guard let rule = mail.blockedSenders.first else { return check(false, "the block is listed") }
             mail.unblock(rule)
             wait("the sender to be unblocked") { mail.blockedSenders.isEmpty }
@@ -733,6 +747,124 @@ enum SelfTest {
             check(!mail.conversations.contains { $0.subject == "Self-test draft" }, "and it's deleted from the server")
             mail.select(folderID: mail.inbox?.id)
             wait("the inbox") { mail.currentFolder?.role == .inbox && !mail.isLoadingList }
+        }
+
+        // MARK: Writing options
+        step {
+            guard let composer = app.compose(to: [SampleData.person("Alex Kim")], subject: "Self-test options", body: "Plain words.") else {
+                return check(false, "a new message opens")
+            }
+            check(composer.outgoing().htmlBody != nil, "a new message goes out formatted")
+            composer.setPlainText(true)
+            check(composer.outgoing().htmlBody == nil && composer.outgoing().textBody.contains("Plain words."), "plain text mode sends the text alone")
+            composer.setPlainText(false)
+            guard let label = mail.labels.first?.folder else { return check(false, "the account has labels") }
+            composer.labelIDs = [label.id]
+            composer.undoSendDelay = 0.1
+            composer.send()
+            wait("the sent message to get its label") { actions().contains { $0.hasPrefix("addLabel") && $0.contains(label.id) } }
+        }
+        step {
+            check(actions().contains { $0.hasPrefix("addLabel") }, "labels chosen while writing go on the sent message")
+            // Labels and categories on an account with folders: the iCloud sample.
+            app.switchAccount(to: SampleData.iCloudID)
+            wait("the iCloud inbox") { session.id == SampleData.iCloudID && mail.foldersLoaded && !mail.isLoadingList && !mail.conversations.isEmpty }
+        }
+
+        // MARK: Labels beside folders
+        step {
+            check(mail.hasLabels && mail.capabilities.canEditLabels, "an account with folders can have labels too")
+            check(mail.inboxTabs.map(\.name) == ["Primary", "Transactions", "Updates", "Promotions", "Social"],
+                  "its inbox is sorted into five categories", mail.inboxTabs.map(\.name).joined(separator: ", "))
+            guard let target = mail.conversations.first else { return }
+            mail.saveLabel(MailViewModel.LabelEditing(label: nil, applyTo: [target]), name: "Self-test label", colorHex: "#1A73E8")
+            wait("the new label") {
+                // On the server too, before its list is asked for.
+                guard let label = mail.labels.first(where: { $0.folder.name == "Self-test label" })?.folder else { return false }
+                return mail.conversations.first { $0.id == target.id }?.labelIDs.isEmpty == false
+                    && actions().contains { $0.hasPrefix("addLabel") && $0.contains(label.id) }
+            }
+        }
+        step {
+            guard let label = mail.labels.first(where: { $0.folder.name == "Self-test label" })?.folder,
+                  let target = mail.conversations.first else { return check(false, "the label is made") }
+            check(label.colorHex == "#1A73E8" && label.kind == .label, "a new label has its color")
+            check(target.labelIDs.contains(label.id), "and goes on the conversation it was made for")
+            check(!mail.moveTargets.contains { $0.id == label.id }, "labels aren't places to move mail to")
+            mail.select(folderID: label.id)
+            wait("the label's list") { mail.selectedFolderID == label.id && !mail.isLoadingList && mail.conversations.count == 1 }
+        }
+        step {
+            guard let label = mail.labels.first(where: { $0.folder.name == "Self-test label" })?.folder else { return }
+            check(mail.conversations.count == 1 && mail.listTitle == "Self-test label", "a label lists the conversations with it", mail.listTitle)
+            mail.saveLabel(MailViewModel.LabelEditing(label: label, applyTo: []), name: "Renamed label", colorHex: "#188038")
+            wait("the renamed label") { mail.labels.contains { $0.folder.name == "Renamed label" } }
+        }
+        step {
+            guard let label = mail.labels.first(where: { $0.folder.name == "Renamed label" })?.folder,
+                  let conversation = mail.conversations.first else { return check(false, "the label is renamed") }
+            check(label.colorHex == "#188038", "a label can be renamed and recolored")
+            mail.undoDelay = 0.2
+            mail.toggleLabel(label.id, on: [conversation])
+            check(mail.conversations.isEmpty, "taking the label off takes the conversation out of its list")
+            wait("the label to come off") { actions().contains { $0.hasPrefix("removeLabel") } }
+        }
+        step {
+            guard let label = mail.labels.first(where: { $0.folder.name == "Renamed label" })?.folder else { return }
+            mail.deleteLabel(label)
+            wait("the label to go") { !mail.labels.contains { $0.folder.name == "Renamed label" } && mail.currentFolder?.role == .inbox }
+        }
+        step {
+            check(!mail.labels.contains { $0.folder.name == "Renamed label" }, "a label can be deleted, back to the inbox")
+            wait("the inbox list") { !mail.isLoadingList && !mail.conversations.isEmpty }
+        }
+
+        // MARK: Inbox categories
+        step {
+            check(mail.selectedTabID == InboxCategory.primary.tabID, "the inbox opens on Primary")
+            wait("the tabs' counts") { !mail.tabUnreadCounts.isEmpty }
+        }
+        step {
+            let counts = mail.tabUnreadCounts
+            check((counts[InboxCategory.primary.tabID] ?? 0) > 0 && counts.values.reduce(0, +) == mail.unreadInbox,
+                  "each category shows its unread count, adding up to the inbox's", "\(counts) and \(mail.unreadInbox)")
+            mail.setShowsCategories(false)
+            check(mail.inboxTabs.isEmpty && mail.selectedTabID == nil, "turning categories off shows the inbox as one list")
+            wait("the whole inbox") { !mail.isLoadingList }
+        }
+        step {
+            check(mail.conversations.count == mail.folder(role: .inbox)?.totalCount, "with everything in it",
+                  "\(mail.conversations.count) of \(mail.folder(role: .inbox)?.totalCount ?? -1)")
+            mail.setShowsCategories(true)
+            wait("Primary again") { mail.selectedTabID == InboxCategory.primary.tabID && !mail.isLoadingList }
+        }
+        step {
+            guard let target = mail.conversations.first(where: { $0.subject == "Class schedule for December" }) else {
+                return check(false, "mail from people is in Primary", mail.conversations.map(\.subject).joined(separator: ", "))
+            }
+            mail.moveToCategory([target], .promotions)
+            check(!mail.conversations.contains { $0.id == target.id }, "moving a conversation to another category takes it out of this one")
+            wait("the sender's category") { mail.senderCategories.values.contains(.promotions) && app.toast?.text.contains("Promotions") == true }
+        }
+        step {
+            check(app.toast?.text.contains("goes to Promotions from now on") == true, "and says the sender's mail goes there", app.toast?.text ?? "")
+            check(mail.senderCategories.values.contains(.promotions), "the sender is remembered, for Settings")
+            mail.select(tabID: InboxCategory.promotions.tabID)
+            wait("Promotions") { mail.selectedTabID == InboxCategory.promotions.tabID && !mail.isLoadingList }
+        }
+        step {
+            check(mail.conversations.contains { $0.subject == "Class schedule for December" }, "and the conversation is in Promotions")
+            guard let sender = mail.senderCategories.first(where: { $0.value == .promotions })?.key else { return }
+            mail.setCategory(nil, forSender: sender)
+            wait("the sender to be sorted automatically again") {
+                mail.senderCategories.isEmpty && !mail.isLoadingList && !mail.conversations.contains { $0.subject == "Class schedule for December" }
+            }
+        }
+        step {
+            check(!mail.conversations.contains { $0.subject == "Class schedule for December" }, "sorting a sender automatically again takes it back out")
+            mail.select(tabID: InboxCategory.primary.tabID)
+            app.switchAccount(to: SampleData.googleID)
+            wait("the Google inbox") { session.id == SampleData.googleID && !mail.isLoadingList }
         }
 
         // MARK: Accounts, windows and menus

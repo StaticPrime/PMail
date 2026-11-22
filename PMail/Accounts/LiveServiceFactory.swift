@@ -9,7 +9,7 @@ struct LiveServiceFactory: ServiceFactory {
     /// Application Support/PMail, where accounts without servers for some things keep them.
     let folder: URL
 
-    func services(for account: Account, secrets: any SecretStore) -> AccountServices {
+    func services(for account: Account, secrets: any SecretStore, storage: AccountStorage?) -> AccountServices {
         let secret: StoredSecret?
         do {
             secret = try secrets.secret(for: account.id)
@@ -21,7 +21,7 @@ struct LiveServiceFactory: ServiceFactory {
         case .google, .microsoft:
             return webServices(for: account, secret: secret, secrets: secrets)
         case .icloud, .other:
-            return internetServices(for: account, secret: secret)
+            return internetServices(for: account, secret: secret, storage: storage)
         }
     }
 
@@ -55,9 +55,9 @@ struct LiveServiceFactory: ServiceFactory {
                                contacts: MicrosoftContactsService(tokens: tokenProvider))
     }
 
-    private func internetServices(for account: Account, secret: StoredSecret) -> AccountServices {
+    private func internetServices(for account: Account, secret: StoredSecret, storage: AccountStorage?) -> AccountServices {
         guard case let .password(password) = secret, let incoming = account.incoming else { return unavailable(.notSignedIn) }
-        let place = storage(for: account)
+        let place = self.storage(for: account)
         let sender: any MailSending = account.outgoing.map {
             SMTPSender(settings: $0, credential: .password(username: $0.username, password: password))
         } ?? NoOutgoingServer()
@@ -65,9 +65,14 @@ struct LiveServiceFactory: ServiceFactory {
         // Mail kept on this Mac: everything but the inbox for POP, and Sent, Drafts and Trash for an IMAP server
         // without them.
         let localMail = LocalMailStore(folder: place.appendingPathComponent("Mail", isDirectory: true))
+        // Labels and inbox categories, shared with the window when it has made them.
+        let labelBook = storage?.labelBook ?? LabelBook(file: place.appendingPathComponent("Labels.json"))
+        let sorter = storage?.sorter ?? InboxSorter(file: place.appendingPathComponent("Categories.json"))
         let mail: any MailService = incoming.mailProtocol == .pop3
-            ? POPMailService(account: account, incoming: incoming, credential: mailCredential, store: localMail, sender: sender)
-            : IMAPMailService(account: account, incoming: incoming, credential: mailCredential, sender: sender, localStore: localMail)
+            ? POPMailService(account: account, incoming: incoming, credential: mailCredential, store: localMail, sender: sender,
+                             labelBook: labelBook, sorter: sorter)
+            : IMAPMailService(account: account, incoming: incoming, credential: mailCredential, sender: sender, localStore: localMail,
+                              labelBook: labelBook, sorter: sorter)
         // Calendars and contacts sign in with the Apple Account (iCloud) or the account's own user name.
         let serverCredential = Credential.password(username: account.serverLoginName ?? incoming.username, password: password)
         let calendar: any CalendarService = account.calendarServer.map {

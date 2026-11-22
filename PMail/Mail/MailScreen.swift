@@ -27,6 +27,9 @@ struct MailScreen: View {
                 }
             }
         }
+        .sheet(item: Binding(get: { mail.labelEditor }, set: { mail.labelEditor = $0 })) { editing in
+            LabelEditorView(mail: mail, editing: editing)
+        }
         .confirmationDialog("Report spam", isPresented: Binding(get: { mail.spamReport != nil }, set: { if !$0 { mail.spamReport = nil } }),
                             presenting: mail.spamReport) { report in
             Button("Report Spam") { mail.finishSpamReport(report, block: .nobody) }
@@ -51,6 +54,7 @@ struct MailScreen: View {
 struct MailSidebar: View {
     let app: AppModel
     let mail: MailViewModel
+    @State private var labelToDelete: MailFolder?
 
     var body: some View {
         let expanded = app.isSidebarExpanded
@@ -78,17 +82,25 @@ struct MailSidebar: View {
                             }
                         }
                         if !mail.userFolders.isEmpty {
-                            HStack {
-                                Text(mail.capabilities.usesLabels ? "Labels" : "Folders")
-                                    .font(.pm(15, .medium))
-                                    .foregroundStyle(Theme.textPrimary)
-                                Spacer()
-                            }
-                            .padding(.leading, 26)
-                            .padding(.top, 18)
-                            .padding(.bottom, 6)
+                            sectionHeader("Folders")
                             ForEach(mail.userFolders, id: \.folder.id) { item in
                                 folderRow(item.folder, depth: item.depth)
+                            }
+                        }
+                        if mail.hasLabels {
+                            sectionHeader("Labels") {
+                                if mail.capabilities.canEditLabels {
+                                    IconButton(symbol: "plus", help: "New label", size: 28, iconSize: 12) { mail.newLabel() }
+                                }
+                            }
+                            ForEach(mail.labels, id: \.folder.id) { item in
+                                folderRow(item.folder, depth: item.depth)
+                                    .contextMenu {
+                                        if mail.capabilities.canEditLabels {
+                                            Button("Edit Label…") { mail.editLabel(item.folder) }
+                                            Button("Delete Label…") { labelToDelete = item.folder }
+                                        }
+                                    }
                             }
                         }
                         if !mail.foldersLoaded {
@@ -113,6 +125,28 @@ struct MailSidebar: View {
             Spacer(minLength: 0)
         }
         .frame(width: expanded ? 256 : 80, alignment: .leading)
+        .confirmationDialog("Delete the label “\(labelToDelete?.name ?? "")”?",
+                            isPresented: Binding(get: { labelToDelete != nil }, set: { if !$0 { labelToDelete = nil } }),
+                            presenting: labelToDelete) { label in
+            Button("Delete Label", role: .destructive) { mail.deleteLabel(label) }
+            Button("Cancel", role: .cancel) { labelToDelete = nil }
+        } message: { _ in
+            Text("Conversations with it keep everything else; only the label goes.")
+        }
+    }
+
+    private func sectionHeader(_ title: String, @ViewBuilder trailing: () -> some View = { EmptyView() }) -> some View {
+        HStack {
+            Text(title)
+                .font(.pm(15, .medium))
+                .foregroundStyle(Theme.textPrimary)
+            Spacer()
+            trailing()
+        }
+        .padding(.leading, 26)
+        .padding(.trailing, 8)
+        .padding(.top, 18)
+        .padding(.bottom, 6)
     }
 
     private func folderRow(_ folder: MailFolder, depth: Int = 0) -> some View {
@@ -133,8 +167,8 @@ struct MailSidebar: View {
         .dropDestination(for: String.self) { ids, _ in
             let conversations = mail.conversations.filter { ids.contains($0.id) }
             guard !conversations.isEmpty, folder.id != mail.selectedFolderID else { return false }
-            mail.perform(mail.capabilities.usesLabels && folder.role == nil ? .addLabel(folder.id) : .move(toFolderID: folder.id),
-                         on: conversations)
+            let isLabel = folder.kind == .label && folder.role == nil || mail.capabilities.usesLabels && folder.role == nil
+            mail.perform(isLabel ? .addLabel(folder.id) : .move(toFolderID: folder.id), on: conversations)
             return true
         }
     }

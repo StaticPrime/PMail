@@ -80,6 +80,11 @@ enum DebugLaunchOptions {
             app.sheet = .addAccount(AccountKind(rawValue: kind))
         }
         if defaults.bool(forKey: "PMSettings") { delegate.showSettings(nil) }
+        // `-PMSettingsPane accounts` (or `general`, `mail`, `signing`) opens Settings on that pane.
+        if let name = defaults.string(forKey: "PMSettingsPane")?.lowercased(),
+           let pane = SettingsWindowController.Pane.allCases.first(where: { $0.title.lowercased().hasPrefix(name) }) {
+            SettingsWindowController.show(app, pane: pane)
+        }
         if defaults.bool(forKey: "PMShowAbout") { delegate.showAboutWindow(nil) }
         if defaults.bool(forKey: "PMShortcuts") { app.sheet = .shortcuts }
         if defaults.bool(forKey: "PMAccountMenu") { app.accountMenuRequest += 1 }
@@ -139,6 +144,8 @@ enum DebugLaunchOptions {
                 } else {
                     let model = app.compose(to: [SampleData.person("Alex Kim")], subject: "Notes from today")
                     model?.setPlainBody("Hi Alex,\n\nHere are my notes from the design review. Waffles says hi!\n\nJamie")
+                    // `-PMCompose formatted` shows the formatting bar too.
+                    if compose == "formatted" { model?.showsFormatting = true }
                 }
             }
             let calendar = session.calendar

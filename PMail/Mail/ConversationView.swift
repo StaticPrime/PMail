@@ -93,7 +93,7 @@ struct ConversationView: View {
                 .textSelection(.enabled)
             ForEach(chips, id: \.id) { folder in
                 Chip(text: mail.displayName(for: folder), color: Theme.color(hexString: folder.colorHex),
-                     onRemove: mail.capabilities.usesLabels && folder.role != .inbox ? {
+                     onRemove: (folder.kind == .label && folder.role == nil) || (mail.capabilities.usesLabels && folder.role != .inbox) ? {
                          if let conversation = mail.openConversation { mail.perform(.removeLabel(folder.id), on: [conversation]) }
                      } : nil)
             }
@@ -112,7 +112,10 @@ struct ConversationView: View {
             return conversation.labelIDs.compactMap { mail.folder($0) }
                 .filter { $0.role == nil || $0.role == .inbox }.sorted { ($0.role == .inbox ? 0 : 1, $0.name) < ($1.role == .inbox ? 0 : 1, $1.name) }
         }
-        return Set(conversation.messages.compactMap(\.folderID)).compactMap { mail.folder($0) }
+        let places = Set(conversation.messages.compactMap(\.folderID)).compactMap { mail.folder($0) }
+        guard mail.hasLabels else { return places }
+        let labels = conversation.labelIDs.compactMap { mail.folder($0) }.filter { $0.kind == .label && $0.role == nil }
+        return places + labels.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 }
 

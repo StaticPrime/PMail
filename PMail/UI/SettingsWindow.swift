@@ -3,46 +3,93 @@ import PMailKit
 import ServiceManagement
 import SwiftUI
 
-/// PMail ▸ Settings: shortcuts, Undo Send, pictures in messages, and whether sign-in with Google and Microsoft is set
-/// up in this copy.
+/// PMail ▸ Settings, in panes along a toolbar so none grows taller than the screen: General (new mail, opening at
+/// login, the keyboard), Mail (Undo Send, pictures, inbox categories), Accounts (each account's blocked senders and
+/// sender categories) and Signing In.
 final class SettingsWindowController: NSWindowController {
     private static var shared: SettingsWindowController?
 
-    static func show(_ app: AppModel) {
+    enum Pane: Int, CaseIterable {
+        case general, mail, accounts, signingIn
+
+        var title: String {
+            switch self {
+            case .general: "General"
+            case .mail: "Mail"
+            case .accounts: "Accounts"
+            case .signingIn: "Signing In"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .general: "gearshape"
+            case .mail: "envelope"
+            case .accounts: "person.crop.circle"
+            case .signingIn: "key"
+            }
+        }
+
+        @MainActor func view(_ app: AppModel) -> AnyView {
+            switch self {
+            case .general: AnyView(GeneralSettings(app: app))
+            case .mail: AnyView(MailSettings(app: app))
+            case .accounts: AnyView(AccountSettings(app: app))
+            case .signingIn: AnyView(SigningInSettings(app: app))
+            }
+        }
+    }
+
+    private let tabs = NSTabViewController()
+
+    static func show(_ app: AppModel, pane: Pane? = nil) {
         let controller = shared ?? SettingsWindowController(app: app)
         shared = controller
+        if let pane { controller.tabs.selectedTabViewItemIndex = pane.rawValue }
         if controller.window?.isVisible != true { controller.window?.center() }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
     }
 
     private init(app: AppModel) {
-        let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: true)
-        window.title = "Settings"
+        tabs.tabStyle = .toolbar
+        for pane in Pane.allCases {
+            let host = NSHostingController(rootView: pane.view(app))
+            // Each pane sizes the window to fit it, and follows it as it grows (someone blocked while it's open).
+            host.sizingOptions = .preferredContentSize
+            host.title = pane.title
+            let item = NSTabViewItem(viewController: host)
+            item.label = pane.title
+            item.image = NSImage(systemSymbolName: pane.symbol, accessibilityDescription: pane.title)
+            tabs.addTabViewItem(item)
+        }
+        let window = NSWindow(contentViewController: tabs)
+        window.styleMask = [.titled, .closable]
+        window.toolbarStyle = .preference
         window.identifier = NSUserInterfaceItemIdentifier("PMailSettings")
         window.isReleasedWhenClosed = false
         window.isRestorable = false
-        let host = NSHostingController(rootView: SettingsView(app: app))
-        // The window follows the form as it grows (someone blocked while it's open).
-        host.sizingOptions = .preferredContentSize
-        window.contentViewController = host
-        window.setContentSize(host.view.fittingSize)
         super.init(window: window)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 }
 
-struct SettingsView: View {
+private extension View {
+    /// A settings pane: grouped sections at a fixed width, as tall as they need.
+    func settingsPane() -> some View {
+        formStyle(.grouped).frame(width: 520).fixedSize()
+    }
+}
+
+/// General: new mail, opening at login, and the keyboard.
+private struct GeneralSettings: View {
     let app: AppModel
-    @AppStorage("SingleKeyShortcuts") private var singleKeys = true
-    @AppStorage("UndoSendSeconds") private var undoSeconds = 5
-    @AppStorage("AlwaysShowPictures") private var alwaysShowPictures = false
     @AppStorage("NotifyNewMail") private var notifyNewMail = true
     @AppStorage("CheckMinutes") private var checkMinutes = 2
+    @AppStorage("SingleKeyShortcuts") private var singleKeys = true
     @State private var opensAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
-    @State private var blockedAccountID: UUID?
 
     var body: some View {
         Form {
@@ -59,7 +106,36 @@ struct SettingsView: View {
                 Toggle("Open PMail when I log in", isOn: Binding(get: { opensAtLogin }, set: { setOpensAtLogin($0) }))
                 if let loginError { Text(loginError).font(.pm(11.5)).foregroundStyle(.red) }
             }
-            Section("Mail") {
+            Section("Keyboard") {
+                Toggle("Single-key shortcuts (C to compose, E to archive, J and K to move…)", isOn: $singleKeys)
+                Button("Show All Shortcuts") { app.sheet = .shortcuts }
+            }
+        }
+        .settingsPane()
+    }
+
+    /// Adds PMail to (or takes it out of) the apps that open at login, so new mail and snoozes keep coming.
+    private func setOpensAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            loginError = nil
+        } catch {
+            loginError = "macOS didn’t allow it: \(error.localizedDescription)"
+        }
+        opensAtLogin = SMAppService.mainApp.status == .enabled
+    }
+}
+
+/// Mail: Undo Send, pictures, and sorting inboxes into categories.
+private struct MailSettings: View {
+    let app: AppModel
+    @AppStorage("UndoSendSeconds") private var undoSeconds = 5
+    @AppStorage("AlwaysShowPictures") private var alwaysShowPictures = false
+    @AppStorage("SortInboxCategories") private var sortsCategories = true
+
+    var body: some View {
+        Form {
+            Section("Sending and reading") {
                 Picker("Undo Send", selection: $undoSeconds) {
                     ForEach([5, 10, 20, 30], id: \.self) { Text("\($0) seconds").tag($0) }
                 }
@@ -67,38 +143,53 @@ struct SettingsView: View {
                 Text("Pictures from the internet can tell senders when you read their mail, so PMail asks first unless this is on.")
                     .font(.pm(11.5)).foregroundStyle(.secondary)
             }
-            blockedSection
-            Section("Keyboard") {
-                Toggle("Single-key shortcuts (C to compose, E to archive, J and K to move…)", isOn: $singleKeys)
-                Button("Show All Shortcuts") { app.sheet = .shortcuts }
-            }
-            Section("Signing in") {
-                LabeledContent("Google") { status(app.oauth.google != nil, variable: "PMAIL_GOOGLE_CLIENT_ID") }
-                LabeledContent("Microsoft") { status(app.oauth.microsoft != nil, variable: "PMAIL_MICROSOFT_CLIENT_ID") }
-                LabeledContent("iCloud") { Text("App-specific password").foregroundStyle(.secondary) }
-                LabeledContent("Other mail accounts") { Text("Password").foregroundStyle(.secondary) }
+            Section("Inbox categories") {
+                Toggle("Sort the inbox into categories", isOn: Binding(get: { sortsCategories }, set: { on in
+                    sortsCategories = on
+                    for session in app.accounts.sessions.values { session.mail.categoriesSettingChanged() }
+                }))
+                Text("Shows the inbox in tabs, each with its unread count: the server's own on Google and Microsoft accounts, and Primary, Transactions, Updates, Promotions and Social, sorted on this Mac, for the others. Move a conversation to another category (or drag it onto a tab) and that sender's mail goes there from now on; Accounts lists them. Off, every inbox is one list.")
+                    .font(.pm(11.5)).foregroundStyle(.secondary)
             }
         }
-        .formStyle(.grouped)
-        .frame(width: 520)
-        .fixedSize()
+        .settingsPane()
+    }
+}
+
+/// Accounts: for the account picked, the senders blocked from Report spam and the senders put in a category.
+private struct AccountSettings: View {
+    let app: AppModel
+    @State private var accountID: UUID?
+
+    /// The account showing: the one picked, else the one in the window.
+    private var account: UUID? { accountID ?? app.accounts.currentID ?? app.accounts.accounts.first?.id }
+
+    var body: some View {
+        let mail = account.flatMap { app.accounts.session(for: $0) }?.mail
+        Form {
+            if app.accounts.accounts.isEmpty {
+                Text("Add an account to see its settings here.").foregroundStyle(.secondary)
+            } else {
+                Section {
+                    Picker("Account", selection: Binding(get: { account }, set: { accountID = $0 })) {
+                        ForEach(app.accounts.accounts) { account in Text(account.email).tag(Optional(account.id)) }
+                    }
+                }
+                blockedSection(mail)
+                categoriesSection(mail)
+            }
+        }
+        .settingsPane()
+        .task(id: account) {
+            await mail?.loadBlockedSenders()
+            await mail?.loadSenderCategories()
+        }
     }
 
-    /// The account whose blocked senders show: the one picked, else the one showing in the window.
-    private var blockedAccount: UUID? {
-        blockedAccountID ?? app.accounts.currentID ?? app.accounts.accounts.first?.id
-    }
-
-    /// Senders blocked from Report spam, per account, each with Unblock.
-    private var blockedSection: some View {
-        let mail = blockedAccount.flatMap { app.accounts.session(for: $0) }?.mail
+    /// Senders blocked from Report spam, each with Unblock.
+    private func blockedSection(_ mail: MailViewModel?) -> some View {
         let blocked = mail?.blockedSenders ?? []
         return Section("Blocked senders") {
-            if app.accounts.accounts.count > 1 {
-                Picker("Account", selection: Binding(get: { blockedAccount }, set: { blockedAccountID = $0 })) {
-                    ForEach(app.accounts.accounts) { account in Text(account.email).tag(Optional(account.id)) }
-                }
-            }
             if blocked.isEmpty {
                 Text("No one is blocked. Report spam offers to block the sender, or everything from their domain, so their mail goes to \(mail?.spamFolderName ?? "Junk") as it arrives.")
                     .font(.pm(11.5)).foregroundStyle(.secondary)
@@ -117,18 +208,52 @@ struct SettingsView: View {
                 .frame(height: min(CGFloat(blocked.count) * 28, 168))
             }
         }
-        .task(id: blockedAccount) { await mail?.loadBlockedSenders() }
     }
 
-    /// Adds PMail to (or takes it out of) the apps that open at login, so new mail and snoozes keep coming.
-    private func setOpensAtLogin(_ on: Bool) {
-        do {
-            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-            loginError = nil
-        } catch {
-            loginError = "macOS didn’t allow it: \(error.localizedDescription)"
+    /// Senders put in an inbox category by hand, each with its category and Sort Automatically.
+    private func categoriesSection(_ mail: MailViewModel?) -> some View {
+        let choices = (mail?.senderCategories ?? [:]).sorted { $0.key < $1.key }
+        return Section("Senders in categories") {
+            if let mail, !choices.isEmpty {
+                ScrollView {
+                    VStack(spacing: 6) {
+                        ForEach(choices, id: \.key) { sender, category in
+                            HStack {
+                                Text(sender).textSelection(.enabled).lineLimit(1)
+                                Spacer()
+                                Picker("", selection: Binding(get: { category }, set: { mail.setCategory($0, forSender: sender) })) {
+                                    ForEach(InboxCategory.allCases, id: \.self) { Text($0.name).tag($0) }
+                                }
+                                .labelsHidden()
+                                .fixedSize()
+                                Button("Sort Automatically") { mail.setCategory(nil, forSender: sender) }
+                            }
+                        }
+                    }
+                }
+                .frame(height: min(CGFloat(choices.count) * 30, 180))
+            } else {
+                Text("Move a conversation to another category and its sender shows here, to change or to sort automatically again.")
+                    .font(.pm(11.5)).foregroundStyle(.secondary)
+            }
         }
-        opensAtLogin = SMAppService.mainApp.status == .enabled
+    }
+}
+
+/// Signing In: whether this copy can sign in to Google and Microsoft, and what the others use.
+private struct SigningInSettings: View {
+    let app: AppModel
+
+    var body: some View {
+        Form {
+            Section("Signing in") {
+                LabeledContent("Google") { status(app.oauth.google != nil, variable: "PMAIL_GOOGLE_CLIENT_ID") }
+                LabeledContent("Microsoft") { status(app.oauth.microsoft != nil, variable: "PMAIL_MICROSOFT_CLIENT_ID") }
+                LabeledContent("iCloud") { Text("App-specific password").foregroundStyle(.secondary) }
+                LabeledContent("Other mail accounts") { Text("Password").foregroundStyle(.secondary) }
+            }
+        }
+        .settingsPane()
     }
 
     private func status(_ ready: Bool, variable: String) -> some View {

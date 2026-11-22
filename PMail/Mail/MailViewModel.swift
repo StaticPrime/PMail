@@ -103,7 +103,43 @@ final class MailViewModel {
     var canReportSpam: Bool {
         service.capabilities.usesLabels || !foldersLoaded || serviceFolders.contains { $0.role == .spam }
     }
-    var inboxTabs: [InboxTab] { service.inboxTabs }
+    /// The inbox's tabs: the server's own (Primary, Promotions… or Focused and Other), or the categories PMail sorts
+    /// it into. Turned off (Settings ▸ Mail, or the list's ⋯ menu), every account shows its whole inbox in one list.
+    var inboxTabs: [InboxTab] {
+        Self.sortsIntoCategories(defaults) ? service.inboxTabs : []
+    }
+
+    /// Whether the account's inbox can be shown in categories, whether or not it is.
+    var hasInboxCategories: Bool { !service.inboxTabs.isEmpty }
+
+    /// Whether inboxes show their categories now.
+    var showsCategories: Bool { Self.sortsIntoCategories(defaults) }
+
+    /// Shows inbox categories (or not) on every account.
+    func setShowsCategories(_ on: Bool) {
+        // The accounts' defaults: the app's own, or the sample accounts' in sample runs.
+        defaults.set(on, forKey: "SortInboxCategories")
+        for session in app?.accounts.sessions.values.map({ $0 }) ?? [] { session.mail.categoriesSettingChanged() }
+        if app == nil { categoriesSettingChanged() }
+    }
+
+    /// Unread messages under each inbox tab, by tab ID, for the counts on the tabs.
+    private(set) var tabUnreadCounts: [String: Int] = [:]
+
+    /// Asks the account how many unread messages each tab has, while the inbox shows tabs.
+    func refreshTabCounts() {
+        let tabs = inboxTabs
+        guard !tabs.isEmpty, currentFolder?.role == .inbox else { return }
+        let service = self.service
+        Task {
+            if let counts = try? await service.unreadCounts(inTabs: tabs) { tabUnreadCounts = counts }
+        }
+    }
+
+    /// Whether inboxes PMail sorts itself show their categories (Settings ▸ Inbox categories; on unless turned off).
+    static func sortsIntoCategories(_ defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: "SortInboxCategories") as? Bool ?? true
+    }
 
     /// Whether the window should say it's offline: no network, or the server didn't answer.
     var isOffline: Bool { connectionTrouble || app?.sync?.isOnline == false }
@@ -132,9 +168,21 @@ final class MailViewModel {
     /// Whether "All Mail" has a row of its own (for labels, it's every message rather than a folder).
     var showsAllMail: Bool { capabilities.usesLabels }
 
-    /// The account's own folders and labels, nested under their parents, in name order.
+    /// Whether messages here can carry labels: an account whose folders are labels, or one with labels beside its
+    /// folders (categories, IMAP keywords, or labels kept on the Mac).
+    var hasLabels: Bool { capabilities.usesLabels || capabilities.canLabel }
+
+    /// The account's own folders (not labels), nested under their parents, in name order.
     var userFolders: [(folder: MailFolder, depth: Int)] {
-        let mine = folders.filter { $0.role == nil }
+        nested(folders.filter { $0.role == nil && $0.kind != .label && !capabilities.usesLabels })
+    }
+
+    /// The account's labels, nested under their parents, in name order.
+    var labels: [(folder: MailFolder, depth: Int)] {
+        nested(folders.filter { $0.role == nil && ($0.kind == .label || capabilities.usesLabels) })
+    }
+
+    private func nested(_ mine: [MailFolder]) -> [(folder: MailFolder, depth: Int)] {
         var result: [(MailFolder, Int)] = []
         func add(parent: String?, depth: Int) {
             for folder in mine.filter({ $0.parentID == parent }).sorted(by: { $0.name.localizedStandardCompare($1.name) == .orderedAscending }) {
@@ -152,7 +200,9 @@ final class MailViewModel {
     /// Folders messages can be moved to, for the Move menu.
     var moveTargets: [MailFolder] {
         folders.filter { $0.isSelectable && $0.id != selectedFolderID && $0.role != .starred && $0.role != .important
-            && $0.role != .drafts && $0.role != .snoozed && $0.role != .scheduled && $0.role != .outbox }
+            && $0.role != .drafts && $0.role != .snoozed && $0.role != .scheduled && $0.role != .outbox
+            // Labels are put on, not moved into (apart from accounts whose folders are labels).
+            && ($0.kind != .label || capabilities.usesLabels) }
     }
 
     var unreadInbox: Int { inbox?.unreadCount ?? 0 }
@@ -277,12 +327,13 @@ final class MailViewModel {
 
     /// Loads the page showing, replacing what's there (a copy from the cache shows first if the list is empty).
     func loadList() {
-        if showsLocalFolder {
-            Task { await loadLocalList() }
-            return
-        }
+        // Whatever was loading before is stale now, a server list arriving after Snoozed or Scheduled was chosen too.
         listGeneration += 1
         let generation = listGeneration
+        if showsLocalFolder {
+            Task { await loadLocalList(generation: generation) }
+            return
+        }
         let key = listKey
         let request = ListRequest(folderID: listFolderID, tabID: selectedTabID, query: activeSearch, pageSize: pageSize,
                                   pageToken: pageIndex == 0 ? nil : pageTokens[pageIndex], pageIndex: pageIndex)
@@ -300,6 +351,7 @@ final class MailViewModel {
                 isLoadingList = false
                 needsSignIn = false
                 connectionTrouble = false
+                if currentFolder?.role == .inbox { refreshTabCounts() }
                 if cacheable { await storage.cache.save(page: page, for: key) }
             } catch {
                 guard generation == listGeneration else { return }
@@ -336,7 +388,8 @@ final class MailViewModel {
     }
 
     /// Lists Snoozed, Scheduled or Outbox from the Mac.
-    private func loadLocalList() async {
+    private func loadLocalList(generation: Int? = nil) async {
+        if let generation, generation != listGeneration { return }
         listError = nil
         isLoadingList = false
         switch selectedFolderID {
@@ -710,6 +763,7 @@ final class MailViewModel {
             await cache.update(summaries: changed)
             do {
                 try await service.perform(action, on: messages)
+                if action == .markRead || action == .markUnread { refreshTabCounts() }
             } catch where Self.isConnectionProblem(error) {
                 waitingForNetwork.append(PendingAction(id: UUID(), action: action, messages: messages, listKey: listKey, snapshot: [], total: nil))
                 connectionTrouble = true
@@ -831,6 +885,7 @@ final class MailViewModel {
             try await Self.apply(item, with: service)
             if item.discardsDrafts { draftsChanged() }
             await loadFolders(thenList: false)
+            refreshTabCounts()
         } catch where Self.isConnectionProblem(error) {
             waitingForNetwork.append(item)
             connectionTrouble = true
@@ -967,6 +1022,146 @@ final class MailViewModel {
         } else {
             try await service.perform(item.action, on: item.messages)
         }
+    }
+
+    // MARK: Labels
+
+    /// A label being made or changed, for the label sheet.
+    struct LabelEditing: Identifiable {
+        let id = UUID()
+        /// The label to change; nil makes a new one.
+        let label: MailFolder?
+        /// Conversations to put a new label on once it's made.
+        let applyTo: [Conversation]
+    }
+
+    var labelEditor: LabelEditing?
+
+    func newLabel(applyingTo conversations: [Conversation] = []) {
+        labelEditor = LabelEditing(label: nil, applyTo: conversations)
+    }
+
+    func editLabel(_ label: MailFolder) {
+        labelEditor = LabelEditing(label: label, applyTo: [])
+    }
+
+    /// Makes or changes a label from the sheet; a new one goes on the conversations it was made for.
+    func saveLabel(_ editing: LabelEditing, name: String, colorHex: String?) {
+        let service = self.service
+        Task {
+            do {
+                if let label = editing.label {
+                    let updated = try await service.updateLabel(label, name: name, colorHex: colorHex)
+                    await loadFolders(thenList: false)
+                    // Listing a label whose ID changed with its name: keep listing it.
+                    if selectedFolderID == label.id, updated.id != label.id {
+                        selectedFolderID = updated.id
+                        loadList()
+                    }
+                    app?.show("Label saved.")
+                } else {
+                    let label = try await service.createLabel(named: name, colorHex: colorHex)
+                    await loadFolders(thenList: false)
+                    if !editing.applyTo.isEmpty { perform(.addLabel(label.id), on: editing.applyTo) }
+                    app?.show("Label “\(label.name)” made.")
+                }
+            } catch {
+                app?.report(error, doing: editing.label == nil ? "Making the label" : "Changing the label")
+            }
+        }
+    }
+
+    /// Deletes a label; its conversations keep everything else.
+    func deleteLabel(_ label: MailFolder) {
+        let service = self.service
+        Task {
+            do {
+                try await service.deleteLabel(label)
+                if selectedFolderID == label.id { select(folderID: inbox?.id) }
+                await loadFolders(thenList: false)
+                loadList()
+                app?.show("Label “\(label.name)” deleted.")
+            } catch {
+                app?.report(error, doing: "Deleting the label")
+            }
+        }
+    }
+
+    /// Puts a label on conversations, or takes it off when every one of them has it.
+    func toggleLabel(_ labelID: String, on conversations: [Conversation]) {
+        guard !conversations.isEmpty else { return }
+        let all = conversations.allSatisfy { $0.labelIDs.contains(labelID) }
+        perform(all ? .removeLabel(labelID) : .addLabel(labelID), on: conversations)
+    }
+
+    // MARK: Inbox categories
+
+    /// Whether the inbox's tabs are categories PMail sorts mail into on the Mac, so conversations can be moved
+    /// between them.
+    var sortsInboxOnMac: Bool { inboxTabs.first.flatMap { InboxCategory(tabID: $0.id) } != nil }
+
+    /// The category tab showing, when the inbox shows one.
+    var currentCategory: InboxCategory? { currentFolder?.role == .inbox ? InboxCategory(tabID: selectedTabID) : nil }
+
+    /// Senders put in a category by hand, for Settings.
+    private(set) var senderCategories: [String: InboxCategory] = [:]
+
+    func loadSenderCategories() async {
+        senderCategories = await storage.sorter.senderCategories()
+    }
+
+    /// Puts conversations' senders in a category from now on, which moves these conversations there too (with Undo).
+    func moveToCategory(_ conversations: [Conversation], _ category: InboxCategory) {
+        let own = account.email.lowercased()
+        var senders: [String] = []
+        for message in conversations.flatMap(\.messages) {
+            guard let email = message.from?.email.lowercased(), email != own, !senders.contains(email) else { continue }
+            senders.append(email)
+        }
+        guard !senders.isEmpty else { return }
+        // Out of the tab showing at once, when that's another category.
+        if let current = currentCategory, current != category {
+            let ids = Set(conversations.map(\.id))
+            let before = self.conversations.count
+            self.conversations.removeAll { ids.contains($0.id) }
+            if let total = totalCount { totalCount = max(0, total - (before - self.conversations.count)) }
+            checkedIDs.subtract(ids)
+            if let open = openConversation, ids.contains(open.id) { closeConversation() }
+        }
+        let sorter = storage.sorter
+        Task {
+            let earlier = await sorter.senderCategories()
+            for sender in senders { try? await sorter.setCategory(category, forSender: sender) }
+            await loadSenderCategories()
+            let who = senders.count == 1 ? senders[0] : "\(senders.count) senders"
+            app?.show("Mail from \(who) goes to \(category.name) from now on.", actionTitle: "Undo") {
+                Task {
+                    for sender in senders { try? await sorter.setCategory(earlier[sender], forSender: sender) }
+                    await self.loadSenderCategories()
+                    self.loadList()
+                }
+            }
+            loadList()
+        }
+    }
+
+    /// Changes or clears a sender's category (Settings ▸ Inbox categories); nil sorts their mail automatically again.
+    func setCategory(_ category: InboxCategory?, forSender sender: String) {
+        let sorter = storage.sorter
+        Task {
+            try? await sorter.setCategory(category, forSender: sender)
+            await loadSenderCategories()
+            if currentFolder?.role == .inbox { loadList() }
+        }
+    }
+
+    /// Sorting into categories was turned on or off: the inbox shows its tabs (or not) and lists again.
+    func categoriesSettingChanged() {
+        guard currentFolder?.role == .inbox else { return }
+        tabUnreadCounts = [:]
+        selectedTabID = inboxTabs.first?.id
+        resetPaging()
+        loadList()
     }
 
     // MARK: Spam and blocked senders

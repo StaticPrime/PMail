@@ -6,11 +6,11 @@ import PMailKit
 struct SampleServiceFactory: ServiceFactory {
     var today: @Sendable () -> Date = { AppClock.now() }
 
-    func services(for account: Account, secrets: any SecretStore) -> AccountServices {
+    func services(for account: Account, secrets: any SecretStore, storage: AccountStorage?) -> AccountServices {
         let now = today()
         let mail = SampleData.mail(for: account, today: now)
         return AccountServices(
-            mail: SampleMailService(account: account, folders: mail.folders, messages: mail.messages),
+            mail: SampleMailService(account: account, folders: mail.folders, messages: mail.messages, sorter: storage?.sorter),
             calendar: SampleCalendarService(account: account, calendars: SampleData.calendars(for: account),
                                             events: SampleData.events(for: account, today: now)),
             contacts: SampleContactsService(contacts: SampleData.contacts(for: account)))
@@ -32,24 +32,30 @@ actor SampleMailService: MailService {
 
     nonisolated let capabilities: MailCapabilities
     nonisolated let inboxTabs: [InboxTab]
+    /// Sorts a folder account's inbox into categories, as the real IMAP and POP services do.
+    nonisolated let sorter: InboxSorter?
 
-    init(account: Account, folders: [MailFolder], messages: [SampleData.Message]) {
+    init(account: Account, folders: [MailFolder], messages: [SampleData.Message], sorter: InboxSorter? = nil) {
         self.account = account
         self.folders = folders
         self.messages = messages
         switch account.kind {
         case .google:
-            capabilities = MailCapabilities(usesLabels: true, canStar: true, canMarkImportant: true, hasInboxTabs: true)
+            capabilities = MailCapabilities(usesLabels: true, canStar: true, canMarkImportant: true, hasInboxTabs: true,
+                                            canLabel: true, canEditLabels: true)
             inboxTabs = [InboxTab(id: "CATEGORY_PERSONAL", name: "Primary", symbol: "tray"),
                          InboxTab(id: "CATEGORY_PROMOTIONS", name: "Promotions", symbol: "tag"),
                          InboxTab(id: "CATEGORY_SOCIAL", name: "Social", symbol: "person.2"),
                          InboxTab(id: "CATEGORY_UPDATES", name: "Updates", symbol: "info.circle")]
+            self.sorter = nil
         case .microsoft:
-            capabilities = MailCapabilities(canMarkImportant: true, hasInboxTabs: true)
+            capabilities = MailCapabilities(canMarkImportant: true, hasInboxTabs: true, canLabel: true, canEditLabels: true)
             inboxTabs = [InboxTab(id: "focused", name: "Focused", symbol: "scope"), InboxTab(id: "other", name: "Other", symbol: "tray.full")]
+            self.sorter = nil
         default:
-            capabilities = MailCapabilities()
-            inboxTabs = []
+            capabilities = MailCapabilities(hasInboxTabs: sorter != nil, canLabel: true, canEditLabels: true)
+            inboxTabs = sorter == nil ? [] : InboxCategory.tabs
+            self.sorter = sorter
         }
     }
 
@@ -65,7 +71,10 @@ actor SampleMailService: MailService {
         switch role(id) {
         case .starred?: return summary.isStarred && summary.folderID != role(.trash) && !summary.labelIDs.contains("TRASH")
         case .important?: return summary.isImportant
-        default: return capabilities.usesLabels ? summary.labelIDs.contains(id) : summary.folderID == id
+        default:
+            // A label lists what has it, wherever it is.
+            let isLabel = folders.first { $0.id == id }?.kind == .label
+            return capabilities.usesLabels || isLabel ? summary.labelIDs.contains(id) : summary.folderID == id
         }
     }
 
@@ -87,7 +96,16 @@ actor SampleMailService: MailService {
         await pause()
         if failsLikeOffline { throw PMailError.connectionFailed("the network is off") }
         var matching = messages.filter { isIn($0, folder: request.folderID) }
-        if let tab = request.tabID { matching = matching.filter { $0.summary.labelIDs.contains(tab) } }
+        if let category = InboxCategory(tabID: request.tabID), let sorter {
+            // Sorted on the Mac, as a real IMAP or POP account's inbox is.
+            var sorted: [SampleData.Message] = []
+            for message in matching {
+                if await sorter.category(of: message.summary) == category { sorted.append(message) }
+            }
+            matching = sorted
+        } else if let tab = request.tabID {
+            matching = matching.filter { $0.summary.labelIDs.contains(tab) }
+        }
         if let query = request.query?.lowercased(), !query.isEmpty {
             let words = query.split(separator: " ").map(String.init)
             matching = matching.filter { message in
@@ -200,6 +218,48 @@ actor SampleMailService: MailService {
         messages.removeAll { $0.summary.id == draft.id }
     }
 
+    func unreadCounts(inTabs tabs: [InboxTab]) async throws -> [String: Int] {
+        await pause()
+        let unread = messages.filter { isIn($0, folder: role(.inbox)) && $0.summary.isUnread }.map(\.summary)
+        var counts: [String: Int] = [:]
+        for tab in tabs {
+            if let category = InboxCategory(tabID: tab.id), let sorter {
+                var count = 0
+                for summary in unread {
+                    if await sorter.category(of: summary) == category { count += 1 }
+                }
+                counts[tab.id] = count
+            } else {
+                counts[tab.id] = unread.filter { $0.labelIDs.contains(tab.id) }.count
+            }
+        }
+        return counts
+    }
+
+    // MARK: Labels
+
+    func createLabel(named name: String, colorHex: String?) async throws -> MailFolder {
+        await pause()
+        counter += 1
+        let label = MailFolder(id: "Label_new\(counter)", name: name, kind: .label, colorHex: colorHex)
+        folders.append(label)
+        return label
+    }
+
+    func updateLabel(_ label: MailFolder, name: String, colorHex: String?) async throws -> MailFolder {
+        await pause()
+        guard let index = folders.firstIndex(where: { $0.id == label.id }) else { throw PMailError.notFound }
+        folders[index].name = name
+        folders[index].colorHex = colorHex
+        return folders[index]
+    }
+
+    func deleteLabel(_ label: MailFolder) async throws {
+        await pause()
+        folders.removeAll { $0.id == label.id }
+        for index in messages.indices { messages[index].summary.labelIDs.removeAll { $0 == label.id } }
+    }
+
     func close() async {}
 
     // MARK: Keeping up to date
@@ -211,12 +271,19 @@ actor SampleMailService: MailService {
         let inbox = messages.filter { isIn($0, folder: role(.inbox)) }.map(\.summary)
         let newest = inbox.map(\.date).max() ?? .distantPast
         let unread = inbox.filter(\.isUnread).count
+        // Seconds since the reference date round-trip exactly, so a message isn't reported twice.
         guard let state, let seconds = Double(state.value) else {
-            return NewMail(messages: [], state: MailSyncState(String(newest.timeIntervalSince1970)), inboxUnread: unread)
+            return NewMail(messages: [], state: MailSyncState(String(newest.timeIntervalSinceReferenceDate)), inboxUnread: unread)
         }
-        let since = Date(timeIntervalSince1970: seconds)
+        let since = Date(timeIntervalSinceReferenceDate: seconds)
         let arrived = inbox.filter { $0.date > since }.sorted { $0.date > $1.date }
-        return NewMail(messages: arrived, state: MailSyncState(String(max(newest, since).timeIntervalSince1970)), inboxUnread: unread)
+        return NewMail(messages: arrived, state: MailSyncState(String(max(newest, since).timeIntervalSinceReferenceDate)), inboxUnread: unread)
+    }
+
+    /// A message's labels and folder, found by its subject, for the self-test.
+    func labels(ofSubject subject: String) -> [String] {
+        guard let summary = messages.first(where: { $0.summary.subject == subject })?.summary else { return [] }
+        return summary.labelIDs + [summary.folderID].compactMap { $0 }
     }
 
     func findMessages(withMessageIDs messageIDs: [String]) async throws -> [MessageSummary] {

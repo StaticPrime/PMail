@@ -33,6 +33,10 @@ final class ComposeModel: Identifiable {
     var references: [String] = []
     var threadID: String?
     var kind: ReplyBuilder.Kind?
+    /// Sent as plain text, without formatting or pictures in the text.
+    var isPlainText = false
+    /// Labels to put on the message once it's sent.
+    var labelIDs: Set<String> = []
     /// The draft saved on the server, replaced each time it's saved again.
     @ObservationIgnored private var savedDraft: MessageSummary?
     @ObservationIgnored private var lastSavedFingerprint = ""
@@ -45,6 +49,7 @@ final class ComposeModel: Identifiable {
         self.session = session
         let signature = session.account.signature.trimmingCharacters(in: .whitespacesAndNewlines)
         if !signature.isEmpty { setPlainBody("\n\n-- \n" + signature) }
+        isExpanded = UserDefaults.standard.bool(forKey: "ComposeFullScreen")
     }
 
     var account: Account { session.account }
@@ -116,14 +121,43 @@ final class ComposeModel: Identifiable {
 
     func outgoing() -> OutgoingMessage {
         var text = RichTextHTML.plainText(from: body)
-        var html = RichTextHTML.html(from: body)
+        var pictures: [OutgoingAttachment] = []
+        var html = isPlainText ? "" : RichTextHTML.html(from: body, images: &pictures)
         if let quotedText, let quotedHTML {
             text += "\n\n" + quotedText
             html += "<br><div class=\"pmail_quote\">" + quotedHTML + "</div>"
         }
         return OutgoingMessage(from: account.address, to: to, cc: cc, bcc: bcc, subject: subject, textBody: text,
-                               htmlBody: RichTextHTML.document(body: html), attachments: attachments, inReplyTo: inReplyTo,
-                               references: references, threadID: threadID)
+                               htmlBody: isPlainText ? nil : RichTextHTML.document(body: html), attachments: attachments + pictures,
+                               inReplyTo: inReplyTo, references: references, threadID: threadID)
+    }
+
+    /// Whether the text has formatting or pictures that plain text would lose.
+    var hasFormatting: Bool {
+        var found = false
+        let plainFont = NSFont.systemFont(ofSize: 13)
+        body.enumerateAttributes(in: NSRange(location: 0, length: body.length)) { attributes, _, stop in
+            let font = attributes[.font] as? NSFont
+            let styled = attributes[.attachment] != nil || attributes[.link] != nil || attributes[.backgroundColor] != nil
+                || (attributes[.underlineStyle] as? Int ?? 0) != 0 || (attributes[.strikethroughStyle] as? Int ?? 0) != 0
+                || (font.map { $0.familyName != plainFont.familyName || abs($0.pointSize - 13) > 0.5
+                    || !NSFontManager.shared.traits(of: $0).intersection([.boldFontMask, .italicFontMask]).isEmpty } ?? false)
+                || ((attributes[.paragraphStyle] as? NSParagraphStyle).map { !$0.textLists.isEmpty || !$0.textBlocks.isEmpty || $0.headIndent > 0
+                    || $0.alignment == .center || $0.alignment == .right } ?? false)
+            if styled {
+                found = true
+                stop.pointee = true
+            }
+        }
+        return found
+    }
+
+    /// Plain text mode on or off; turning it on keeps the words and drops the formatting.
+    func setPlainText(_ on: Bool) {
+        isPlainText = on
+        guard on else { return }
+        setPlainBody(RichTextHTML.plainText(from: body))
+        showsFormatting = false
     }
 
     /// Addresses that don't look like addresses, for the warning before sending.
@@ -170,6 +204,7 @@ final class ComposeModel: Identifiable {
         }
         do {
             try await service.send(message)
+            if !labelIDs.isEmpty { labelSentCopy(of: message) }
             if let savedDraft {
                 try? await service.deleteDraft(savedDraft)
                 session.mail.draftsChanged()
@@ -265,11 +300,33 @@ final class ComposeModel: Identifiable {
     /// deletes it. Closing it unchanged leaves the draft as it was.
     func load(draft message: MailMessage, files: [OutgoingAttachment]) {
         let summary = message.summary
+        // Pictures in its text come back into the text.
+        var html = message.htmlBody
+        for part in message.inlineParts {
+            guard let id = part.contentID?.trimmingCharacters(in: CharacterSet(charactersIn: "<> ")), let data = part.data else { continue }
+            html = html?.replacingOccurrences(of: "cid:\(id)", with: "data:\(part.mimeType);base64,\(data.base64EncodedString())")
+        }
+        isPlainText = message.htmlBody == nil
         load(OutgoingMessage(from: account.address, to: summary.to, cc: summary.cc, bcc: message.bcc, subject: summary.subject,
-                             textBody: message.textBody ?? "", htmlBody: message.htmlBody, attachments: files,
+                             textBody: message.textBody ?? "", htmlBody: html, attachments: files,
                              inReplyTo: summary.inReplyTo, references: summary.references, threadID: summary.threadID))
         savedDraft = summary
         lastSavedFingerprint = Self.fingerprint(outgoing())
+    }
+
+    /// Puts the chosen labels on the copy of a sent message, once it can be found (it can take a moment to show up).
+    private func labelSentCopy(of message: OutgoingMessage) {
+        let service = session.services.mail
+        let labels = labelIDs
+        let messageID = message.messageID
+        Task {
+            for attempt in 0..<4 {
+                if attempt > 0 { try? await Task.sleep(for: .seconds(2)) }
+                guard let found = try? await service.findMessages(withMessageIDs: [messageID]), !found.isEmpty else { continue }
+                for label in labels { try? await service.perform(.addLabel(label), on: found) }
+                return
+            }
+        }
     }
 
     /// What changed-or-not compares when closing, to save a draft only when there's something new in it.

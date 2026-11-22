@@ -71,6 +71,10 @@ private struct ListToolbar: View {
                 if !mail.showsDrafts {
                     Menu {
                         Button("Mark all as read") { mail.perform(.markRead, on: mail.conversations) }
+                        if mail.currentFolder?.role == .inbox, mail.hasInboxCategories {
+                            Divider()
+                            Toggle("Show Categories", isOn: Binding(get: { mail.showsCategories }, set: { mail.setShowsCategories($0) }))
+                        }
                     } label: {
                         Image(systemName: "ellipsis").rotationEffect(.degrees(90)).foregroundStyle(Theme.icon)
                     }
@@ -167,16 +171,20 @@ struct ConversationActions: View {
                 .frame(width: 36, height: 36)
                 .help("Move to")
             }
-            if mail.capabilities.usesLabels {
+            if mail.sortsInboxOnMac, role == .inbox {
                 Menu {
-                    ForEach(mail.userFolders, id: \.folder.id) { item in
-                        let has = targets.allSatisfy { $0.labelIDs.contains(item.folder.id) }
-                        Button {
-                            mail.perform(has ? .removeLabel(item.folder.id) : .addLabel(item.folder.id), on: targets)
-                        } label: {
-                            Label(item.folder.name, systemImage: has ? "checkmark.square" : "square")
-                        }
-                    }
+                    CategoryChoices(mail: mail, targets: targets)
+                } label: {
+                    Image(systemName: "rectangle.stack").foregroundStyle(Theme.icon)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .frame(width: 36, height: 36)
+                .help("Move to category")
+            }
+            if mail.hasLabels {
+                Menu {
+                    LabelChoices(mail: mail, targets: targets)
                 } label: {
                     Image(systemName: "tag").foregroundStyle(Theme.icon)
                 }
@@ -206,7 +214,17 @@ private struct InboxTabs: View {
     var body: some View {
         HStack(spacing: 0) {
             ForEach(mail.inboxTabs) { tab in
-                InboxTabButton(tab: tab, isSelected: mail.selectedTabID == tab.id) { mail.select(tabID: tab.id) }
+                InboxTabButton(tab: tab, isSelected: mail.selectedTabID == tab.id, unread: mail.tabUnreadCounts[tab.id]) {
+                    mail.select(tabID: tab.id)
+                }
+                    // A conversation dropped on a category tab goes there, its sender with it.
+                    .dropDestination(for: String.self) { ids, _ in
+                        guard let category = InboxCategory(tabID: tab.id), mail.sortsInboxOnMac else { return false }
+                        let conversations = mail.conversations.filter { ids.contains($0.id) }
+                        guard !conversations.isEmpty, category != mail.currentCategory else { return false }
+                        mail.moveToCategory(conversations, category)
+                        return true
+                    }
             }
             Spacer(minLength: 0)
         }
@@ -217,14 +235,26 @@ private struct InboxTabs: View {
 private struct InboxTabButton: View {
     let tab: InboxTab
     let isSelected: Bool
+    /// Unread messages under the tab, shown so nothing seems missing; nil when the account can't say.
+    var unread: Int?
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 14) {
+            HStack(spacing: 10) {
                 Image(systemName: tab.symbol).font(.system(size: 16))
                 Text(tab.name).font(.pm(13.5, isSelected ? .semibold : .medium))
+                if let unread, unread > 0 {
+                    Text(unread > 999 ? "999+" : "\(unread)")
+                        .font(.pm(11, .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(isSelected ? Color.white : Theme.textPrimary)
+                        .padding(.horizontal, 7)
+                        .frame(height: 18)
+                        .background(Capsule().fill(isSelected ? Theme.accent : Theme.hover))
+                        .help("\(unread) unread")
+                }
                 Spacer(minLength: 0)
             }
             .foregroundStyle(isSelected ? Theme.accent : Theme.textSecondary)
@@ -356,8 +386,9 @@ struct MessageRow: View {
 
     /// The user labels on the conversation, shown before the subject (not the one being listed).
     private var labelChips: [MailFolder] {
-        guard mail.capabilities.usesLabels else { return [] }
-        return conversation.labelIDs.compactMap { id in mail.folder(id) }.filter { $0.role == nil && $0.id != mail.selectedFolderID }
+        guard mail.hasLabels else { return [] }
+        return conversation.labelIDs.compactMap { id in mail.folder(id) }
+            .filter { $0.role == nil && ($0.kind == .label || mail.capabilities.usesLabels) && $0.id != mail.selectedFolderID }
             .sorted { $0.name < $1.name }.prefix(3).map { $0 }
     }
 }
@@ -461,6 +492,12 @@ private struct RowMenu: View {
                 mail.perform(targets.allSatisfy(\.isStarred) ? .unstar : .star, on: targets)
             }
         }
+        if mail.hasLabels {
+            Menu("Label as") { LabelChoices(mail: mail, targets: targets) }
+        }
+        if mail.sortsInboxOnMac, mail.currentFolder?.role == .inbox {
+            Menu("Move to category") { CategoryChoices(mail: mail, targets: targets) }
+        }
         if mail.capabilities.canMove {
             Menu("Move to") {
                 ForEach(mail.moveTargets) { folder in
@@ -527,4 +564,45 @@ struct ErrorState: View {
 
 extension MailViewModel {
     var formatting: MailFormatting { AppClock.formatting }
+}
+
+/// The account's labels with a tick for those the conversations have, each putting its label on or taking it off, and
+/// New label… to make one for them.
+struct LabelChoices: View {
+    let mail: MailViewModel
+    let targets: [Conversation]
+
+    var body: some View {
+        ForEach(mail.labels, id: \.folder.id) { item in
+            let all = !targets.isEmpty && targets.allSatisfy { $0.labelIDs.contains(item.folder.id) }
+            let some = !all && targets.contains { $0.labelIDs.contains(item.folder.id) }
+            Button {
+                mail.toggleLabel(item.folder.id, on: targets)
+            } label: {
+                Label(String(repeating: "   ", count: item.depth) + item.folder.name,
+                      systemImage: all ? "checkmark.square" : some ? "minus.square" : "square")
+            }
+        }
+        if mail.capabilities.canEditLabels {
+            if !mail.labels.isEmpty { Divider() }
+            Button("New Label…") { mail.newLabel(applyingTo: targets) }
+        }
+    }
+}
+
+/// The inbox's categories, each moving the conversations (and their senders, from now on) there.
+struct CategoryChoices: View {
+    let mail: MailViewModel
+    let targets: [Conversation]
+
+    var body: some View {
+        ForEach(InboxCategory.allCases, id: \.self) { category in
+            Button {
+                mail.moveToCategory(targets, category)
+            } label: {
+                Label(category.name, systemImage: category.symbol)
+            }
+            .disabled(category == mail.currentCategory)
+        }
+    }
 }
