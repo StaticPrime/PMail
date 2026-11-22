@@ -376,7 +376,8 @@ struct ICalendarReader {
             colorHex: component.property("COLOR").flatMap { ICalendarColor.hex(from: $0.text) },
             status: ICalendarEventProperties.status(of: component), myResponse: myResponse,
             availability: ICalendarEventProperties.availability(of: component),
-            reminderMinutes: ICalendarEventProperties.reminders(of: component), webLink: webLink, uid: component.uid)
+            reminderMinutes: ICalendarEventProperties.reminders(of: component), webLink: webLink, uid: component.uid,
+            visibility: ICalendarEventProperties.visibility(of: component))
     }
 
     // MARK: Times

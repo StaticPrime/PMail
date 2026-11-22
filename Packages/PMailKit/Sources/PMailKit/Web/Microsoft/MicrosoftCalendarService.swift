@@ -5,13 +5,17 @@ public actor MicrosoftCalendarService: CalendarService {
     let client: WebClient
     /// The events as last loaded or saved, so an update sends only what the person changed.
     private var loaded: [EventKey: CalendarEvent] = [:]
+    /// Each series' RRULE lines, from its series master (occurrences don't say how they repeat), by the master's ID.
+    private var seriesRecurrence: [String: [String]] = [:]
+    /// When each series starts, by its master's ID: a changed rule still starts there.
+    private var seriesStarts: [String: Date] = [:]
 
     static let base = Graph.root + "me/"
     /// Times come back in UTC, whatever zone an event was made in.
     static let headers = ["Prefer": "outlook.timezone=\"UTC\""]
     static let eventFields = "id,subject,body,start,end,isAllDay,location,attendees,organizer,onlineMeeting,"
         + "onlineMeetingProvider,onlineMeetingUrl,isOnlineMeeting,seriesMasterId,originalStart,originalStartTimeZone,showAs,"
-        + "isReminderOn,reminderMinutesBeforeStart,webLink,iCalUId,changeKey,responseStatus,isCancelled,type"
+        + "isReminderOn,reminderMinutesBeforeStart,webLink,iCalUId,changeKey,responseStatus,isCancelled,type,sensitivity,hideAttendees"
     /// Seconds between looks at a new event while Teams is still making its meeting.
     static let conferencePollInterval = 1.0
 
@@ -90,9 +94,37 @@ public actor MicrosoftCalendarService: CalendarService {
                 return []  // A calendar that's been removed.
             }
         }
-        let events = results.flatMap { $0 }.sorted { $0.start < $1.start }
+        let events = await withSeriesRecurrence(results.flatMap { $0 }).sorted { $0.start < $1.start }
         remember(events)
         return events
+    }
+
+    /// Fills in how repeating events repeat, from their series masters, fetching each master once.
+    private func withSeriesRecurrence(_ events: [CalendarEvent]) async -> [CalendarEvent] {
+        let missing = Set(events.compactMap(\.seriesID)).filter { seriesRecurrence[$0] == nil }
+        if !missing.isEmpty {
+            let client = self.client
+            let found = (try? await WebClient.concurrentMap(Array(missing)) { id -> (String, (lines: [String], start: Date)?) in
+                let url = try Self.url("events/\(WebURL.segment(id))", [("$select", "recurrence,start,isAllDay")])
+                let master = try? await client.get(url, headers: Self.headers)
+                return (id, master.flatMap { master in
+                    let isAllDay = master["isAllDay"].bool ?? false
+                    guard let start = Self.time(master["start"], allDay: isAllDay) else { return nil }
+                    return (Self.recurrenceLines(from: master["recurrence"], start: start, isAllDay: isAllDay), start)
+                })
+            }) ?? []
+            for (id, series) in found {
+                guard let series else { continue }
+                seriesRecurrence[id] = series.lines
+                seriesStarts[id] = series.start
+            }
+        }
+        return events.map { event in
+            guard event.recurrence.isEmpty, let seriesID = event.seriesID, let lines = seriesRecurrence[seriesID] else { return event }
+            var filled = event
+            filled.recurrence = lines
+            return filled
+        }
     }
 
     private func remember(_ events: [CalendarEvent]) {
@@ -125,7 +157,128 @@ public actor MicrosoftCalendarService: CalendarService {
                              availability: json["showAs"].string == "free" ? .free : .busy, reminderMinutes: reminders,
                              webLink: WebURL.webLink(json["webLink"].string), uid: json["iCalUId"].nonEmpty,
                              etag: json["changeKey"].nonEmpty ?? json["@odata.etag"].nonEmpty,
-                             type: json["showAs"].string == "oof" ? .outOfOffice : .event)
+                             type: json["showAs"].string == "oof" ? .outOfOffice : .event,
+                             visibility: ["private", "confidential"].contains(json["sensitivity"].string ?? "") ? .private : .default,
+                             guestsCanSeeOtherGuests: json["hideAttendees"].bool != true)
+    }
+
+    // MARK: Repeating
+
+    static let weekdayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+    static let ordinalNames = ["first": 1, "second": 2, "third": 3, "fourth": 4, "last": -1]
+
+    /// RRULE lines for Graph's description of how a series repeats (its `recurrence`); none for a missing one.
+    static func recurrenceLines(from json: JSONValue, start: Date, isAllDay: Bool) -> [String] {
+        let pattern = json["pattern"]
+        guard let type = pattern["type"].string else { return [] }
+        let interval = max(1, pattern["interval"].int ?? 1)
+        let days = pattern["daysOfWeek"].strings.compactMap { weekdayNames.firstIndex(of: $0.lowercased()) }
+        let codes = days.map { RepeatRule.weekdayCodes[$0] }
+        let ordinal = ordinalNames[pattern["index"].string ?? "first"] ?? 1
+        var parts: [String]
+        switch type {
+        case "daily": parts = ["FREQ=DAILY"]
+        case "weekly": parts = ["FREQ=WEEKLY", "BYDAY=" + codes.joined(separator: ",")]
+        case "absoluteMonthly": parts = ["FREQ=MONTHLY", "BYMONTHDAY=\(pattern["dayOfMonth"].int ?? Calendar.current.component(.day, from: start))"]
+        case "relativeMonthly": parts = ["FREQ=MONTHLY", "BYDAY=" + codes.map { "\(ordinal)\($0)" }.joined(separator: ",")]
+        case "absoluteYearly":
+            parts = ["FREQ=YEARLY", "BYMONTH=\(pattern["month"].int ?? Calendar.current.component(.month, from: start))",
+                     "BYMONTHDAY=\(pattern["dayOfMonth"].int ?? Calendar.current.component(.day, from: start))"]
+        case "relativeYearly":
+            parts = ["FREQ=YEARLY", "BYMONTH=\(pattern["month"].int ?? Calendar.current.component(.month, from: start))",
+                     "BYDAY=" + codes.map { "\(ordinal)\($0)" }.joined(separator: ",")]
+        default: return []
+        }
+        if interval > 1 { parts.insert("INTERVAL=\(interval)", at: 1) }
+        let range = json["range"]
+        switch range["type"].string {
+        case "endDate":
+            if let day = range["endDate"].string.flatMap({ WebDate.localMidnight($0) }) {
+                parts.append("UNTIL=" + RepeatRule.untilText(day, isAllDay: isAllDay, calendar: .current))
+            }
+        case "numbered":
+            if let count = range["numberOfOccurrences"].int, count > 0 { parts.append("COUNT=\(count)") }
+        default:
+            break
+        }
+        return ["RRULE:" + parts.joined(separator: ";")]
+    }
+
+    /// Graph's description of how a series repeats, for RRULE lines PMail can show; nil for one it can't.
+    static func recurrenceJSON(_ lines: [String], start: Date, isAllDay: Bool, zone: TimeZone) -> JSONValue? {
+        guard let rule = RepeatRule(lines: lines, start: start) else { return nil }
+        let calendar = Calendar.current
+        var pattern: [String: JSONValue] = ["interval": JSONValue(rule.interval)]
+        switch rule.frequency {
+        case .daily:
+            pattern["type"] = "daily"
+        case .weekly:
+            let days = rule.weekdays.isEmpty ? [calendar.component(.weekday, from: start)] : rule.weekdays.sorted()
+            pattern["type"] = "weekly"
+            pattern["daysOfWeek"] = .array(days.map { .string(weekdayNames[$0 - 1]) })
+            pattern["firstDayOfWeek"] = "sunday"
+        case .monthly:
+            if let weekdayOfMonth = rule.weekdayOfMonth {
+                pattern["type"] = "relativeMonthly"
+                pattern["daysOfWeek"] = [.string(weekdayNames[weekdayOfMonth.weekday - 1])]
+                pattern["index"] = .string(ordinalNames.first { $0.value == weekdayOfMonth.ordinal }?.key ?? "first")
+            } else {
+                pattern["type"] = "absoluteMonthly"
+                pattern["dayOfMonth"] = JSONValue(calendar.component(.day, from: start))
+            }
+        case .yearly:
+            pattern["type"] = "absoluteYearly"
+            pattern["dayOfMonth"] = JSONValue(calendar.component(.day, from: start))
+            pattern["month"] = JSONValue(calendar.component(.month, from: start))
+        }
+        var range: [String: JSONValue] = ["startDate": .string(WebDate.dateTimeString(start, in: zone).prefix(10).description),
+                                          "recurrenceTimeZone": .string(zone.identifier)]
+        switch rule.end {
+        case .never:
+            range["type"] = "noEnd"
+        case let .on(day):
+            range["type"] = "endDate"
+            range["endDate"] = .string(WebDate.dayString(day))
+        case let .after(count):
+            range["type"] = "numbered"
+            range["numberOfOccurrences"] = JSONValue(count)
+        }
+        return ["pattern": .object(pattern), "range": .object(range)]
+    }
+
+    // MARK: Free and busy
+
+    /// Busy times from Graph's schedules (work and school accounts can see each other's); for an account that can't
+    /// look people up, why not for everyone.
+    public func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy] {
+        guard !addresses.isEmpty else { return [:] }
+        let body: JSONValue = ["schedules": .array(addresses.map { .string($0) }),
+                               "startTime": ["dateTime": .string(WebDate.utcLocalString(start)), "timeZone": "UTC"],
+                               "endTime": ["dateTime": .string(WebDate.utcLocalString(end)), "timeZone": "UTC"],
+                               "availabilityViewInterval": 30]
+        let json: JSONValue
+        do {
+            json = try await client.post(Self.url("calendar/getSchedule"), body, headers: Self.headers)
+        } catch let PMailError.http(status, _) where (400..<500).contains(status) && status != 401 {
+            let reason = "This Microsoft account can’t look up other people’s busy times (only work and school accounts can)."
+            return Dictionary(addresses.map { ($0, FreeBusy.unknown(reason)) }, uniquingKeysWith: { first, _ in first })
+        }
+        var found: [String: FreeBusy] = [:]
+        for item in json["value"].array {
+            guard let id = item["scheduleId"].string?.lowercased() else { continue }
+            if let message = item["error"]["message"].nonEmpty {
+                found[id] = .unknown(message)
+                continue
+            }
+            let busy = item["scheduleItems"].array.compactMap { entry -> DateInterval? in
+                guard ["busy", "tentative", "oof"].contains(entry["status"].string ?? "busy"),
+                      let from = Self.time(entry["start"], allDay: false), let to = Self.time(entry["end"], allDay: false), to > from else { return nil }
+                return DateInterval(start: from, end: to)
+            }
+            found[id] = FreeBusy(busy: busy.sorted { $0.start < $1.start })
+        }
+        return Dictionary(addresses.map { ($0, found[$0.lowercased()] ?? .unknown("Their busy times couldn’t be found.")) },
+                          uniquingKeysWith: { first, _ in first })
     }
 
     /// A start or end. All-day events become local midnight of their date; others are read in their own zone (UTC).
@@ -205,12 +358,15 @@ public actor MicrosoftCalendarService: CalendarService {
         let wholeSeries = scope == .allEvents && event.seriesID != nil
         let targetID = wholeSeries ? (event.seriesID ?? event.id) : event.id
         var body = Self.body(for: event, original: original, isNew: false, includeTimes: !wholeSeries,
-                             addingConference: addingConference)
+                             addingConference: addingConference, seriesStart: event.seriesID.flatMap { seriesStarts[$0] })
         if addingConference {
             body["isOnlineMeeting"] = true
             body["onlineMeetingProvider"] = "teamsForBusiness"
         }
         guard !body.isEmpty else { return event }
+        if body["recurrence"] != nil, let seriesID = event.seriesID {
+            seriesRecurrence[seriesID] = nil  // Read again with the next load.
+        }
         var saved = try await client.patch(Self.eventURL(targetID), .object(body), headers: Self.headers)
         if addingConference { saved = await waitForJoinURL(saved) }
         if wholeSeries, let occurrence = try? await client.get(Self.eventURL(event.id, forReading: true), headers: Self.headers) {
@@ -262,7 +418,7 @@ public actor MicrosoftCalendarService: CalendarService {
     /// The fields to send for an event: everything for a new one; for a change, only what differs from the event as
     /// it was loaded (or everything when it wasn't loaded here).
     static func body(for event: CalendarEvent, original: CalendarEvent?, isNew: Bool, includeTimes: Bool,
-                     addingConference: Bool) -> [String: JSONValue] {
+                     addingConference: Bool, seriesStart: Date? = nil) -> [String: JSONValue] {
         let edited = WebEvents.withPastedLink(event, original: original, addingConference: addingConference)
         func changed<Value: Equatable>(_ field: KeyPath<CalendarEvent, Value>) -> Bool {
             original.map { $0[keyPath: field] != edited[keyPath: field] } ?? true
@@ -287,10 +443,36 @@ public actor MicrosoftCalendarService: CalendarService {
                 let zoneName = JSONValue.string(zone.identifier)
                 body["start"] = ["dateTime": .string(WebDate.dateTimeString(first, in: zone)), "timeZone": zoneName]
                 body["end"] = ["dateTime": .string(WebDate.dateTimeString(last, in: zone)), "timeZone": zoneName]
+            } else if !edited.recurrence.isEmpty {
+                // A repeating event keeps its time of day where the Mac is, across daylight saving changes.
+                let zone = TimeZone.current
+                body["start"] = ["dateTime": .string(WebDate.dateTimeString(edited.start, in: zone)), "timeZone": .string(zone.identifier)]
+                body["end"] = ["dateTime": .string(WebDate.dateTimeString(max(edited.end, edited.start), in: zone)),
+                               "timeZone": .string(zone.identifier)]
             } else {
                 body["start"] = ["dateTime": .string(WebDate.utcLocalString(edited.start)), "timeZone": "UTC"]
                 body["end"] = ["dateTime": .string(WebDate.utcLocalString(max(edited.end, edited.start))), "timeZone": "UTC"]
             }
+        }
+        // How it repeats: Graph's own description of the rule; no rule stops it repeating.
+        if changed(\.recurrence) {
+            if let recurrence = recurrenceJSON(edited.recurrence, start: seriesStart ?? edited.start, isAllDay: edited.isAllDay, zone: .current) {
+                body["recurrence"] = recurrence
+                if body["start"] == nil, includeTimes || isNew {
+                    let zone = TimeZone.current
+                    body["start"] = ["dateTime": .string(WebDate.dateTimeString(edited.start, in: zone)), "timeZone": .string(zone.identifier)]
+                    body["end"] = ["dateTime": .string(WebDate.dateTimeString(max(edited.end, edited.start), in: zone)),
+                                   "timeZone": .string(zone.identifier)]
+                }
+            } else if edited.recurrence.isEmpty, original?.recurrence.isEmpty == false {
+                body["recurrence"] = .null
+            }
+        }
+        if changed(\.visibility), !(isNew && edited.visibility == .default) {
+            body["sensitivity"] = edited.visibility == .private ? "private" : "normal"
+        }
+        if changed(\.guestsCanSeeOtherGuests), !(isNew && edited.guestsCanSeeOtherGuests) {
+            body["hideAttendees"] = .bool(!edited.guestsCanSeeOtherGuests)
         }
         if changed(\.attendees), !(isNew && edited.attendees.isEmpty) {
             body["attendees"] = .array(edited.attendees.map { attendee -> JSONValue in

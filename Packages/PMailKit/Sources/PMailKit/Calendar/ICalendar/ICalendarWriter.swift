@@ -274,7 +274,7 @@ struct ICalendarWriter {
 
     /// The parts of an event the writer compares and writes one at a time, in the order a new VEVENT has them.
     private enum Field: CaseIterable {
-        case title, location, notes, conference, status, availability, color, organizer, attendees, myResponse, reminders
+        case title, location, notes, conference, status, availability, color, organizer, attendees, myResponse, reminders, visibility
     }
 
     private func isSame(_ field: Field, _ first: CalendarEvent, _ second: CalendarEvent) -> Bool {
@@ -292,6 +292,7 @@ struct ICalendarWriter {
         case .attendees: return attendeeSummary(first) == attendeeSummary(second)
         case .myResponse: return first.myResponse == second.myResponse
         case .reminders: return Set(first.reminderMinutes) == Set(second.reminderMinutes)
+        case .visibility: return first.visibility == second.visibility
         }
     }
 
@@ -336,6 +337,14 @@ struct ICalendarWriter {
             if let response = event.myResponse { setOwnerResponse(response, in: &component) }
         case .reminders:
             writeReminders(event.reminderMinutes, into: &component)
+        case .visibility:
+            // A private CONFIDENTIAL another program set stays as it is.
+            if event.visibility == .private, component.property("CLASS")?.value.uppercased() == "CONFIDENTIAL" { return }
+            switch event.visibility {
+            case .default: component.removeProperties("CLASS")
+            case .public: component.setProperty(ICalendarLine("CLASS", value: "PUBLIC"))
+            case .private: component.setProperty(ICalendarLine("CLASS", value: "PRIVATE"))
+            }
         }
     }
 

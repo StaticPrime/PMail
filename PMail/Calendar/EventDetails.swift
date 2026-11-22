@@ -137,11 +137,22 @@ struct EventDetailsView: View {
                         .frame(maxHeight: 180)
                 }
             }
-            if let minutes = event.reminderMinutes.first {
-                row(icon: "bell") { Text(EventDetailsView.reminderText(minutes)).font(.pm(13)).foregroundStyle(Theme.textPrimary) }
+            if !event.reminderMinutes.isEmpty {
+                row(icon: "bell") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(event.reminderMinutes.sorted(), id: \.self) { minutes in
+                            Text(EventDetailsView.reminderText(minutes)).font(.pm(13)).foregroundStyle(Theme.textPrimary)
+                        }
+                    }
+                }
             }
             if let calendarInfo {
                 row(icon: calendarInfo.isTaskList ? "checklist" : "calendar") { Text(calendarInfo.name).font(.pm(13)).foregroundStyle(Theme.textPrimary) }
+            }
+            if event.visibility != .default {
+                row(icon: event.visibility == .private ? "lock" : "globe") {
+                    Text(event.visibility.name).font(.pm(13)).foregroundStyle(Theme.textPrimary)
+                }
             }
             if let response = event.myResponse, !(event.organizer?.isSameMailbox(as: model.account.email) ?? false) {
                 Divider().overlay(Theme.divider).padding(.vertical, 8)
@@ -190,25 +201,16 @@ struct EventDetailsView: View {
                 waiting > 0 ? "\(waiting) awaiting" : nil].compactMap { $0 }.joined(separator: ", ")
     }
 
+    /// How it repeats, in words ("Weekly on Monday, Wednesday"), or just that it does.
     private var recurrenceText: String {
-        let rule = event.recurrence.first { $0.uppercased().hasPrefix("RRULE:") }?.uppercased() ?? ""
-        if rule.contains("FREQ=DAILY") { return "Daily" }
-        if rule.contains("BYDAY=MO,TU,WE,TH,FR") { return "Every weekday" }
-        if rule.contains("FREQ=WEEKLY") { return "Weekly" }
-        if rule.contains("FREQ=MONTHLY") { return "Monthly" }
-        if rule.contains("FREQ=YEARLY") { return "Annually" }
-        return "Repeats"
+        RepeatRule(lines: event.recurrence, start: event.start, calendar: model.calendar)?.summary(start: event.start, calendar: model.calendar)
+            ?? "Repeats"
     }
 
     static func reminderText(_ minutes: Int) -> String {
-        switch minutes {
-        case 0: "At the start"
-        case 1..<60: "\(minutes) minutes before"
-        case 60: "1 hour before"
-        case 61..<1440: "\(minutes / 60) hours before"
-        case 1440: "1 day before"
-        default: "\(minutes / 1440) days before"
-        }
+        guard minutes > 0 else { return "At the start" }
+        let reminder = Reminder(minutes: minutes)
+        return "\(reminder.amount) \(reminder.unit.name(reminder.amount)) before"
     }
 
     private func displayLink(_ url: URL) -> String {

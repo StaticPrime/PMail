@@ -3,6 +3,42 @@ import Observation
 import PMailKit
 import SwiftUI
 
+/// A notification before an event: so many minutes, hours, days or weeks.
+struct Reminder: Hashable {
+    enum Unit: Int, CaseIterable {
+        case minutes = 1
+        case hours = 60
+        case days = 1_440
+        case weeks = 10_080
+
+        func name(_ amount: Int) -> String {
+            let one = amount == 1
+            switch self {
+            case .minutes: return one ? "minute" : "minutes"
+            case .hours: return one ? "hour" : "hours"
+            case .days: return one ? "day" : "days"
+            case .weeks: return one ? "week" : "weeks"
+            }
+        }
+    }
+
+    var amount: Int
+    var unit: Unit
+
+    init(amount: Int, unit: Unit) {
+        self.amount = amount
+        self.unit = unit
+    }
+
+    /// The biggest unit the minutes come to evenly: 60 is 1 hour, 1,440 is 1 day.
+    init(minutes: Int) {
+        let unit = Unit.allCases.reversed().first { minutes > 0 && minutes % $0.rawValue == 0 } ?? .minutes
+        self.init(amount: minutes / unit.rawValue, unit: unit)
+    }
+
+    var minutes: Int { max(0, amount) * unit.rawValue }
+}
+
 /// An event being made or changed in the event editor.
 struct EventDraft: Identifiable, Hashable {
     var id = UUID()
@@ -21,7 +57,12 @@ struct EventDraft: Identifiable, Hashable {
     /// A meeting already on the event, or a FaceTime link pasted in.
     var conference: Conference?
     var faceTimeLink = ""
-    var reminderMinutes: Int? = 10
+    /// Its notifications, soonest first or as the person added them.
+    var reminders: [Reminder] = [Reminder(minutes: 10)]
+    /// How it repeats; nil for not at all.
+    var repeatRule: RepeatRule?
+    /// The event repeats by a rule the editor can't show, which is kept unless another is chosen.
+    var keepsOwnRule = false
     var colorHex: String?
     var availability: EventAvailability = .busy
     var scope: RecurrenceScope = .thisEvent
@@ -32,8 +73,21 @@ struct EventDraft: Identifiable, Hashable {
     var declineMessage = ""
     /// A task: whether it's done.
     var isCompleted = false
+    var visibility: EventVisibility = .default
+    var guestsCanModify = false
+    var guestsCanInviteOthers = true
+    var guestsCanSeeOtherGuests = true
 
     var isNew: Bool { original == nil }
+    /// Whether the person changed how it repeats (or made a new repeating event).
+    var changesRepeat: Bool {
+        guard let original else { return repeatRule != nil }
+        if keepsOwnRule { return false }
+        let before = RepeatRule(lines: original.recurrence, start: original.start)
+        // A rule the editor couldn't show, replaced by another (or by none).
+        if before == nil, !original.recurrence.isEmpty { return true }
+        return repeatRule?.normalized(start: original.start) != before?.normalized(start: original.start)
+    }
     var isTask: Bool { type == .task }
 }
 
@@ -263,6 +317,17 @@ final class CalendarViewModel {
     /// Where new tasks go: the list the provider makes the default.
     var defaultTaskList: CalendarInfo? { taskLists.first(where: \.isPrimary) ?? taskLists.first }
 
+    /// What the account's calendars keep for an event: how many notifications, which visibilities and guest
+    /// permissions, and whether other people's busy times can be looked up.
+    var features: CalendarFeatures {
+        switch account.kind {
+        case .google: .google
+        case .microsoft: .microsoft
+        case .icloud: .basic
+        case .other: account.calendarServer == nil ? .basic : .calDAV
+        }
+    }
+
     func isVisible(_ calendar: CalendarInfo) -> Bool { !hiddenCalendarIDs.contains(calendar.id) }
 
     func toggle(_ calendar: CalendarInfo) {
@@ -323,7 +388,7 @@ final class CalendarViewModel {
                                     : begin.addingTimeInterval(3600))
         var draft = EventDraft(calendarID: calendarInfo.id, start: allDay ? calendar.startOfDay(for: begin) : begin, end: finish,
                                isAllDay: allDay, guests: guests)
-        draft.reminderMinutes = allDay ? nil : 10
+        draft.reminders = allDay ? [] : [Reminder(minutes: 10)]
         if type != .event {
             guard type != .task || defaultTaskList != nil else { return nil }
             retype(&draft, as: type)
@@ -377,18 +442,18 @@ final class CalendarViewModel {
         switch type {
         case .task:
             if let list = defaultTaskList { draft.calendarID = list.id }
-            (draft.isAllDay, draft.start, draft.end, draft.reminderMinutes) = (true, day, nextDay, nil)
+            (draft.isAllDay, draft.start, draft.end, draft.reminders, draft.repeatRule) = (true, day, nextDay, [], nil)
         case .outOfOffice:
-            (draft.isAllDay, draft.start, draft.end, draft.reminderMinutes) = (true, day, nextDay, nil)
+            (draft.isAllDay, draft.start, draft.end, draft.reminders) = (true, day, nextDay, [])
         case .focusTime:
             if draft.isAllDay {
                 draft.start = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day) ?? day
             }
-            (draft.isAllDay, draft.end, draft.reminderMinutes) = (false, draft.start.addingTimeInterval(2 * 3_600), 10)
+            (draft.isAllDay, draft.end, draft.reminders) = (false, draft.start.addingTimeInterval(2 * 3_600), [Reminder(minutes: 10)])
         case .event:
             if draft.isAllDay {
                 draft.start = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day) ?? day
-                (draft.isAllDay, draft.end, draft.reminderMinutes) = (false, draft.start.addingTimeInterval(3_600), 10)
+                (draft.isAllDay, draft.end, draft.reminders) = (false, draft.start.addingTimeInterval(3_600), [Reminder(minutes: 10)])
             }
         }
     }
@@ -397,10 +462,15 @@ final class CalendarViewModel {
         var draft = EventDraft(original: event, calendarID: event.calendarID, title: event.title, start: event.start, end: event.end,
                                isAllDay: event.isAllDay, location: event.location ?? "", notes: event.notes ?? "",
                                guests: event.attendees.filter { !$0.address.isSameMailbox(as: account.email) }.map(\.address),
-                               conference: event.conference, reminderMinutes: event.reminderMinutes.first,
+                               conference: event.conference, reminders: event.reminderMinutes.map(Reminder.init(minutes:)),
                                colorHex: event.colorHex, availability: event.availability, type: event.type,
                                declinesInvitations: event.declinesInvitations, declineMessage: event.declineMessage ?? "",
-                               isCompleted: event.isCompleted)
+                               isCompleted: event.isCompleted, visibility: event.visibility, guestsCanModify: event.guestsCanModify,
+                               guestsCanInviteOthers: event.guestsCanInviteOthers, guestsCanSeeOtherGuests: event.guestsCanSeeOtherGuests)
+        if !event.recurrence.isEmpty {
+            draft.repeatRule = RepeatRule(lines: event.recurrence, start: event.start, calendar: calendar)
+            draft.keepsOwnRule = draft.repeatRule == nil
+        }
         if event.conference?.kind == .faceTime { draft.faceTimeLink = event.conference?.joinURL.absoluteString ?? "" }
         return draft
     }
@@ -427,7 +497,20 @@ final class CalendarViewModel {
         } else if draft.conference == nil {
             event.conference = nil
         }
-        event.reminderMinutes = draft.reminderMinutes.map { [$0] } ?? []
+        // Each notification once, as many as the calendar keeps.
+        var minutes: [Int] = []
+        for reminder in draft.reminders where !minutes.contains(reminder.minutes) { minutes.append(reminder.minutes) }
+        event.reminderMinutes = Array(minutes.prefix(features.maximumReminders))
+        if draft.changesRepeat {
+            // A new rule keeps the dates taken out one at a time.
+            let exceptions = event.recurrence.filter { $0.uppercased().hasPrefix("EXDATE") }
+            let first = draft.original?.isRecurring == true ? (draft.original?.start ?? draft.start) : draft.start
+            event.recurrence = draft.repeatRule.map { exceptions + [$0.rrule(start: first, isAllDay: draft.isAllDay, calendar: calendar)] } ?? []
+        }
+        event.visibility = features.visibilities.contains(draft.visibility) ? draft.visibility : .default
+        event.guestsCanModify = draft.guestsCanModify
+        event.guestsCanInviteOthers = draft.guestsCanInviteOthers
+        event.guestsCanSeeOtherGuests = draft.guestsCanSeeOtherGuests
         event.colorHex = draft.colorHex
         event.availability = draft.availability
         event.type = draft.type
@@ -435,13 +518,17 @@ final class CalendarViewModel {
         let message = draft.declineMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         event.declineMessage = event.declinesInvitations && !message.isEmpty ? message : nil
         let saved: CalendarEvent
+        // A new rule for a repeating event is for the whole series.
+        let scope = draft.changesRepeat && draft.original?.isRecurring == true ? .allEvents : draft.scope
         if draft.original == nil {
             saved = try await service.create(event, addingConference: draft.addsNativeConference)
         } else {
-            saved = try await service.update(event, scope: draft.scope, addingConference: draft.addsNativeConference)
+            saved = try await service.update(event, scope: scope, addingConference: draft.addsNativeConference)
         }
         changeCount += 1
-        if draft.original != nil, draft.scope == .allEvents || draft.original?.calendarID != saved.calendarID {
+        // A repeating event's other times come with the next load.
+        if draft.changesRepeat || (draft.original != nil && (scope == .allEvents || draft.original?.calendarID != saved.calendarID)) {
+            if draft.repeatRule == nil { events.removeAll { $0.id == saved.id || $0.id == draft.original?.id } }
             reload()
         } else {
             events.removeAll { $0.id == saved.id || $0.id == draft.original?.id }

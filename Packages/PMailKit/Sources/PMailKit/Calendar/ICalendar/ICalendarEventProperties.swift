@@ -76,6 +76,15 @@ enum ICalendarEventProperties {
         }
     }
 
+    /// CLASS: PUBLIC, PRIVATE (or CONFIDENTIAL, shown as private), or nothing for the calendar's default.
+    static func visibility(of component: ICalendarComponent) -> EventVisibility {
+        switch component.property("CLASS")?.value.trimmingCharacters(in: .whitespaces).uppercased() {
+        case "PUBLIC": .public
+        case "PRIVATE", "CONFIDENTIAL": .private
+        default: .default
+        }
+    }
+
     static func availability(of component: ICalendarComponent) -> EventAvailability {
         component.property("TRANSP")?.value.trimmingCharacters(in: .whitespaces).uppercased() == "TRANSPARENT" ? .free : .busy
     }

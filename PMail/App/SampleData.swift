@@ -431,6 +431,38 @@ enum SampleData {
         return tasks
     }
 
+    /// When a sample person is busy: Alex in the late morning and mid-afternoon, Priya on Tuesday and Thursday mornings
+    /// and after lunch, everyone else late on Monday, Wednesday and Friday mornings; Zoe doesn't share her calendar.
+    nonisolated static func freeBusy(for address: String, from start: Date, to end: Date) -> FreeBusy {
+        let email = address.lowercased()
+        if email == "zoe.anderson@example.org" { return .unknown("Their calendar isn’t shared with you.") }
+        let calendar = Calendar.current
+        var busy: [DateInterval] = []
+        var day = calendar.startOfDay(for: start)
+        while day < end {
+            let weekday = calendar.component(.weekday, from: day)
+            func block(_ hour: Int, _ minute: Int, minutes: Int) {
+                guard let begin = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: day) else { return }
+                let stretch = DateInterval(start: begin, duration: TimeInterval(minutes * 60))
+                if stretch.end > start, stretch.start < end { busy.append(stretch) }
+            }
+            if (2...6).contains(weekday) {
+                switch email {
+                case "alex.kim@example.com":
+                    block(10, 0, minutes: 60)
+                    block(14, 0, minutes: 90)
+                case "priya@example.com":
+                    if weekday == 3 || weekday == 5 { block(9, 0, minutes: 180) }
+                    block(13, 0, minutes: 60)
+                default:
+                    if weekday % 2 == 0 { block(11, 0, minutes: 60) }
+                }
+            }
+            day = calendar.date(byAdding: .day, value: 1, to: day) ?? end
+        }
+        return FreeBusy(busy: busy)
+    }
+
     /// A few holidays on their real dates, this year and next.
     static func holidays(around today: Date) -> [(String, Date)] {
         let calendar = Calendar.current

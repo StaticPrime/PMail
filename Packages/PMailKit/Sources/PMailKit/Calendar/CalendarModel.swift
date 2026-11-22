@@ -105,6 +105,87 @@ public enum EventAvailability: String, Codable, Sendable, Hashable {
     case free
 }
 
+/// Who can see an event's details: whatever the calendar's sharing says, everyone who can see the calendar, or only
+/// the people who can change it (others see the time as busy).
+public enum EventVisibility: String, Codable, Sendable, Hashable, CaseIterable {
+    case `default`
+    case `public`
+    case `private`
+
+    public var name: String {
+        switch self {
+        case .default: "Default visibility"
+        case .public: "Public"
+        case .private: "Private"
+        }
+    }
+}
+
+/// What guests may do with an event besides coming to it.
+public enum GuestPermission: String, Sendable, Hashable, CaseIterable {
+    /// Change the event.
+    case modify
+    /// Invite other people.
+    case inviteOthers
+    /// See who else is invited.
+    case seeGuestList
+
+    public var name: String {
+        switch self {
+        case .modify: "Modify event"
+        case .inviteOthers: "Invite others"
+        case .seeGuestList: "See guest list"
+        }
+    }
+}
+
+/// What an account's calendars keep for an event beyond the basics, so the window offers only that.
+public struct CalendarFeatures: Sendable, Hashable {
+    /// The most notifications an event can have.
+    public var maximumReminders: Int
+    /// The visibilities an event can be given (none: the calendar has no such setting).
+    public var visibilities: [EventVisibility]
+    /// The guest permissions the calendar keeps.
+    public var guestPermissions: [GuestPermission]
+    /// Whether other people's busy times can be looked up (`CalendarService.freeBusy`).
+    public var looksUpBusyTimes: Bool
+
+    public init(maximumReminders: Int, visibilities: [EventVisibility], guestPermissions: [GuestPermission], looksUpBusyTimes: Bool) {
+        self.maximumReminders = maximumReminders
+        self.visibilities = visibilities
+        self.guestPermissions = guestPermissions
+        self.looksUpBusyTimes = looksUpBusyTimes
+    }
+
+    /// Google calendars: five notifications, all three visibilities and guest permissions, and free/busy lookups.
+    public static let google = CalendarFeatures(maximumReminders: 5, visibilities: EventVisibility.allCases,
+                                                guestPermissions: GuestPermission.allCases, looksUpBusyTimes: true)
+    /// Microsoft calendars: one notification, normal or private, whether guests see each other, and free/busy lookups
+    /// (for work and school accounts).
+    public static let microsoft = CalendarFeatures(maximumReminders: 1, visibilities: [.default, .private],
+                                                   guestPermissions: [.seeGuestList], looksUpBusyTimes: true)
+    /// CalDAV servers that keep an event's CLASS: several notifications and the three visibilities.
+    public static let calDAV = CalendarFeatures(maximumReminders: 5, visibilities: EventVisibility.allCases, guestPermissions: [],
+                                                looksUpBusyTimes: false)
+    /// iCloud calendars and calendars kept on the Mac: several notifications, nothing more.
+    public static let basic = CalendarFeatures(maximumReminders: 5, visibilities: [], guestPermissions: [], looksUpBusyTimes: false)
+}
+
+/// When someone is busy, from their calendar, or why that isn't known.
+public struct FreeBusy: Sendable, Hashable {
+    /// The busy stretches, in order.
+    public var busy: [DateInterval]
+    /// Why their busy times aren't known (their calendar isn't shared, say); nil when they are.
+    public var problem: String?
+
+    public init(busy: [DateInterval] = [], problem: String? = nil) {
+        self.busy = busy
+        self.problem = problem
+    }
+
+    public static func unknown(_ problem: String) -> FreeBusy { FreeBusy(problem: problem) }
+}
+
 /// What kind of item is on the calendar.
 public enum EventType: String, Codable, Sendable, Hashable, CaseIterable {
     case event
@@ -192,6 +273,12 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
     /// that time are declined, and the message they're declined with.
     public var declinesInvitations: Bool
     public var declineMessage: String?
+    /// Who can see its details.
+    public var visibility: EventVisibility
+    /// What its guests may do, where the calendar keeps it: change it, invite others, see the guest list.
+    public var guestsCanModify: Bool
+    public var guestsCanInviteOthers: Bool
+    public var guestsCanSeeOtherGuests: Bool
 
     public init(id: String = UUID().uuidString, calendarID: String, title: String = "", start: Date, end: Date,
                 isAllDay: Bool = false, timeZone: String? = nil, location: String? = nil, notes: String? = nil,
@@ -199,7 +286,9 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
                 recurrence: [String] = [], seriesID: String? = nil, occurrenceDate: Date? = nil, status: Status = .confirmed,
                 myResponse: AttendeeResponse? = nil, availability: EventAvailability = .busy, reminderMinutes: [Int] = [],
                 webLink: URL? = nil, uid: String? = nil, resourceHref: String? = nil, etag: String? = nil, type: EventType = .event,
-                isCompleted: Bool = false, isTypeLocal: Bool = false, declinesInvitations: Bool = false, declineMessage: String? = nil) {
+                isCompleted: Bool = false, isTypeLocal: Bool = false, declinesInvitations: Bool = false, declineMessage: String? = nil,
+                visibility: EventVisibility = .default, guestsCanModify: Bool = false, guestsCanInviteOthers: Bool = true,
+                guestsCanSeeOtherGuests: Bool = true) {
         self.id = id
         self.calendarID = calendarID
         self.title = title
@@ -229,6 +318,10 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
         self.isTypeLocal = isTypeLocal
         self.declinesInvitations = declinesInvitations
         self.declineMessage = declineMessage
+        self.visibility = visibility
+        self.guestsCanModify = guestsCanModify
+        self.guestsCanInviteOthers = guestsCanInviteOthers
+        self.guestsCanSeeOtherGuests = guestsCanSeeOtherGuests
     }
 
     /// Whether this is one occurrence of a repeating event.
@@ -239,7 +332,8 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
 }
 
 extension CalendarEvent {
-    /// Events saved before there were kinds of event read as events.
+    /// Events saved before there were kinds of event read as events (and before visibility and guest permissions, with
+    /// the usual ones).
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(id: try c.decode(String.self, forKey: .id), calendarID: try c.decode(String.self, forKey: .calendarID),
@@ -261,7 +355,11 @@ extension CalendarEvent {
                   isCompleted: try c.decodeIfPresent(Bool.self, forKey: .isCompleted) ?? false,
                   isTypeLocal: try c.decodeIfPresent(Bool.self, forKey: .isTypeLocal) ?? false,
                   declinesInvitations: try c.decodeIfPresent(Bool.self, forKey: .declinesInvitations) ?? false,
-                  declineMessage: try c.decodeIfPresent(String.self, forKey: .declineMessage))
+                  declineMessage: try c.decodeIfPresent(String.self, forKey: .declineMessage),
+                  visibility: try c.decodeIfPresent(EventVisibility.self, forKey: .visibility) ?? .default,
+                  guestsCanModify: try c.decodeIfPresent(Bool.self, forKey: .guestsCanModify) ?? false,
+                  guestsCanInviteOthers: try c.decodeIfPresent(Bool.self, forKey: .guestsCanInviteOthers) ?? true,
+                  guestsCanSeeOtherGuests: try c.decodeIfPresent(Bool.self, forKey: .guestsCanSeeOtherGuests) ?? true)
     }
 }
 
@@ -332,4 +430,15 @@ public protocol CalendarService: AnyObject, Sendable {
 
     /// Answers an invitation for the account's owner.
     func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws
+
+    /// When people (by email address) are busy in `start..<end`, as far as the provider can tell: each one's busy
+    /// times, or why they aren't known. Calendars that can't look people up say so for everyone.
+    func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy]
+}
+
+extension CalendarService {
+    public func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy] {
+        Dictionary(addresses.map { ($0, FreeBusy.unknown("This account’s calendar can’t look up other people’s busy times.")) },
+                   uniquingKeysWith: { first, _ in first })
+    }
 }

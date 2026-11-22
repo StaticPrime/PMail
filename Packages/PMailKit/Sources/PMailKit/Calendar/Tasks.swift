@@ -72,6 +72,10 @@ public final class CalendarWithTasks: CalendarService {
         try await calendars.respond(to: event, with: response)
     }
 
+    public func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy] {
+        try await calendars.freeBusy(for: addresses, from: start, to: end)
+    }
+
     /// The event as saved, as the kind the person chose: kept on this Mac when the calendar saved it as another kind,
     /// and forgotten here when the calendar holds it itself.
     private func reconciled(_ saved: CalendarEvent, wanted: CalendarEvent) async -> CalendarEvent {

@@ -454,6 +454,83 @@ enum SelfTest {
                 return await services?.types.type(for: focus)
             }
             check(focus != nil && kept == .some(nil), "deleting focus time forgets it here", "\(String(describing: kept))")
+        }
+
+        // Repeating, notifications, visibility, guest permissions and busy times
+        let busy = ResultBox<[String: FreeBusy]>()
+        step {
+            let calendar = session.calendar
+            check(calendar.features == .google, "a Google calendar keeps five notifications, visibility and guest permissions")
+            guard var draft = calendar.newDraft() else { return check(false, "a new event can be started") }
+            let weekday = calendar.calendar.component(.weekday, from: draft.start)
+            check(RepeatRule.presets(for: draft.start, calendar: calendar.calendar)[1].weekdays == [weekday], "it can repeat weekly on its own weekday")
+            draft.title = "Self-test weekly"
+            draft.repeatRule = RepeatRule(frequency: .weekly, weekdays: [weekday], end: .after(3))
+            draft.reminders = [Reminder(minutes: 10), Reminder(amount: 1, unit: .days)]
+            draft.visibility = .private
+            draft.guestsCanModify = true
+            draft.guests = [SampleData.person("Alex Kim")]
+            Task {
+                do { try await calendar.save(draft) } catch { check(false, "saving a repeating event", "\(error)") }
+            }
+            wait("the weekly event's three times") { calendar.events.filter { $0.title == "Self-test weekly" }.count == 3 }
+        }
+        step {
+            let calendar = session.calendar
+            let times = calendar.events.filter { $0.title == "Self-test weekly" }.sorted { $0.start < $1.start }
+            check(times.count == 3 && Set(times.compactMap(\.seriesID)).count == 1, "a repeating event shows each time, as one series", "\(times.count)")
+            check(times.count == 3 && times[1].start.timeIntervalSince(times[0].start) >= 6 * 86_400, "a week apart")
+            let first = times.first
+            check(first?.recurrence.last?.hasSuffix(";COUNT=3") == true && first?.recurrence.last?.hasPrefix("RRULE:FREQ=WEEKLY;BYDAY=") == true,
+                  "with its rule", first?.recurrence.joined() ?? "")
+            check(first?.reminderMinutes == [10, 1_440], "two notifications", "\(first?.reminderMinutes ?? [])")
+            check(first?.visibility == .private && first?.guestsCanModify == true && first?.guestsCanSeeOtherGuests == true,
+                  "private, with guests allowed to change it")
+            guard let second = times[safe: 1] else { return }
+            var draft = calendar.draft(for: second)
+            check(draft.repeatRule == RepeatRule(frequency: .weekly, weekdays: [calendar.calendar.component(.weekday, from: second.start)], end: .after(3)),
+                  "the editor reads its rule")
+            check(draft.reminders == [Reminder(minutes: 10), Reminder(amount: 1, unit: .days)], "and its notifications")
+            draft.repeatRule = RepeatRule(frequency: .daily, end: .after(2))
+            check(draft.changesRepeat, "choosing another rule changes it")
+            Task {
+                do { try await calendar.save(draft) } catch { check(false, "changing how an event repeats", "\(error)") }
+            }
+            wait("the daily times") {
+                let daily = calendar.events.filter { $0.title == "Self-test weekly" }.sorted { $0.start < $1.start }
+                return daily.count == 2 && daily[1].start.timeIntervalSince(daily[0].start) < 2 * 86_400
+            }
+        }
+        step {
+            let calendar = session.calendar
+            check(calendar.events.filter { $0.title == "Self-test weekly" }.count == 2, "a new rule is for the whole series")
+            if let one = calendar.events.first(where: { $0.title == "Self-test weekly" }) { calendar.delete(one, scope: .allEvents) }
+            let interval = DateInterval(start: calendar.calendar.date(byAdding: .day, value: 7, to: calendar.grid.startOfWeek(calendar.today())) ?? calendar.today(),
+                                        duration: 7 * 86_400)
+            let guests = [SampleData.person("Alex Kim"), SampleData.person("Zoe Anderson")]
+            Task { busy.value = await calendar.busyTimes(for: guests, in: interval) }
+            wait("busy times") {
+                busy.value != nil && !calendar.events.contains { $0.title == "Self-test weekly" }
+            }
+        }
+        step {
+            let calendar = session.calendar
+            check(!calendar.events.contains { $0.title == "Self-test weekly" }, "deleting every time of a repeating event")
+            let found = busy.value ?? [:]
+            let alex = found["alex.kim@example.com"]?.busy ?? []
+            check(!alex.isEmpty && found["alex.kim@example.com"]?.problem == nil, "a guest's busy times are looked up", "\(alex.count)")
+            check(found["zoe.anderson@example.org"]?.problem == "Their calendar isn’t shared with you.", "or why they can't be")
+            let monday = calendar.calendar.date(byAdding: .day, value: 8, to: calendar.grid.startOfWeek(calendar.today())) ?? calendar.today()
+            let suggestions = calendar.suggestedTimes(lasting: 3_600, from: monday, busy: alex)
+            check(suggestions.count == 8 && suggestions.allSatisfy { slot in !alex.contains { $0.start < slot.end && $0.end > slot.start } },
+                  "suggested times miss every busy time", "\(suggestions.count)")
+            check(suggestions.allSatisfy { slot in
+                let hour = calendar.calendar.component(.hour, from: slot.start)
+                let weekday = calendar.calendar.component(.weekday, from: slot.start)
+                return hour >= 9 && slot.end <= (calendar.calendar.date(bySettingHour: 17, minute: 0, second: 0, of: slot.start) ?? slot.end)
+                    && weekday != 1 && weekday != 7
+            }, "on weekdays from 9 to 5")
+            check(suggestions.first.map { calendar.calendar.component(.hour, from: $0.start) } == 9, "starting with the first free hour")
             check(!session.calendar.events.contains { $0.title == "Self-test sync" }, "deleting an event")
             // Microsoft: the same account switch changes mail, calendar and contacts together.
             app.switchAccount(to: SampleData.microsoftID)
@@ -471,6 +548,9 @@ enum SelfTest {
             guard var draft = session.calendar.newDraft() else { return }
             draft.title = "Self-test Teams call"
             draft.addsNativeConference = true
+            draft.reminders = [Reminder(minutes: 10), Reminder(minutes: 60)]
+            check(session.calendar.features.maximumReminders == 1 && session.calendar.features.visibilities == [.default, .private],
+                  "a Microsoft calendar keeps one notification, and normal or private")
             let calendar = session.calendar
             Task { try? await calendar.save(draft) }
             wait("the Teams event") { calendar.events.contains { $0.title == "Self-test Teams call" } && calendar.events.contains(where: \.isTask) }
@@ -479,6 +559,7 @@ enum SelfTest {
             let created = session.calendar.events.first { $0.title == "Self-test Teams call" }
             check(created?.conference?.kind == .teams && created?.conference?.joinURL.host == "teams.microsoft.com", "a new event gets its Teams meeting",
                   created?.conference?.joinURL.absoluteString ?? "none")
+            check(created?.reminderMinutes == [10], "with the one notification it keeps", "\(created?.reminderMinutes ?? [])")
             let calendar = session.calendar
             check(calendar.taskLists.map(\.name) == ["Tasks"] && calendar.shownEvents().contains { $0.title == "Submit expense report" && $0.isTask },
                   "a Microsoft account's To Do tasks show",
@@ -495,6 +576,7 @@ enum SelfTest {
         }
         step {
             check(session.calendar.defaultCalendar?.nativeConference == nil, "an iCloud calendar has no meetings of its own")
+            check(session.calendar.features == .basic, "nor visibility, guest permissions or other people's busy times")
             check(session.calendar.shownEvents().contains { $0.conference?.kind == .faceTime }, "but shows FaceTime links on its events")
             guard var draft = session.calendar.newDraft() else { return }
             draft.title = "Self-test FaceTime"

@@ -400,6 +400,8 @@ actor SampleCalendarService: CalendarService {
     /// The kinds of event each calendar holds itself (others are saved as ordinary events), as the provider's do.
     private let holds: [String: Set<EventType>]
     private var counter = 0
+    /// For each repeating event made here, the occurrences changed or deleted on their own, by their starts.
+    private var taken: [String: Set<Date>] = [:]
 
     init(account: Account, calendars: [CalendarInfo], events: [CalendarEvent], holds: [String: Set<EventType>] = [:]) {
         self.account = account
@@ -424,7 +426,31 @@ actor SampleCalendarService: CalendarService {
 
     func loadEvents(in calendarIDs: [String], from start: Date, to end: Date) async throws -> [CalendarEvent] {
         await pause()
-        return events.filter { calendarIDs.contains($0.calendarID) && $0.start < end && $0.end > start }
+        var found: [CalendarEvent] = []
+        for event in events where calendarIDs.contains(event.calendarID) {
+            if event.seriesID == nil, let rule = RepeatRule(lines: event.recurrence, start: event.start) {
+                found += occurrences(of: event, rule: rule, from: start, to: end)
+            } else if event.start < end, event.end > start {
+                found.append(event)
+            }
+        }
+        return found
+    }
+
+    /// A repeating event made here, as its occurrences in a stretch of time (as servers send them).
+    private func occurrences(of series: CalendarEvent, rule: RepeatRule, from start: Date, to end: Date) -> [CalendarEvent] {
+        let length = series.end.timeIntervalSince(series.start)
+        let window = DateInterval(start: start.addingTimeInterval(-length), end: max(end, start))
+        return rule.starts(from: series.start, in: window).compactMap { begin in
+            guard !(taken[series.id]?.contains(begin) ?? false), begin.addingTimeInterval(length) > start else { return nil }
+            var occurrence = series
+            occurrence.id = "\(series.id)@\(Int(begin.timeIntervalSince1970))"
+            occurrence.seriesID = series.id
+            occurrence.occurrenceDate = begin
+            occurrence.start = begin
+            occurrence.end = begin.addingTimeInterval(length)
+            return occurrence
+        }
     }
 
     /// A made-up meeting link of the calendar's own kind.
@@ -456,6 +482,20 @@ actor SampleCalendarService: CalendarService {
         await pause()
         var saved = kept(event)
         if addingConference, saved.conference == nil, let meeting = meeting(for: event.calendarID) { saved.conference = meeting }
+        // An occurrence of a repeating event made here: the whole series changes (keeping its own times), or this one
+        // leaves it.
+        if let seriesID = event.seriesID, let index = events.firstIndex(where: { $0.id == seriesID }) {
+            if scope == .allEvents {
+                var series = saved
+                (series.id, series.seriesID, series.occurrenceDate) = (seriesID, nil, nil)
+                (series.start, series.end) = (events[index].start, events[index].end)
+                if series.recurrence.isEmpty { series.recurrence = events[index].recurrence }
+                events[index] = series
+                return saved
+            }
+            taken[seriesID, default: []].insert(event.occurrenceDate ?? event.start)
+            saved.recurrence = []
+        }
         events.removeAll { $0.id == event.id }
         events.append(saved)
         return saved
@@ -463,8 +503,23 @@ actor SampleCalendarService: CalendarService {
 
     func delete(_ event: CalendarEvent, scope: RecurrenceScope) async throws {
         await pause()
-        if scope == .allEvents, let series = event.seriesID { events.removeAll { $0.seriesID == series } }
+        if scope == .allEvents, let series = event.seriesID {
+            events.removeAll { $0.seriesID == series || $0.id == series }
+        } else if let series = event.seriesID, events.contains(where: { $0.id == series }) {
+            taken[series, default: []].insert(event.occurrenceDate ?? event.start)
+        }
         events.removeAll { $0.id == event.id }
+    }
+
+    /// Made-up busy times for the sample people, as Google's and Microsoft's lookups give; other accounts can't look
+    /// people up.
+    func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy] {
+        await pause()
+        guard account.kind == .google || account.kind == .microsoft else {
+            return Dictionary(addresses.map { ($0, FreeBusy.unknown("This account’s calendar can’t look up other people’s busy times.")) },
+                              uniquingKeysWith: { first, _ in first })
+        }
+        return Dictionary(addresses.map { ($0, SampleData.freeBusy(for: $0, from: start, to: end)) }, uniquingKeysWith: { first, _ in first })
     }
 
     func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {

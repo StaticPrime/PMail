@@ -183,7 +183,20 @@ public actor GoogleCalendarService: CalendarService {
                              webLink: WebURL.webLink(item["htmlLink"].string), uid: item["iCalUID"].nonEmpty,
                              etag: item["etag"].nonEmpty, type: type,
                              declinesInvitations: declineMode.map { $0 != "declineNone" } ?? false,
-                             declineMessage: type == .event ? nil : kindDetails["declineMessage"].nonEmpty)
+                             declineMessage: type == .event ? nil : kindDetails["declineMessage"].nonEmpty,
+                             visibility: visibility(item["visibility"].string),
+                             guestsCanModify: item["guestsCanModify"].bool ?? false,
+                             guestsCanInviteOthers: item["guestsCanInviteOthers"].bool ?? true,
+                             guestsCanSeeOtherGuests: item["guestsCanSeeOtherGuests"].bool ?? true)
+    }
+
+    /// Google's visibility; "confidential" shows as private.
+    static func visibility(_ text: String?) -> EventVisibility {
+        switch text {
+        case "public": .public
+        case "private", "confidential": .private
+        default: .default
+        }
     }
 
     /// The kinds of event PMail knows among Google's; the rest (working locations, birthdays) are ordinary events.
@@ -386,6 +399,33 @@ public actor GoogleCalendarService: CalendarService {
         loaded[key]?.myResponse = response
     }
 
+    // MARK: Free and busy
+
+    /// Busy times from Google's free/busy lookup: people in the same organization, or who share their calendar's
+    /// free/busy, are known; for the rest, why not.
+    public func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy] {
+        guard !addresses.isEmpty else { return [:] }
+        let body: JSONValue = ["timeMin": .string(WebDate.utcString(start)), "timeMax": .string(WebDate.utcString(end)),
+                               "items": .array(addresses.map { ["id": .string($0)] })]
+        let json = try await client.post(Self.url("freeBusy"), body)
+        var found: [String: FreeBusy] = [:]
+        for (id, entry) in json["calendars"].object ?? [:] {
+            if let reason = entry["errors"].array.first?["reason"].string {
+                found[id.lowercased()] = .unknown(reason == "notFound" ? "Their calendar isn’t shared with you."
+                                                                       : "Their busy times couldn’t be found.")
+                continue
+            }
+            let busy = entry["busy"].array.compactMap { stretch -> DateInterval? in
+                guard let from = stretch["start"].string.flatMap({ WebDate.parse($0) }),
+                      let to = stretch["end"].string.flatMap({ WebDate.parse($0) }), to > from else { return nil }
+                return DateInterval(start: from, end: to)
+            }
+            found[id.lowercased()] = FreeBusy(busy: busy.sorted { $0.start < $1.start })
+        }
+        return Dictionary(addresses.map { ($0, found[$0.lowercased()] ?? .unknown("Their busy times couldn’t be found.")) },
+                          uniquingKeysWith: { first, _ in first })
+    }
+
     /// Looks at a new event again (up to three times, about a second apart) while Google is still making its meeting,
     /// until the join link is there. The event exists either way, so a failed look just keeps what's known.
     private func waitForConference(_ event: JSONValue, calendarID: String) async -> JSONValue {
@@ -442,6 +482,14 @@ public actor GoogleCalendarService: CalendarService {
         // An empty list only clears the rules when the event was loaded with some, never by default.
         if changed(\.recurrence), !edited.recurrence.isEmpty || original?.recurrence.isEmpty == false {
             body["recurrence"] = JSONValue(edited.recurrence)
+        }
+        if changed(\.visibility), !(isNew && edited.visibility == .default) { body["visibility"] = .string(edited.visibility.rawValue) }
+        if changed(\.guestsCanModify), !(isNew && !edited.guestsCanModify) { body["guestsCanModify"] = .bool(edited.guestsCanModify) }
+        if changed(\.guestsCanInviteOthers), !(isNew && edited.guestsCanInviteOthers) {
+            body["guestsCanInviteOthers"] = .bool(edited.guestsCanInviteOthers)
+        }
+        if changed(\.guestsCanSeeOtherGuests), !(isNew && edited.guestsCanSeeOtherGuests) {
+            body["guestsCanSeeOtherGuests"] = .bool(edited.guestsCanSeeOtherGuests)
         }
         if changed(\.colorHex), let hex = edited.colorHex.flatMap(WebColor.hex),
            let colorID = colors.first(where: { $0.value == hex })?.key {

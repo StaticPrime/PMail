@@ -2,9 +2,13 @@ import AppKit
 import PMailKit
 import SwiftUI
 
-/// Making or changing an event (or a task, out of office or focus time): its kind, title, when, video meeting, where,
-/// reminder, calendar and color, description and guests, as suit the kind.
+/// Making or changing an event (or a task, out of office or focus time): its kind, title, when and how it repeats,
+/// video meeting, where, notifications, calendar, color, visibility, description, guests and what they may do, as suit
+/// the kind; and for an event, finding a time when everyone's free.
 struct EventEditor: View {
+    enum DetailsTab: String { case details, findATime }
+    enum GuestsTab: String { case guests, suggested }
+
     let app: AppModel
     let model: CalendarViewModel
     let contacts: ContactsViewModel
@@ -14,6 +18,9 @@ struct EventEditor: View {
     @State private var asksScope = false
     @State private var showsFaceTime = false
     @State private var colorMenu = PopUpMenu()
+    @State private var detailsTab = DetailsTab.details
+    @State private var guestsTab = GuestsTab.guests
+    @State private var asksCustomRepeat = false
     @Environment(\.dismiss) private var dismiss
 
     init(app: AppModel, model: CalendarViewModel, contacts: ContactsViewModel, draft: EventDraft) {
@@ -22,6 +29,13 @@ struct EventEditor: View {
         self.contacts = contacts
         _draft = State(initialValue: draft)
         _showsFaceTime = State(initialValue: !draft.faceTimeLink.isEmpty)
+        #if DEBUG
+        // `-PMEditorTab findATime`, `-PMGuestsTab suggested` and `-PMRepeatSheet YES` open those.
+        let defaults = UserDefaults.standard
+        if let tab = defaults.string(forKey: "PMEditorTab").flatMap(DetailsTab.init(rawValue:)) { _detailsTab = State(initialValue: tab) }
+        if let tab = defaults.string(forKey: "PMGuestsTab").flatMap(GuestsTab.init(rawValue:)) { _guestsTab = State(initialValue: tab) }
+        _asksCustomRepeat = State(initialValue: defaults.bool(forKey: "PMRepeatSheet"))
+        #endif
     }
 
     var body: some View {
@@ -53,21 +67,52 @@ struct EventEditor: View {
             }
             Divider().overlay(Theme.divider)
             HStack(alignment: .top, spacing: 0) {
-                ScrollView { details.padding(20) }
+                VStack(spacing: 0) {
+                    if draft.type == .event {
+                        EditorTabs(tabs: [(DetailsTab.details, "Event details"), (.findATime, "Find a time")], selection: $detailsTab)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 8)
+                    }
+                    if draft.type == .event, detailsTab == .findATime {
+                        FindATimeView(model: model, draft: $draft)
+                    } else {
+                        ScrollView { details.padding(20) }
+                    }
+                }
                 Divider().overlay(Theme.divider)
                 Group {
-                    if draft.type == .event { guestsColumn } else { aboutColumn }
+                    if draft.type == .event {
+                        VStack(alignment: .leading, spacing: 12) {
+                            EditorTabs(tabs: [(GuestsTab.guests, "Guests"), (.suggested, "Suggested times")], selection: $guestsTab)
+                            if guestsTab == .suggested {
+                                SuggestedTimesView(model: model, draft: $draft)
+                            } else {
+                                guestsColumn
+                            }
+                        }
+                        .padding(.top, 8)
+                    } else {
+                        aboutColumn.padding(.top, 20)
+                    }
                 }
                 .frame(width: 300)
-                .padding(20)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 20)
             }
         }
-        .frame(width: 920, height: 640)
+        .frame(width: 940, height: 680)
         .background(Theme.surface)
         .confirmationDialog("Save recurring event", isPresented: $asksScope) {
             Button("This event") { commit(scope: .thisEvent) }
             Button("All events") { commit(scope: .allEvents) }
             Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $asksCustomRepeat) {
+            CustomRepeatSheet(start: draft.start, isAllDay: draft.isAllDay, calendar: model.calendar,
+                              rule: draft.repeatRule ?? RepeatRule(frequency: .weekly, weekdays: [model.calendar.component(.weekday, from: draft.start)])) { rule in
+                draft.repeatRule = rule
+                draft.keepsOwnRule = false
+            }
         }
     }
 
@@ -114,6 +159,7 @@ struct EventEditor: View {
                 if draft.type != .focusTime {
                     Toggle("All day", isOn: allDayBinding).toggleStyle(.checkbox).padding(.leading, 12)
                 }
+                repeatPicker
                 Spacer()
                 Text(TimeZone.current.localizedName(for: .shortGeneric, locale: .current) ?? TimeZone.current.identifier)
                     .font(.pm(12))
@@ -155,11 +201,11 @@ struct EventEditor: View {
             if allDay {
                 draft.start = model.calendar.startOfDay(for: draft.start)
                 draft.end = model.calendar.date(byAdding: .day, value: 1, to: draft.start) ?? draft.start
-                draft.reminderMinutes = nil
+                draft.reminders = []
             } else {
                 draft.start = model.calendar.date(bySettingHour: 9, minute: 0, second: 0, of: draft.start) ?? draft.start
                 draft.end = draft.start.addingTimeInterval(3600)
-                draft.reminderMinutes = 10
+                draft.reminders = [Reminder(minutes: 10)]
             }
         })
     }
@@ -168,7 +214,10 @@ struct EventEditor: View {
 
     private var details: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(draft.isTask ? "Task details" : "Event details").font(.pm(14, .medium)).foregroundStyle(Theme.accent)
+            // An event's details have a tab instead.
+            if draft.type != .event {
+                Text(draft.isTask ? "Task details" : "Event details").font(.pm(14, .medium)).foregroundStyle(Theme.accent)
+            }
             if draft.isTask {
                 taskRows
             } else {
@@ -220,16 +269,7 @@ struct EventEditor: View {
                 TextField("Add location", text: $draft.location).textFieldStyle(.roundedBorder)
             }
         }
-        field(icon: "bell") {
-            Picker("Notification", selection: $draft.reminderMinutes) {
-                Text("No notification").tag(Int?.none)
-                ForEach([0, 5, 10, 15, 30, 60, 1440], id: \.self) { minutes in
-                    Text(EventDetailsView.reminderText(minutes)).tag(Int?.some(minutes))
-                }
-            }
-            .labelsHidden()
-            .fixedSize()
-        }
+        remindersRow
         field(icon: "calendar") {
             HStack(spacing: 12) {
                 Picker("Calendar", selection: $draft.calendarID) {
@@ -262,6 +302,16 @@ struct EventEditor: View {
                     }
                     .labelsHidden()
                     .fixedSize()
+                    if !model.features.visibilities.isEmpty {
+                        Picker("Visibility", selection: $draft.visibility) {
+                            ForEach(model.features.visibilities, id: \.self) { visibility in
+                                Text(visibility.name).tag(visibility)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        .help("Private: people who can see your calendar but not change it see only that you’re busy. Public: they see the details.")
+                    }
                 }
             }
         }
@@ -396,11 +446,115 @@ struct EventEditor: View {
         }
     }
 
+    // MARK: Notifications
+
+    /// The event's notifications, each so many minutes, hours, days or weeks before, as many as the calendar keeps.
+    private var remindersRow: some View {
+        field(icon: "bell") {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(draft.reminders.enumerated()), id: \.offset) { index, reminder in
+                    HStack(spacing: 8) {
+                        TextField("Amount", value: reminderAmount(index), format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 56)
+                            .accessibilityLabel("Notification \(index + 1)")
+                        Picker("Unit", selection: reminderUnit(index)) {
+                            ForEach(Reminder.Unit.allCases, id: \.self) { unit in
+                                Text(unit.name(reminder.amount)).tag(unit)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        Text("before").foregroundStyle(Theme.textSecondary)
+                        IconButton(symbol: "xmark", help: "Remove this notification", size: 26, iconSize: 10) {
+                            if draft.reminders.indices.contains(index) { draft.reminders.remove(at: index) }
+                        }
+                    }
+                    .font(.pm(13))
+                }
+                if draft.reminders.count < model.features.maximumReminders {
+                    Button(draft.reminders.isEmpty ? "Add a notification" : "Add notification") {
+                        draft.reminders.append(Reminder(minutes: draft.isAllDay ? 1_440 : (draft.reminders.isEmpty ? 10 : 60)))
+                    }
+                    .buttonStyle(.link)
+                    .font(.pm(13))
+                    .padding(.top, draft.reminders.isEmpty ? 5 : 0)
+                }
+            }
+        }
+    }
+
+    private func reminderAmount(_ index: Int) -> Binding<Int> {
+        Binding(get: { draft.reminders.indices.contains(index) ? draft.reminders[index].amount : 0 },
+                set: { value in if draft.reminders.indices.contains(index) { draft.reminders[index].amount = max(0, min(value, 999)) } })
+    }
+
+    private func reminderUnit(_ index: Int) -> Binding<Reminder.Unit> {
+        Binding(get: { draft.reminders.indices.contains(index) ? draft.reminders[index].unit : .minutes },
+                set: { value in if draft.reminders.indices.contains(index) { draft.reminders[index].unit = value } })
+    }
+
+    // MARK: Repeating
+
+    private enum RepeatChoice: Hashable {
+        case never, own, current, preset(Int), custom
+    }
+
+    /// Does not repeat, the usual choices for the day, or a custom rule.
+    @ViewBuilder
+    private var repeatPicker: some View {
+        if !draft.isTask {
+            let presets = RepeatRule.presets(for: draft.start, calendar: model.calendar)
+            Picker("Repeat", selection: repeatChoice(presets)) {
+                Text("Does not repeat").tag(RepeatChoice.never)
+                if draft.keepsOwnRule { Text("Repeats by its own rule").tag(RepeatChoice.own) }
+                if let rule = draft.repeatRule, !presets.contains(rule.normalized(start: draft.start, calendar: model.calendar)) {
+                    Text(rule.summary(start: draft.start, calendar: model.calendar)).tag(RepeatChoice.current)
+                }
+                ForEach(presets.indices, id: \.self) { index in
+                    Text(presetTitle(presets[index])).tag(RepeatChoice.preset(index))
+                }
+                Divider()
+                Text("Custom…").tag(RepeatChoice.custom)
+            }
+            .labelsHidden()
+            .fixedSize()
+            .padding(.leading, 8)
+            .accessibilityLabel("Repeat")
+        }
+    }
+
+    private func presetTitle(_ rule: RepeatRule) -> String {
+        let text = rule.summary(start: draft.start, calendar: model.calendar)
+        return text == "Every weekday" ? "Every weekday (Monday to Friday)" : text
+    }
+
+    private func repeatChoice(_ presets: [RepeatRule]) -> Binding<RepeatChoice> {
+        Binding(get: {
+            if draft.keepsOwnRule { return .own }
+            guard let rule = draft.repeatRule?.normalized(start: draft.start, calendar: model.calendar) else { return .never }
+            return presets.firstIndex(of: rule).map { .preset($0) } ?? .current
+        }, set: { choice in
+            switch choice {
+            case .never:
+                draft.repeatRule = nil
+                draft.keepsOwnRule = false
+            case let .preset(index):
+                draft.repeatRule = presets[index]
+                draft.keepsOwnRule = false
+            case .custom:
+                asksCustomRepeat = true
+            case .own, .current:
+                break
+            }
+        })
+    }
+
     // MARK: Guests
 
     private var guestsColumn: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Guests").font(.pm(14, .medium)).foregroundStyle(Theme.accent)
             GuestField(guests: $draft.guests, contacts: contacts)
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
@@ -429,7 +583,23 @@ struct EventEditor: View {
             if !draft.guests.isEmpty {
                 Text("Guests get an invitation by email when you save.").font(.pm(11.5)).foregroundStyle(Theme.textTertiary)
             }
-            Spacer(minLength: 0)
+            if !model.features.guestPermissions.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Guest permissions").font(.pm(13, .medium)).foregroundStyle(Theme.textPrimary)
+                    ForEach(model.features.guestPermissions, id: \.self) { permission in
+                        Toggle(permission.name, isOn: permissionBinding(permission)).toggleStyle(.checkbox).font(.pm(13))
+                    }
+                }
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    private func permissionBinding(_ permission: GuestPermission) -> Binding<Bool> {
+        switch permission {
+        case .modify: $draft.guestsCanModify
+        case .inviteOthers: $draft.guestsCanInviteOthers
+        case .seeGuestList: $draft.guestsCanSeeOtherGuests
         }
     }
 
@@ -447,7 +617,12 @@ struct EventEditor: View {
             error = "The event has to end after it starts."
             return
         }
-        if draft.original?.isRecurring == true { asksScope = true } else { commit(scope: .thisEvent) }
+        if draft.original?.isRecurring == true {
+            // A new rule is for the whole series.
+            if draft.changesRepeat { commit(scope: .allEvents) } else { asksScope = true }
+        } else {
+            commit(scope: .thisEvent)
+        }
     }
 
     private func commit(scope: RecurrenceScope) {
