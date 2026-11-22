@@ -622,6 +622,24 @@ enum SelfTest {
             wait("the first account's contacts") { app.current?.account.kind == .google && app.current?.contacts.loaded == true }
         }
 
+        // MARK: Places for an event's location (made-up ones: sample runs never ask Apple Maps)
+        let places = PlaceSearch(finder: SamplePlaceFinder())
+        step {
+            check(PrivacySettings.shared.suggestsPlaces, "places are suggested for event locations unless Settings ▸ Privacy says not to")
+            places.search("bakery")
+            wait("places") { !places.suggestions.isEmpty }
+        }
+        step {
+            check(places.suggestions.first?.text == "Bluebird Bakery, 412 SE Oak St, Portland, OR 97214", "typing a location suggests places with their addresses",
+                  places.suggestions.first?.text ?? "none")
+            places.search("b")
+            check(places.suggestions.isEmpty, "but not for one letter")
+            PrivacySettings.shared.suggestsPlaces = false
+            check(PlaceSearch.makeFinder() == nil, "and none at all with the setting off")
+            PrivacySettings.shared.suggestsPlaces = true
+            check(PlaceSearch.makeFinder() is SamplePlaceFinder, "sample runs use made-up places")
+        }
+
         // MARK: Contacts
         step {
             let contacts = session.contacts

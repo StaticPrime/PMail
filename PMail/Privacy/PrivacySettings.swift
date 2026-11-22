@@ -3,8 +3,9 @@ import Observation
 import PMailKit
 import Security
 
-/// Settings ▸ Privacy: how PMail treats pictures and other content from the internet in messages. Kept in the app's
-/// settings (the sample settings in sample runs), with the proxy's password in the keychain.
+/// Settings ▸ Privacy: how PMail treats pictures and other content from the internet in messages, and whether event
+/// locations are looked up in Apple Maps. Kept in the app's settings (the sample settings in sample runs), with the
+/// proxy's password in the keychain.
 @Observable
 final class PrivacySettings {
     /// The app's. Sample runs swap in their own before anything reads it.
@@ -17,6 +18,7 @@ final class PrivacySettings {
         static let hideIP = "HideIPAddress"
         static let route = "HideIPAddressThrough"
         static let proxy = "RemoteContentProxy"
+        static let suggestPlaces = "SuggestPlaces"
         /// Before Settings had a Privacy pane: Mail ▸ “Show pictures in messages without asking”.
         static let alwaysShowPictures = "AlwaysShowPictures"
     }
@@ -72,6 +74,11 @@ final class PrivacySettings {
         }
     }
 
+    /// Suggests places from Apple Maps as an event's location is typed (what's typed goes to Apple to find them).
+    var suggestsPlaces: Bool {
+        didSet { store.set(suggestsPlaces, forKey: Keys.suggestPlaces) }
+    }
+
     init(store: UserDefaults, passwords: any ProxyPasswordStore) {
         self.store = store
         self.passwords = passwords
@@ -81,6 +88,7 @@ final class PrivacySettings {
         hidesIPAddress = store.bool(forKey: Keys.hideIP)
         ipRoute = store.string(forKey: Keys.route).flatMap(IPRoute.init) ?? .tor
         proxy = store.data(forKey: Keys.proxy).flatMap { try? JSONDecoder().decode(RemoteContentProxy.self, from: $0) } ?? RemoteContentProxy()
+        suggestsPlaces = store.object(forKey: Keys.suggestPlaces) as? Bool ?? true
     }
 
     /// The proxy's password, from the keychain.

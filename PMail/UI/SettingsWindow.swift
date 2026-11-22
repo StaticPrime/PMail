@@ -272,7 +272,7 @@ private struct AccountSettings: View {
 
 /// Privacy: pictures and other content from the internet in messages. Loading them privately ahead of time, blocking
 /// them, and hiding the IP address by sending them through the Tor client built into PMail or a proxy of the person's
-/// own, so senders see its address instead of theirs.
+/// own, so senders see its address instead of theirs. And whether event locations are looked up in Apple Maps.
 private struct PrivacySettingsPane: View {
     @Bindable private var privacy = PrivacySettings.shared
     private var tor: BuiltInTor { BuiltInTor.shared }
@@ -324,6 +324,11 @@ private struct PrivacySettingsPane: View {
                     }
                 }
                 Text(hideIPCaption).font(.pm(11.5)).foregroundStyle(.secondary)
+            }
+            Section("Event locations") {
+                Toggle("Suggest places from Apple Maps", isOn: $privacy.suggestsPlaces)
+                Text("As you type an event’s location, what you’ve typed goes to Apple to find matching places and addresses. It goes straight to Apple, not through Tor or your proxy.")
+                    .font(.pm(11.5)).foregroundStyle(.secondary)
             }
             if !privacy.trustedImageSenders.isEmpty {
                 Section("Senders whose pictures always show") {

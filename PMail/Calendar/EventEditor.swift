@@ -265,9 +265,11 @@ struct EventEditor: View {
     private var eventRows: some View {
         if draft.type == .event {
             conferenceRow
+            // Over the rows below it, for the places it suggests.
             field(icon: "mappin.and.ellipse") {
-                TextField("Add location", text: $draft.location).textFieldStyle(.roundedBorder)
+                LocationField(location: $draft.location)
             }
+            .zIndex(1)
         }
         remindersRow
         field(icon: "calendar") {
