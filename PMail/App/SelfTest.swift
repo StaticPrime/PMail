@@ -563,6 +563,41 @@ enum SelfTest {
             if let saved { calendar.delete(saved, scope: .thisEvent) }
         }
 
+        // MARK: Saving an event waits out Undo, as sending does
+        step {
+            let calendar = session.calendar
+            guard var draft = calendar.newDraft() else { return check(false, "an event can be started") }
+            draft.title = "Self-test undo"
+            app.sheet = nil
+            calendar.saveWithUndo(draft, delay: 0.6)
+            check(app.toast?.text == "Saving…" && app.toast?.actionTitle == "Undo" && calendar.isSavingLater(draft), "saving an event says so, with Undo",
+                  app.toast?.text ?? "none")
+            app.toast?.action?()
+            if case let .eventEditor(back)? = app.sheet {
+                check(back.id == draft.id && back.title == "Self-test undo", "Undo opens it to edit again, as it was")
+            } else {
+                check(false, "Undo opens it to edit again, as it was")
+            }
+            app.sheet = nil
+            wait(upTo: 1) { false }
+        }
+        step {
+            let calendar = session.calendar
+            check(!calendar.events.contains { $0.title == "Self-test undo" }, "and it isn't saved")
+            guard var draft = calendar.newDraft() else { return }
+            draft.title = "Self-test saved later"
+            calendar.saveWithUndo(draft, delay: 0.3)
+            check(!calendar.events.contains { $0.title == "Self-test saved later" }, "nothing's saved before the pause is out")
+            wait("the save after the pause") { calendar.events.contains { $0.title == "Self-test saved later" } }
+        }
+        step {
+            let calendar = session.calendar
+            check(calendar.events.contains { $0.title == "Self-test saved later" } && app.toast?.text == "Event saved.", "after it, it's saved",
+                  app.toast?.text ?? "none")
+            if let saved = calendar.events.first(where: { $0.title == "Self-test saved later" }) { calendar.delete(saved, scope: .thisEvent) }
+            wait("it to go") { !calendar.events.contains { $0.title == "Self-test saved later" } }
+        }
+
         // MARK: Calendars and contacts with each mail check, and changes made offline
         var sampleCalendar: SampleCalendarService? { (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService }
         var sampleContacts: SampleContactsService? { session.services.contacts as? SampleContactsService }

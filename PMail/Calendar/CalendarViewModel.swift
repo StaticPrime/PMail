@@ -81,6 +81,8 @@ struct EventDraft: Identifiable, Hashable {
     var declineMessage = ""
     /// A task: whether it's done.
     var isCompleted = false
+    /// Why saving it failed, when it was opened again for that.
+    var saveError: String?
     var visibility: EventVisibility = .default
     var guestsCanModify = false
     var guestsCanInviteOthers = true
@@ -509,6 +511,54 @@ final class CalendarViewModel {
 
     /// The account's contacts, which guests newly invited are added to (or asked about).
     @ObservationIgnored weak var contacts: ContactsViewModel?
+    /// Saves waiting out their Undo pause, by draft.
+    @ObservationIgnored private var undoableSaves: [UUID: Task<Void, Never>] = [:]
+
+    /// Saves a draft after the same pause as sending a message (Settings ▸ Mail ▸ Undo Send), saying "Saving…" with
+    /// Undo meanwhile; Undo opens it to edit again, as it was. A save that fails opens it again, saying why.
+    func saveWithUndo(_ draft: EventDraft, delay: TimeInterval? = nil) {
+        let pause = delay ?? max(1, UserDefaults.standard.double(forKey: "UndoSendSeconds"))
+        undoableSaves[draft.id]?.cancel()
+        undoableSaves[draft.id] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(pause))
+            guard !Task.isCancelled, let self else { return }
+            self.undoableSaves[draft.id] = nil
+            await self.finishSaving(draft)
+        }
+        app?.show("Saving…", actionTitle: "Undo", duration: pause) { [weak self] in self?.undoSave(draft) }
+    }
+
+    /// Stops a save waiting out its pause, and opens the draft to edit again.
+    func undoSave(_ draft: EventDraft) {
+        guard let pending = undoableSaves.removeValue(forKey: draft.id) else { return }
+        pending.cancel()
+        app?.sheet = .eventEditor(draft)
+        app?.show("Saving undone.")
+    }
+
+    /// Whether a draft is waiting out its Undo pause.
+    func isSavingLater(_ draft: EventDraft) -> Bool { undoableSaves[draft.id] != nil }
+
+    private func finishSaving(_ draft: EventDraft) async {
+        do {
+            let outcome = try await save(draft)
+            if outcome == .waiting {
+                app?.show("Saved on this Mac. It’ll go to your \(draft.isTask ? "tasks" : "calendar") when you’re back online.")
+            } else {
+                app?.show(draft.isNew ? (draft.isTask ? "Task saved." : "Event saved.") : "Changes saved.")
+            }
+        } catch {
+            var again = draft
+            again.saveError = "It wasn’t saved: \(describe(error))"
+            if app?.sheet == nil {
+                app?.sheet = .eventEditor(again)
+            } else {
+                app?.show("“\(draft.title.isEmpty ? "(No title)" : draft.title)” wasn’t saved: \(describe(error))", actionTitle: "Edit") { [weak self] in
+                    self?.app?.sheet = .eventEditor(again)
+                }
+            }
+        }
+    }
 
     /// Saves a draft: makes the event (or task), or changes it, creating its video meeting if asked. When the calendar
     /// can't be reached, the change is kept on this Mac and sent once it can. Guests just invited who aren't in

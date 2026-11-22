@@ -31,6 +31,8 @@ struct EventEditor: View {
         self.contacts = contacts
         _draft = State(initialValue: draft)
         _showsFaceTime = State(initialValue: !draft.faceTimeLink.isEmpty)
+        // Opened again because saving it failed: why, until it's saved.
+        _error = State(initialValue: draft.saveError)
         #if DEBUG
         // `-PMEditorTab findATime`, `-PMGuestsTab suggested` and `-PMRepeatSheet YES` open those.
         let defaults = UserDefaults.standard
@@ -648,25 +650,14 @@ struct EventEditor: View {
         }
     }
 
+    /// Closes the editor and saves after the Undo Send pause, with Undo to come back to it.
     private func commit(scope: RecurrenceScope) {
         draft.scope = scope
-        isSaving = true
+        draft.saveError = nil
         error = nil
         let saving = draft
-        Task {
-            do {
-                let outcome = try await model.save(saving)
-                if outcome == .waiting {
-                    app.show("Saved on this Mac. It’ll go to your \(saving.isTask ? "tasks" : "calendar") when you’re back online.")
-                } else {
-                    app.show(saving.isNew ? (saving.isTask ? "Task saved." : "Event saved.") : "Changes saved.")
-                }
-                dismiss()
-            } catch {
-                isSaving = false
-                self.error = "It wasn’t saved: \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
-            }
-        }
+        dismiss()
+        model.saveWithUndo(saving)
     }
 }
 

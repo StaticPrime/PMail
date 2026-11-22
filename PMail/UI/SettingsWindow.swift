@@ -145,6 +145,8 @@ private struct MailSettings: View {
                 Picker("Undo Send", selection: $undoSeconds) {
                     ForEach([5, 10, 20, 30], id: \.self) { Text("\($0) seconds").tag($0) }
                 }
+                Text("Messages wait this long before they go, and events before they’re saved, so Undo can stop them.")
+                    .font(.pm(11.5)).foregroundStyle(.secondary)
                 Text("Whether pictures in messages load is set in Privacy.").font(.pm(11.5)).foregroundStyle(.secondary)
                 Toggle("Add people I write to to Contacts", isOn: $addsPeople)
                 Text("Everyone you send mail to (To, Cc and Bcc) who isn't in your contacts yet. Where your account can look people up (your organization’s directory on Google Workspace and Microsoft work or school accounts, or the people Google has seen you write to), they’re added with what it finds: name, phone, job and company. Otherwise PMail asks “Add to Contacts?” once for each address.")
