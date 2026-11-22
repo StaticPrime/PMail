@@ -439,6 +439,21 @@ public protocol CalendarService: AnyObject, Sendable {
     /// When people (by email address) are busy in `start..<end`, as far as the provider can tell: each one's busy
     /// times, or why they aren't known. Calendars that can't look people up say so for everyone.
     func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy]
+
+    // Invitations by email, for a calendar with no server to send them (`emailsInvitations`). Providers' calendars
+    // send their own invitations, answers and cancellations.
+
+    /// Whether PMail emails this calendar's invitations, answers and cancellations itself.
+    var emailsInvitations: Bool { get }
+
+    /// The iCalendar text to email about an event: an invitation (REQUEST) to its guests, its cancellation (CANCEL) for
+    /// some guests or, when `attendees` is nil, everyone, or the owner's answer (REPLY). Nil when there's nothing to send.
+    /// Ask for a cancellation before deleting the event.
+    func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String?
+
+    /// Takes in an invitation that came by email: a REQUEST adds its event, waiting for an answer (or updates it), a
+    /// CANCEL takes it off, and a REPLY puts a guest's answer on an event of the owner's.
+    func receive(_ invitation: Invitation) async throws
 }
 
 extension CalendarService {
@@ -446,4 +461,10 @@ extension CalendarService {
         Dictionary(addresses.map { ($0, FreeBusy.unknown("This account’s calendar can’t look up other people’s busy times.")) },
                    uniquingKeysWith: { first, _ in first })
     }
+
+    public var emailsInvitations: Bool { false }
+
+    public func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? { nil }
+
+    public func receive(_ invitation: Invitation) async throws {}
 }

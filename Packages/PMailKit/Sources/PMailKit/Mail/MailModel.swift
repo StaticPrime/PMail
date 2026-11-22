@@ -347,11 +347,13 @@ public struct OutgoingMessage: Codable, Sendable, Hashable {
     /// Its own Message-ID, with angle brackets.
     public var messageID: String
     public var date: Date
+    /// A calendar invitation, answer or cancellation it carries (iMIP), which mail programs show with the event.
+    public var calendar: OutgoingCalendar?
 
     public init(from: MailAddress, to: [MailAddress] = [], cc: [MailAddress] = [], bcc: [MailAddress] = [],
                 replyTo: [MailAddress] = [], subject: String = "", textBody: String = "", htmlBody: String? = nil,
                 attachments: [OutgoingAttachment] = [], inReplyTo: String? = nil, references: [String] = [],
-                threadID: String? = nil, messageID: String? = nil, date: Date = Date()) {
+                threadID: String? = nil, messageID: String? = nil, date: Date = Date(), calendar: OutgoingCalendar? = nil) {
         self.from = from
         self.to = to
         self.cc = cc
@@ -366,6 +368,7 @@ public struct OutgoingMessage: Codable, Sendable, Hashable {
         self.threadID = threadID
         self.messageID = messageID ?? Self.newMessageID(for: from.email)
         self.date = date
+        self.calendar = calendar
     }
 
     /// Everyone it goes to: To, Cc and Bcc.
@@ -379,6 +382,18 @@ public struct OutgoingMessage: Codable, Sendable, Hashable {
 }
 
 /// A file to attach to an outgoing message.
+/// The iCalendar text of an invitation, answer or cancellation a message carries, with its iTIP method.
+public struct OutgoingCalendar: Codable, Sendable, Hashable {
+    /// "REQUEST", "CANCEL" or "REPLY".
+    public var method: String
+    public var text: String
+
+    public init(method: String, text: String) {
+        self.method = method
+        self.text = text
+    }
+}
+
 public struct OutgoingAttachment: Codable, Sendable, Hashable {
     public var filename: String
     public var mimeType: String

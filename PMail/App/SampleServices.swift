@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import os
 import PMailKit
 
 /// Made-up services for the sample accounts: everything happens in memory, a moment later, as if from a server.
@@ -411,6 +412,21 @@ actor SampleCalendarService: CalendarService {
     private var failsLikeOffline = false
 
     func setFailsLikeOffline(_ fails: Bool) { failsLikeOffline = fails }
+
+    /// Emails invitations itself, as a calendar with no server does (for the self-test).
+    nonisolated let emailing = OSAllocatedUnfairLock(initialState: false)
+    nonisolated var emailsInvitations: Bool { emailing.withLock { $0 } }
+
+    func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? {
+        guard emailsInvitations else { return nil }
+        let document = ICalendar.document(for: event, ownerEmail: account.email)
+        switch method {
+        case .request: return InvitationText.request(from: document)
+        case .cancel: return InvitationText.cancel(from: document, for: attendees)
+        case .reply: return InvitationText.reply(to: document, from: account.address, response: event.myResponse ?? .needsAction)
+        case .other: return nil
+        }
+    }
 
     /// An event made somewhere else, as if on another device (for the self-test).
     func arrive(_ event: CalendarEvent) { events.append(event) }

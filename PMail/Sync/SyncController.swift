@@ -156,11 +156,35 @@ final class SyncController {
             if !sorted.announce.isEmpty { notifier.notify(newMail: sorted.announce, in: session.account) }
             // Mail an earlier PMail kept on this Mac goes back to the server, on its own.
             Task { await putKeptMailBack(of: session) }
+            // Invitations, answers and cancellations that came by email, for a calendar with no server to take them.
+            if state != nil, session.services.calendar.emailsInvitations {
+                let arrived = result.messages.filter { $0.hasAttachments && !sorted.movedOut.contains($0.id) }
+                if !arrived.isEmpty { Task { await takeInInvitations(from: arrived, in: session) } }
+            }
         } catch PMailError.notSupported {
             unsupported.insert(id)
         } catch {
             // A failed check is tried again next time; the window reports its own errors.
         }
+    }
+
+    /// Takes the invitations, answers and cancellations in new mail into an account's calendar when it has no server to
+    /// do that: an invitation shows on the calendar waiting for an answer, an answer goes on the guest, and a
+    /// cancellation takes the event off.
+    func takeInInvitations(from messages: [MessageSummary], in session: AccountSession) async {
+        let mail = session.services.mail
+        var changed = false
+        for summary in messages {
+            guard let message = try? await mail.loadMessage(summary) else { continue }
+            for file in message.attachments where Invitation.isCalendarFile(mimeType: file.mimeType, filename: file.filename) {
+                let data: Data?
+                if let inline = file.data { data = inline } else { data = try? await mail.loadAttachment(file, in: summary) }
+                guard let data, let invitation = Invitation.read(data, ownerEmail: session.account.email) else { continue }
+                if (try? await session.services.calendar.receive(invitation)) != nil { changed = true }
+                break
+            }
+        }
+        if changed { session.calendar.refreshQuietly() }
     }
 
     /// Puts mail an earlier PMail kept on this Mac (rather than on the server) back on the account's server, and shows

@@ -81,6 +81,21 @@ enum SelfTest {
     }
 
     /// Reads a value from one of the sample services (they're actors), blocking until it arrives.
+    /// The invitation the self-test answers by email.
+    static var gardenParty: Invitation?
+
+    /// An emailed invitation's iCalendar text, as another calendar would send it.
+    static func invitation(uid: String, title: String, start: Date, end: Date, organizer: String, guest: String) -> String {
+        let format = DateFormatter()
+        format.locale = Locale(identifier: "en_US_POSIX")
+        format.timeZone = TimeZone(identifier: "UTC")
+        format.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Example//Calendar//EN", "METHOD:REQUEST", "BEGIN:VEVENT", "UID:\(uid)",
+                "DTSTAMP:\(format.string(from: start))", "DTSTART:\(format.string(from: start))", "DTEND:\(format.string(from: end))",
+                "SUMMARY:\(title)", "ORGANIZER:mailto:\(organizer)", "ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:\(guest)",
+                "END:VEVENT", "END:VCALENDAR"].joined(separator: "\r\n") + "\r\n"
+    }
+
     static func read<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T? {
         let box = ResultBox<T>()
         let semaphore = DispatchSemaphore(value: 0)
@@ -351,6 +366,98 @@ enum SelfTest {
                 do { try await calendar.save(draft) } catch { check(false, "saving an event", "\(error)") }
             }
             wait("the new event") { calendar.events.contains { $0.title == "Self-test sync" } }
+        }
+        step {
+            // An invitation that came by email is answered on the calendar's own copy, whose server tells the organizer.
+            let calendar = session.calendar
+            let services = session.services.calendar as? CalendarWithTasks
+            let club = read { await (services?.calendars as? SampleCalendarService)?.allEvents.first { $0.title == "Book club" } } ?? nil
+            guard let club, let uid = club.uid else { return check(false, "an invited event has a UID") }
+            let text = Self.invitation(uid: uid, title: "Book club", start: club.start, end: club.end, organizer: "hannah.brooks@example.com",
+                                       guest: session.account.email)
+            let invitation = Invitation.read(Data(text.utf8), ownerEmail: session.account.email)
+            check(invitation?.method == .request && invitation?.event.myResponse == .needsAction && invitation?.organizer?.email == "hannah.brooks@example.com",
+                  "an emailed invitation is read")
+            if let invitation { calendar.answer(invitation, with: .tentative) }
+            wait("the emailed invitation answered on the calendar") {
+                read { await (services?.calendars as? SampleCalendarService)?.allEvents.first { $0.id == club.id }?.myResponse } == .tentative
+            }
+        }
+        step {
+            // One the calendar doesn't have is answered by email, to the organizer.
+            let calendar = session.calendar
+            let mailService = sampleMail
+            let start = AppClock.now().addingTimeInterval(3 * 86_400)
+            let text = Self.invitation(uid: "not-on-the-calendar@example.com", title: "Garden party", start: start, end: start.addingTimeInterval(7_200),
+                                       organizer: "olivia.chen@example.com", guest: session.account.email)
+            guard let invitation = Invitation.read(Data(text.utf8), ownerEmail: session.account.email) else {
+                return check(false, "an invitation the calendar doesn't have is read")
+            }
+            calendar.answer(invitation, with: .declined)
+            gardenParty = invitation
+            wait("the answer emailed to the organizer") {
+                read { await mailService?.sentMessages.last?.calendar?.method } == "REPLY"
+            }
+        }
+        step {
+            let mailService = sampleMail
+            let last = read { await mailService?.sentMessages.last } ?? nil
+            check(last?.to.map(\.email) == ["olivia.chen@example.com"] && last?.subject.hasPrefix("Declined: Garden party") == true,
+                  "the answer goes to the organizer", last?.subject ?? "nothing sent")
+            check(last?.calendar?.text.contains("PARTSTAT=DECLINED") == true && gardenParty.map(session.calendar.currentAnswer(to:)) == .declined,
+                  "with the answer, which the message then shows")
+        }
+        step {
+            // A calendar with no server emails its own invitations: the guests get one when the meeting's made.
+            let calendar = session.calendar
+            let mailService = sampleMail
+            ((session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService)?.emailing.withLock { $0 = true }
+            guard var draft = calendar.newDraft() else { return check(false, "a meeting to email can be started") }
+            draft.title = "Self-test emailed meeting"
+            draft.guests = [SampleData.person("Alex Kim"), SampleData.person("Priya Shah")]
+            Task { try? await calendar.save(draft) }
+            wait("the invitation emailed") {
+                read { await mailService?.sentMessages.last?.subject }??.hasPrefix("Invitation: Self-test emailed meeting") == true
+            }
+        }
+        step {
+            let calendar = session.calendar
+            let mailService = sampleMail
+            let last = read { await mailService?.sentMessages.last } ?? nil
+            check(last?.calendar?.method == "REQUEST" && last?.to.map(\.name) == ["Alex Kim", "Priya Shah"], "the guests get the invitation",
+                  last?.subject ?? "nothing sent")
+            // Priya is taken off: she gets a cancellation, and Alex isn't told again about nothing new.
+            guard let made = calendar.events.first(where: { $0.title == "Self-test emailed meeting" }) else {
+                return check(false, "the emailed meeting is on the calendar")
+            }
+            var draft = calendar.draft(for: made)
+            draft.guests = [SampleData.person("Alex Kim")]
+            Task { try? await calendar.save(draft) }
+            wait("the cancellation emailed") {
+                read { await mailService?.sentMessages.last?.calendar?.method } == "CANCEL"
+            }
+        }
+        step {
+            let calendar = session.calendar
+            let mailService = sampleMail
+            let last = read { await mailService?.sentMessages.last } ?? nil
+            check(last?.to.map(\.name) == ["Priya Shah"] && last?.subject.hasPrefix("Cancelled: Self-test emailed meeting") == true,
+                  "a guest taken off gets a cancellation", last?.subject ?? "nothing sent")
+            let sentCount = { () -> Int in (read { await mailService?.sentMessages.count ?? 0 }) ?? 0 }
+            let count = sentCount()
+            // Deleting it: everyone still invited gets a cancellation.
+            guard let made = calendar.events.first(where: { $0.title == "Self-test emailed meeting" }) else {
+                return check(false, "the emailed meeting is still on the calendar")
+            }
+            calendar.delete(made, scope: .allEvents)
+            wait("the meeting called off") { sentCount() > count }
+        }
+        step {
+            let mailService = sampleMail
+            let last = read { await mailService?.sentMessages.last } ?? nil
+            check(last?.calendar?.method == "CANCEL" && last?.to.map(\.name) == ["Alex Kim"], "deleting it calls it off for everyone invited",
+                  last?.subject ?? "nothing sent")
+            ((session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService)?.emailing.withLock { $0 = false }
         }
         step {
             let calendar = session.calendar

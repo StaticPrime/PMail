@@ -252,6 +252,10 @@ private struct ExpandedMessage: View {
                 .padding(onCard ? 14 : 0)
                 .background(RoundedRectangle(cornerRadius: 10).fill(onCard ? Color.white : .clear))
                 .padding(.top, 14)
+                if let file = message.attachments.first(where: { Invitation.isCalendarFile(mimeType: $0.mimeType, filename: $0.filename) }) {
+                    InvitationCard(app: app, mail: mail, message: message, file: file)
+                        .padding(.top, 16)
+                }
                 if !message.attachments.isEmpty {
                     AttachmentStrip(app: app, mail: mail, message: message)
                         .padding(.top, 16)
@@ -322,6 +326,109 @@ private struct MessageDetails: View {
 }
 
 /// A message's files as cards: click one to save it to Downloads; right-click for more.
+/// A calendar invitation in a message: the event, who sent it and Going? Yes, No or Maybe (the answer goes to the
+/// organizer), or that it was cancelled, or a guest's answer.
+private struct InvitationCard: View {
+    let app: AppModel
+    let mail: MailViewModel
+    let message: MailMessage
+    let file: Attachment
+    @State private var invitation: Invitation?
+
+    var body: some View {
+        // Something is always there, so the file is read even before there's a card to show.
+        ZStack(alignment: .topLeading) {
+            if let invitation, let calendar = mail.session?.calendar {
+                card(invitation, calendar)
+            } else {
+                Color.clear.frame(height: 0)
+            }
+        }
+        .task(id: message.id) { invitation = await load() }
+    }
+
+    private func load() async -> Invitation? {
+        var data = file.data
+        if data == nil { data = try? await mail.service.loadAttachment(file, in: message.summary) }
+        return data.flatMap { Invitation.read($0, ownerEmail: mail.account.email) }
+    }
+
+    private func card(_ invitation: Invitation, _ calendar: CalendarViewModel) -> some View {
+        let event = invitation.event
+        return HStack(alignment: .top, spacing: 12) {
+            Image(systemName: invitation.method == .cancel ? "calendar.badge.minus" : "calendar")
+                .font(.system(size: 20)).foregroundStyle(invitation.method == .cancel ? Theme.danger : Theme.accent)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: event.shownTitle).font(.pm(14, .semibold)).foregroundStyle(Theme.textPrimary)
+                    .strikethrough(invitation.method == .cancel)
+                Text(calendar.formatting.eventTime(start: event.start, end: event.end, isAllDay: event.isAllDay, includeDate: true))
+                    .font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
+                if let location = event.location, !location.isEmpty {
+                    Text(location).font(.pm(12.5)).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                }
+                status(invitation, calendar).padding(.top, 4)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.surfaceRaised))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.divider))
+    }
+
+    @ViewBuilder
+    private func status(_ invitation: Invitation, _ calendar: CalendarViewModel) -> some View {
+        // The organizer by name: the invitation's, or the sender's when they sent it themselves.
+        let sender = message.summary.from
+        let organizer = invitation.organizer.map { address in
+            address.name.flatMap { $0.isEmpty ? nil : $0 }
+                ?? (sender?.isSameMailbox(as: address.email) == true ? sender?.name : nil)
+                ?? address.email
+        } ?? "The organizer"
+        switch invitation.method {
+        case .request where !(invitation.organizer?.isSameMailbox(as: mail.account.email) ?? false):
+            let current = calendar.currentAnswer(to: invitation)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("\(organizer) invited you. Your answer goes to them.").font(.pm(12)).foregroundStyle(Theme.textSecondary)
+                HStack(spacing: 8) {
+                    Text("Going?").font(.pm(13, .medium)).foregroundStyle(Theme.textPrimary)
+                    answerButton("Yes", .accepted, current: current, invitation: invitation, calendar: calendar)
+                    answerButton("No", .declined, current: current, invitation: invitation, calendar: calendar)
+                    answerButton("Maybe", .tentative, current: current, invitation: invitation, calendar: calendar)
+                }
+            }
+        case .cancel:
+            Text("\(organizer) cancelled this event.").font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
+        case .reply:
+            if let replier = invitation.replier {
+                let name = replier.address.name ?? replier.address.email
+                let said = switch replier.response {
+                case .accepted: "is going."
+                case .declined: "isn’t going."
+                case .tentative: "might go."
+                case .needsAction: "hasn’t answered yet."
+                }
+                Text("\(name) \(said)").font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    private func answerButton(_ title: String, _ response: AttendeeResponse, current: AttendeeResponse?, invitation: Invitation,
+                              calendar: CalendarViewModel) -> some View {
+        Button(title) { calendar.answer(invitation, with: response) }
+            .buttonStyle(.plain)
+            .font(.pm(12.5, .medium))
+            .foregroundStyle(current == response ? Theme.onSelection : Theme.textSecondary)
+            .padding(.horizontal, 14)
+            .frame(height: 28)
+            .background(Capsule().fill(current == response ? Theme.selection : .clear))
+            .overlay(Capsule().strokeBorder(current == response ? .clear : Theme.textTertiary.opacity(0.5)))
+            .accessibilityAddTraits(current == response ? .isSelected : [])
+    }
+}
+
 private struct AttachmentStrip: View {
     let app: AppModel
     let mail: MailViewModel

@@ -74,21 +74,31 @@ public enum MIMEBuilder {
     private static func bodyEntity(for message: OutgoingMessage) -> Entity {
         let html = message.htmlBody.flatMap { $0.isEmpty ? nil : $0 }
         let pictures = html == nil ? [] : message.attachments.filter { cleanContentID($0.contentID) != nil }
-        let files = html == nil ? message.attachments : message.attachments.filter { cleanContentID($0.contentID) == nil }
+        var files = html == nil ? message.attachments : message.attachments.filter { cleanContentID($0.contentID) == nil }
         var text = message.textBody
         if text.allSatisfy(\.isWhitespace), let html {
             text = HTMLText.plainText(fromHTML: html).trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        var body = textEntity(text, subtype: "plain")
+        var alternatives = [textEntity(text, subtype: "plain")]
         if let html {
             var htmlPart = textEntity(html, subtype: "html")
             if !pictures.isEmpty {
                 htmlPart = multipartEntity("related", parts: [htmlPart] + pictures.map { attachmentEntity($0, inline: true) },
                                            parameters: ["type=\"text/html\";"])
             }
-            body = multipartEntity("alternative", parts: [body, htmlPart])
+            alternatives.append(htmlPart)
         }
+        // An invitation goes beside the text as text/calendar with its method, which mail programs show as the
+        // event, and as an invite.ics file for those that only look at attachments.
+        if let calendar = message.calendar {
+            let method = calendar.method.uppercased().filter { $0.isLetter || $0 == "-" }
+            var part = textEntity(calendar.text, subtype: "calendar")
+            part.headers[0] = "Content-Type: text/calendar; charset=utf-8; method=\(method)"
+            alternatives.append(part)
+            files.append(OutgoingAttachment(filename: "invite.ics", mimeType: "application/ics", data: Data(calendar.text.utf8)))
+        }
+        var body = alternatives.count == 1 ? alternatives[0] : multipartEntity("alternative", parts: alternatives)
         if !files.isEmpty {
             body = multipartEntity("mixed", parts: [body] + files.map { attachmentEntity($0, inline: false) })
         }

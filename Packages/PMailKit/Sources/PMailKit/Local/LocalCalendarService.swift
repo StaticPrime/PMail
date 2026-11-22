@@ -83,6 +83,70 @@ public actor LocalCalendarService: CalendarService {
         try store.write(Data(calendar.serialized.utf8), to: name)
     }
 
+    // MARK: Invitations by email
+
+    /// No server sends this calendar's invitations, so PMail emails them.
+    public nonisolated var emailsInvitations: Bool { true }
+
+    public func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? {
+        let (_, calendar, _) = try file(of: event)
+        let document = calendar.serialized
+        switch method {
+        case .request:
+            return InvitationText.request(from: document)
+        case .cancel:
+            return InvitationText.cancel(from: document, for: attendees)
+        case .reply:
+            let answer = reader(calendar).firstEvent(calendarID: Self.calendarID, href: nil, etag: nil)?.myResponse ?? event.myResponse
+            return InvitationText.reply(to: document, from: MailAddress(email: ownerEmail), response: answer ?? .needsAction)
+        case .other:
+            return nil
+        }
+    }
+
+    public func receive(_ invitation: Invitation) async throws {
+        let name = LocalFileStore.fileName(for: invitation.uid, fileExtension: "ics")
+        let stored = store.exists(name) ? (try? store.read(name)).flatMap { ICalendarComponent.parse($0.data).first { $0.name == "VCALENDAR" } } : nil
+        let organizesIt = { (calendar: ICalendarComponent) in
+            InvitationText.organizer(of: calendar).map { ICalendarEventProperties.isSameMailbox($0.email, self.ownerEmail) } ?? false
+        }
+        switch invitation.method {
+        case .request:
+            guard var incoming = InvitationText.vcalendar(invitation.text) else { return }
+            // The owner's own invitation, copied back to them, changes nothing.
+            if invitation.organizer.map({ ICalendarEventProperties.isSameMailbox($0.email, ownerEmail) }) ?? false { return }
+            incoming.removeProperties("METHOD")
+            if let stored {
+                let storedSequence = InvitationText.sequence(of: stored)
+                if invitation.sequence < storedSequence { return }
+                // Sent again without a change that matters: the answer already given stays.
+                if invitation.sequence == storedSequence,
+                   let answer = reader(stored).firstEvent(calendarID: Self.calendarID, href: nil, etag: nil)?.myResponse, answer != .needsAction {
+                    _ = InvitationText.setAnswer(answer, of: ownerEmail, in: &incoming)
+                }
+            }
+            _ = try store.write(Data(incoming.serialized.utf8), to: name)
+        case .cancel:
+            guard var calendar = stored, !organizesIt(calendar) else { return }
+            let cancelled = InvitationText.vcalendar(invitation.text)?.components.filter { $0.name == "VEVENT" } ?? []
+            let occurrences = cancelled.compactMap { $0.property("RECURRENCE-ID") }
+            guard !occurrences.isEmpty else { return try store.delete(name) }
+            // Just some times of a repeating event: they're left out of it from now on.
+            guard let main = calendar.components.firstIndex(where: { $0.name == "VEVENT" && $0.property("RECURRENCE-ID") == nil }) else { return }
+            for occurrence in occurrences {
+                calendar.components[main].properties.append(ICalendarLine("EXDATE", parameters: occurrence.parameters, value: occurrence.value))
+                calendar.components.removeAll { $0.name == "VEVENT" && $0.property("RECURRENCE-ID")?.value == occurrence.value }
+            }
+            _ = try store.write(Data(calendar.serialized.utf8), to: name)
+        case .reply:
+            guard var calendar = stored, organizesIt(calendar), let replier = invitation.replier else { return }
+            guard InvitationText.setAnswer(replier.response, of: replier.address.email, in: &calendar) else { return }
+            _ = try store.write(Data(calendar.serialized.utf8), to: name)
+        case .other:
+            return
+        }
+    }
+
     // MARK: Files
 
     private func reader(_ calendar: ICalendarComponent) -> ICalendarReader {

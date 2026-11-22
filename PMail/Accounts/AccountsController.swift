@@ -98,7 +98,11 @@ final class AccountSession: Identifiable {
         contacts.app = app
         mail.session = self
         calendar.contacts = contacts
+        calendar.mailer = invitationMailer
     }
+
+    /// Emails invitations, answers and cancellations for a calendar with no server to send them.
+    @ObservationIgnored private(set) lazy var invitationMailer = InvitationMailer(session: self)
 
     /// Starts loading the account's mail, calendars and contacts the first time it's shown.
     func activate() {

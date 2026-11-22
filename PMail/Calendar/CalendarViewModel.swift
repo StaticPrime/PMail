@@ -511,6 +511,8 @@ final class CalendarViewModel {
 
     /// The account's contacts, which guests newly invited are added to (or asked about).
     @ObservationIgnored weak var contacts: ContactsViewModel?
+    /// Emails invitations, answers and cancellations when the calendar has no server to send them.
+    @ObservationIgnored weak var mailer: InvitationMailer?
     /// Saves waiting out their Undo pause, by draft.
     @ObservationIgnored private var undoableSaves: [UUID: Task<Void, Never>] = [:]
 
@@ -638,6 +640,7 @@ final class CalendarViewModel {
             throw error
         }
         changeCount += 1
+        if service.emailsInvitations { Task { await emailInvitations(for: saved, before: draft.original) } }
         // A repeating event's other times come with the next load.
         if draft.changesRepeat || (draft.original != nil && (scope == .allEvents || draft.original?.calendarID != saved.calendarID)) {
             if draft.repeatRule == nil { events.removeAll { $0.id == saved.id || $0.id == draft.original?.id } }
@@ -720,10 +723,21 @@ final class CalendarViewModel {
                 app?.show(LocalID.isLocal(event.id) ? done : waitingText)
                 return
             }
+            // Called off for everyone invited; asked for while the event's still there.
+            let guests = guestsToTell(about: event)
+            let wholeEvent = scope == .allEvents || !event.isRecurring
+            let cancellation = service.emailsInvitations && !guests.isEmpty && wholeEvent
+                ? try? await service.invitationText(for: event, method: .cancel, attendees: nil) : nil
             do {
                 try await service.delete(event, scope: scope)
                 changeCount += 1
                 app?.show(done)
+                if let cancellation { mailer?.send(.cancel, text: cancellation, about: event, to: guests) }
+                // One time of a repeating meeting: guests get the series without it.
+                if service.emailsInvitations, !guests.isEmpty, !wholeEvent,
+                   let update = try? await service.invitationText(for: event, method: .request, attendees: nil) {
+                    mailer?.send(.request, text: update, about: event, to: guests)
+                }
             } catch {
                 if PMailError.isConnectionProblem(error), await keep(later) {
                     app?.show(waitingText)
@@ -745,6 +759,11 @@ final class CalendarViewModel {
             do {
                 try await service.respond(to: event, with: response)
                 changeCount += 1
+                // The answer goes to the organizer by email when no server sends it.
+                if service.emailsInvitations, let organizer = event.organizer, !organizer.isSameMailbox(as: account.email),
+                   let reply = try? await service.invitationText(for: event, method: .reply, attendees: nil) {
+                    mailer?.send(.reply, text: reply, about: event, to: [organizer], answer: response)
+                }
             } catch {
                 if PMailError.isConnectionProblem(error), await keep(later) { return }
                 app?.report(error, doing: "Answering the invitation")
@@ -753,12 +772,93 @@ final class CalendarViewModel {
         }
     }
 
+    // MARK: Invitations by email
+
+    /// The guests of a meeting the account organizes, who hear about its changes (not the account itself).
+    func guestsToTell(about event: CalendarEvent) -> [MailAddress] {
+        guard event.organizer.map({ $0.isSameMailbox(as: account.email) }) ?? true else { return [] }
+        return event.attendees.filter { !$0.isOrganizer && !$0.address.isSameMailbox(as: account.email) }.map(\.address)
+    }
+
+    /// Emails a saved meeting's invitation, for a calendar with no server to send it: to every guest when something
+    /// they'd want to know changed (or it's new), else to guests just added; guests taken off get a cancellation.
+    private func emailInvitations(for saved: CalendarEvent, before original: CalendarEvent?) async {
+        guard let mailer else { return }
+        let guests = guestsToTell(about: saved)
+        let earlier = original.map(guestsToTell(about:)) ?? []
+        let added = guests.filter { guest in !earlier.contains { $0.isSameMailbox(as: guest.email) } }
+        let removed = earlier.filter { guest in !guests.contains { $0.isSameMailbox(as: guest.email) } }
+        let matters = original.map { old in
+            old.title != saved.title || old.start != saved.start || old.end != saved.end || old.isAllDay != saved.isAllDay
+                || old.location != saved.location || old.notes != saved.notes || old.recurrence != saved.recurrence
+                || old.conference?.joinURL != saved.conference?.joinURL
+        } ?? true
+        let invited = matters ? guests : added
+        if !invited.isEmpty, let text = try? await service.invitationText(for: saved, method: .request, attendees: nil) {
+            mailer.send(.request, text: text, about: saved, to: invited)
+        }
+        if !removed.isEmpty, let text = try? await service.invitationText(for: saved, method: .cancel, attendees: removed) {
+            mailer.send(.cancel, text: text, about: saved, to: removed)
+        }
+    }
+
+    /// Answers an invitation that came by email. The calendar's own copy is answered when it has one (its server, or
+    /// PMail for a calendar without one, tells the organizer); a calendar without a server takes the invitation in
+    /// first; otherwise the answer goes to the organizer by email.
+    func answer(_ invitation: Invitation, with response: AttendeeResponse) {
+        Task {
+            if let event = await event(withUID: invitation.uid, near: invitation.event) {
+                return respond(to: event, with: response)
+            }
+            if service.emailsInvitations {
+                do {
+                    try await service.receive(invitation)
+                } catch {
+                    app?.report(error, doing: "Adding the invitation to your calendar")
+                    return
+                }
+                if let event = await event(withUID: invitation.uid, near: invitation.event) {
+                    respond(to: event, with: response)
+                    reload()
+                }
+                return
+            }
+            guard let organizer = invitation.organizer,
+                  let reply = InvitationText.reply(to: invitation.text, from: account.address, response: response) else {
+                app?.show("This invitation doesn’t say who to answer.")
+                return
+            }
+            mailer?.send(.reply, text: reply, about: invitation.event, to: [organizer], answer: response)
+            answeredByEmail[invitation.uid] = response
+        }
+    }
+
+    /// Answers given by email to invitations the calendar doesn't have, by UID, for the message to show.
+    var answeredByEmail: [String: AttendeeResponse] = [:]
+
+    /// The account's answer to an invitation, as far as PMail knows: the calendar's copy, or an answer sent by email.
+    func currentAnswer(to invitation: Invitation) -> AttendeeResponse? {
+        events.first { $0.uid == invitation.uid && !$0.isTask }?.myResponse ?? answeredByEmail[invitation.uid]
+    }
+
+    /// The calendar's event with an iCalendar UID: one already loaded, or one found around the invitation's time.
+    func event(withUID uid: String, near reference: CalendarEvent) async -> CalendarEvent? {
+        if let loaded = events.first(where: { $0.uid == uid && !$0.isTask }) { return loaded }
+        let ids = calendars.filter { !$0.isTaskList }.map(\.id)
+        guard !ids.isEmpty else { return nil }
+        let found = try? await service.loadEvents(in: ids, from: reference.start.addingTimeInterval(-86_400), to: reference.end.addingTimeInterval(86_400))
+        return found?.first { $0.uid == uid && !$0.isTask }
+    }
+
     // MARK: Changes made offline
 
     /// Whether a change waits instead of going now: the Mac is offline, the event was made here and hasn't reached
     /// the server, or it has changes waiting already (so they go in order).
     private func waits(_ id: String) -> Bool {
-        app?.sync?.isOnline == false || LocalID.isLocal(id) || waiting.contains { $0.event.id == id }
+        // A calendar kept on this Mac (the one kind that emails its own invitations) needs no network; the invitations
+        // it emails wait in the Outbox instead.
+        let offline = app?.sync?.isOnline == false && !service.emailsInvitations
+        return offline || LocalID.isLocal(id) || waiting.contains { $0.event.id == id }
     }
 
     /// Keeps a change on this Mac until the calendar can be reached, and shows it. False when there's nowhere to keep it.

@@ -224,6 +224,15 @@ enum SampleData {
         let pdf = Attachment(id: "3", filename: "Q4 roadmap.pdf", mimeType: "application/pdf", size: 248_000,
                              data: Data("%PDF-1.4\n% sample\n".utf8))
 
+        // `-PMSampleInvitation YES`: an emailed invitation at the top of the inbox, to look at its card.
+        if UserDefaults.standard.bool(forKey: "PMSampleInvitation") {
+            let start = Calendar.current.date(bySettingHour: 18, minute: 0, second: 0, of: today.addingTimeInterval(3 * 86_400)) ?? today
+            let invite = SelfTest.invitation(uid: "sample-invitation@pmail.example", title: "Garden party", start: start,
+                                             end: start.addingTimeInterval(7_200), organizer: olivia.email, guest: me.email)
+            let file = Attachment(id: "4", filename: "invite.ics", mimeType: "text/calendar", size: invite.utf8.count, data: Data(invite.utf8))
+            add(from: olivia, subject: "Invitation: Garden party", text: "Come celebrate the end of the season in our garden! Bring a chair.\n\nOlivia",
+                daysAgo: 0, hour: 10, labels: ["INBOX", "CATEGORY_PERSONAL"], unread: true, attachments: [file])
+        }
         add(from: alex, cc: [priya, leo], subject: "Design review moved to Thursday",
             text: "Hi Jamie,\n\nQuick heads-up: the design review is now Thursday at 2pm so Priya can join. Same room, and there's a video link on the invite.\n\nCan you bring the onboarding flows? Leo has the latest prototypes.\n\nThanks!\nAlex",
             daysAgo: 0, hour: 9, minute: 12, labels: ["INBOX", "CATEGORY_PERSONAL", "IMPORTANT", "Label_work"], unread: true, important: true, thread: "t-review")
@@ -525,7 +534,8 @@ enum SampleData {
                                         isAllDay: allDay, location: location, notes: notes, attendees: attendees,
                                         organizer: attendees.first(where: \.isOrganizer)?.address, conference: conference,
                                         recurrence: recurring ? ["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"] : [], seriesID: recurring ? "series-\(title)" : nil,
-                                        myResponse: myResponse, reminderMinutes: allDay ? [] : [10], type: type, declinesInvitations: declines,
+                                        myResponse: myResponse, reminderMinutes: allDay ? [] : [10],
+                                        uid: "sample-\(account.kind.rawValue)-\(counter)@pmail.example", type: type, declinesInvitations: declines,
                                         notesHTML: notesHTML))
         }
         switch account.kind {

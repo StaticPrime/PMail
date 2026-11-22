@@ -76,6 +76,17 @@ public final class CalendarWithTasks: CalendarService {
         try await calendars.freeBusy(for: addresses, from: start, to: end)
     }
 
+    public var emailsInvitations: Bool { calendars.emailsInvitations }
+
+    public func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? {
+        guard !event.isTask else { return nil }
+        return try await calendars.invitationText(for: event, method: method, attendees: attendees)
+    }
+
+    public func receive(_ invitation: Invitation) async throws {
+        try await calendars.receive(invitation)
+    }
+
     /// The event as saved, as the kind the person chose: kept on this Mac when the calendar saved it as another kind,
     /// and forgotten here when the calendar holds it itself.
     private func reconciled(_ saved: CalendarEvent, wanted: CalendarEvent) async -> CalendarEvent {
