@@ -23,6 +23,7 @@ struct ComposeWindow: View {
     @Bindable var model: ComposeModel
     @State private var editor = RichTextController()
     @State private var dropTargeted = false
+    @FocusState private var subjectFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,8 +53,11 @@ struct ComposeWindow: View {
                     TextField("Subject", text: $model.subject)
                         .textFieldStyle(.plain)
                         .font(.pm(13.5))
+                        .focused($subjectFocused)
                         .padding(.horizontal, 16)
                         .frame(height: 38)
+                        .background { Color.clear.contentShape(Rectangle()).onTapGesture { subjectFocused = true } }
+                        .textCursor()
                     Divider().overlay(Theme.divider).padding(.horizontal, 16)
                     RichTextEditor(model: model, controller: editor)
                         .padding(.horizontal, 10)
@@ -425,11 +429,14 @@ struct RecipientField<Accessory: View>: View {
     var body: some View {
         let suggestions = contacts.suggestions(for: text, excluding: addresses)
         VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 6) {
-                Text(label).font(.pm(13)).foregroundStyle(Theme.textSecondary).frame(width: 28, alignment: .leading)
-                FlowLayout(spacing: 4) {
+            // The label and Cc and Bcc stay level with the first line of addresses as more lines fill.
+            HStack(alignment: .top, spacing: 6) {
+                Text(label).font(.pm(13)).foregroundStyle(Theme.textSecondary).frame(width: 28, height: FlowLayout.chipHeight, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { focused = true }
+                FlowLayout(spacing: 4, minRowHeight: FlowLayout.chipHeight) {
                     ForEach(Array(addresses.enumerated()), id: \.offset) { index, address in
-                        RecipientChip(address: address) { addresses.remove(at: index) }
+                        RecipientChip(address: address) { addresses.remove(at: index) }.arrowCursor()
                     }
                     TextField("", text: $text)
                         .textFieldStyle(.plain)
@@ -454,11 +461,14 @@ struct RecipientField<Accessory: View>: View {
                         }
                         .accessibilityLabel(label)
                 }
-                accessory()
+                accessory().frame(height: FlowLayout.chipHeight).arrowCursor()
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 5)
             .frame(minHeight: 38)
+            // Anywhere in the row is a place to type: the text cursor shows over it, and a click puts the caret in the field.
+            .background { Color.clear.contentShape(Rectangle()).onTapGesture { focused = true } }
+            .textCursor()
             Divider().overlay(Theme.divider).padding(.horizontal, 16)
         }
         .overlay(alignment: .topLeading) {
@@ -540,9 +550,14 @@ enum RecipientParser {
     }
 }
 
-/// Lays chips out in rows, wrapping to the next row as they fill one.
+/// Lays chips out in rows, wrapping to the next row as they fill one. Each row is at least `minRowHeight` tall, with
+/// what's in it centred, so a text field alone in a row sits where it would beside chips.
 struct FlowLayout: Layout {
+    /// An address chip's height, the height of a row of them.
+    static let chipHeight: CGFloat = 24
+
     var spacing: CGFloat = 4
+    var minRowHeight: CGFloat = 0
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let rows = arrange(width: proposal.width ?? 400, subviews: subviews)
@@ -571,13 +586,13 @@ struct FlowLayout: Layout {
     }
 
     private func arrange(width: CGFloat, subviews: Subviews) -> [Row] {
-        var rows: [Row] = [Row()]
+        var rows: [Row] = [Row(height: minRowHeight)]
         var x: CGFloat = 0
         for index in subviews.indices {
             var size = subviews[index].sizeThatFits(.unspecified)
             size.width = min(size.width, width)
             if x + size.width > width, !rows[rows.count - 1].indices.isEmpty {
-                rows.append(Row())
+                rows.append(Row(height: minRowHeight))
                 x = 0
             }
             rows[rows.count - 1].indices.append(index)

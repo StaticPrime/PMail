@@ -306,4 +306,25 @@ extension View {
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
     }
+
+    /// The text cursor over a place to type, before it's clicked into as well as after (a text field only shows it
+    /// itself once it's being edited).
+    @ViewBuilder func textCursor() -> some View {
+        if #available(macOS 15.0, *) {
+            pointerStyle(.horizontalText)
+        } else {
+            onHover { inside in
+                if inside { NSCursor.iBeam.push() } else { NSCursor.pop() }
+            }
+        }
+    }
+
+    /// The ordinary arrow, over something clickable inside a place to type (an address's chip, say).
+    @ViewBuilder func arrowCursor() -> some View {
+        if #available(macOS 15.0, *) {
+            pointerStyle(.default)
+        } else {
+            self
+        }
+    }
 }

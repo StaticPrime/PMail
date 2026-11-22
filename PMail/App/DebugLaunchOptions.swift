@@ -53,7 +53,7 @@ enum DebugLaunchOptions {
 
     /// `-PMAccount 2` picks an account; `-PMModule calendar` (or `contacts`) a part of the app; `-PMFolder sent`
     /// (a role, or a folder's name) and `-PMTab 2` the list; `-PMSearch words` searches; `-PMOpen 1` opens a
-    /// conversation; `-PMCompose YES` (or `reply`) opens a compose window; `-PMCalendarView month` (or `day`, `week`,
+    /// conversation; `-PMCompose YES` (or `reply`, `formatted` or `cc`) opens a compose window; `-PMCalendarView month` (or `day`, `week`,
     /// `schedule`), `-PMEvent 3` (the details of the third event this week) and `-PMEventEditor new` (or a number);
     /// `-PMContact 2` and `-PMContactEditor YES`; `-PMAddAccount YES` (or `google`, `microsoft`, `icloud`, `other`);
     /// `-PMAccountMenu YES`, `-PMSettings YES`, `-PMShowAbout YES`, `-PMShortcuts YES`, `-PMCollapsed YES`;
@@ -153,8 +153,12 @@ enum DebugLaunchOptions {
                 } else {
                     let model = app.compose(to: [SampleData.person("Alex Kim")], subject: "Notes from today")
                     model?.setPlainBody("Hi Alex,\n\nHere are my notes from the design review. Waffles says hi!\n\nJamie")
-                    // `-PMCompose formatted` shows the formatting bar too.
+                    // `-PMCompose formatted` shows the formatting bar too; `-PMCompose cc` the Cc and Bcc fields.
                     if compose == "formatted" { model?.showsFormatting = true }
+                    if compose == "cc" {
+                        model?.showsCc = true
+                        model?.showsBcc = true
+                    }
                 }
             }
             let calendar = session.calendar
