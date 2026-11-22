@@ -88,35 +88,27 @@ final class NewMailFilter {
                 await session.storage.junkMarks.mark([summary], as: .junk)
                 result.quiet.insert(summary.id)
             case .addLabel:
-                guard let label = await folder(named: action.value, labels: true, in: session) else { continue }
+                guard let label = await label(named: action.value, in: session) else { continue }
                 try? await service.perform(.addLabel(label.id), on: [summary])
             case .markRead: try? await service.perform(.markRead, on: [summary])
             case .star: try? await service.perform(.star, on: [summary])
             case .notify: result.announce.append(summary)
             case .playSound: NSSound(named: NSSound.Name(action.value.isEmpty ? "Glass" : action.value))?.play()
             case .bounceDockIcon: NSApp.requestUserAttention(.informationalRequest)
-            case .moveToJunk, .moveToTrash, .archive, .moveToFolder:
-                let move: MailAction
-                switch action.kind {
-                case .moveToJunk: move = .markSpam
-                case .moveToTrash: move = .trash
-                case .archive: move = .archive
-                default:
-                    guard let folder = await folder(named: action.value, labels: false, in: session) else { continue }
-                    move = .move(toFolderID: folder.id)
-                }
+            case .moveToJunk, .moveToTrash, .archive:
+                let move: MailAction = action.kind == .moveToJunk ? .markSpam : action.kind == .moveToTrash ? .trash : .archive
                 guard (try? await service.perform(move, on: [summary])) != nil else { continue }
                 result.movedOut.insert(summary.id)
             }
         }
     }
 
-    /// The account's folder or label with a name, ignoring case.
-    private func folder(named name: String, labels: Bool, in session: AccountSession) async -> MailFolder? {
+    /// The account's label with a name, ignoring case.
+    private func label(named name: String, in session: AccountSession) async -> MailFolder? {
         let wanted = name.trimmingCharacters(in: .whitespaces).lowercased()
         guard !wanted.isEmpty, let folders = try? await session.services.mail.loadFolders() else { return nil }
         let named = folders.filter { $0.name.lowercased() == wanted || session.mail.displayName(for: $0).lowercased() == wanted }
-        return named.first { ($0.kind == .label) == labels } ?? named.first
+        return named.first { $0.kind == .label } ?? named.first
     }
 
     // MARK: Who the person knows

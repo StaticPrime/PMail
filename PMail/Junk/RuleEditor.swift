@@ -20,7 +20,7 @@ struct RuleEditor: View {
     ]
 
     static let actionGroups: [[RuleAction.Kind]] = [
-        [.moveToJunk, .markJunk, .moveToTrash, .archive, .moveToFolder], [.addLabel, .markRead, .star], [.notify, .playSound, .bounceDockIcon],
+        [.moveToJunk, .markJunk, .moveToTrash, .archive], [.addLabel, .markRead, .star], [.notify, .playSound, .bounceDockIcon],
     ]
 
     var body: some View {
@@ -177,7 +177,7 @@ private struct ActionRow: View {
             .labelsHidden()
             .fixedSize()
             if action.kind.takesName {
-                TextField(action.kind == .moveToFolder ? "Folder name" : "Label name", text: $action.value)
+                TextField("Label name", text: $action.value)
             } else if action.kind.takesSound {
                 Picker("Sound", selection: Binding(get: { action.value }, set: { sound in
                     action.value = sound

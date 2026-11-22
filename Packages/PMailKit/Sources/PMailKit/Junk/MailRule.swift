@@ -53,6 +53,30 @@ public struct MailRule: Codable, Sendable, Hashable {
         self.actions = actions
     }
 
+    enum CodingKeys: String, CodingKey {
+        case description, matchesAll, conditions, actions
+    }
+
+    /// A rule saved with an action PMail no longer has (moving to a named folder) loads without it; one left with no
+    /// actions moves junk to the Junk folder, as the rule starts out doing.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        description = try container.decode(String.self, forKey: .description)
+        matchesAll = try container.decode(Bool.self, forKey: .matchesAll)
+        conditions = try container.decode([RuleCondition].self, forKey: .conditions)
+        let actions = try container.decode([Lenient<RuleAction>].self, forKey: .actions).compactMap(\.value)
+        self.actions = actions.isEmpty ? [RuleAction(.moveToJunk)] : actions
+    }
+
+    /// Something decoded if it can be, or nothing.
+    private struct Lenient<Value: Decodable>: Decodable {
+        let value: Value?
+
+        init(from decoder: any Decoder) throws {
+            value = try? Value(from: decoder)
+        }
+    }
+
     /// The rule junk handling starts with: junk from strangers who don't know the person's name goes to the Junk folder.
     public static let junk = MailRule(description: "Junk", conditions: [
         RuleCondition(.senderNotInContacts), RuleCondition(.senderNotInPreviousRecipients), RuleCondition(.notAddressedToFullName),
@@ -298,7 +322,7 @@ public enum AttachmentKind: String, Codable, Sendable, CaseIterable {
 /// One of a rule's actions.
 public struct RuleAction: Codable, Sendable, Hashable, Identifiable {
     public enum Kind: String, Codable, Sendable, CaseIterable {
-        case moveToJunk, markJunk, moveToTrash, archive, moveToFolder, addLabel, markRead, star, notify, playSound, bounceDockIcon
+        case moveToJunk, markJunk, moveToTrash, archive, addLabel, markRead, star, notify, playSound, bounceDockIcon
 
         public var name: String {
             switch self {
@@ -306,7 +330,6 @@ public struct RuleAction: Codable, Sendable, Hashable, Identifiable {
             case .markJunk: "Mark as junk, leaving it in the inbox"
             case .moveToTrash: "Move to Trash"
             case .archive: "Archive"
-            case .moveToFolder: "Move to the folder"
             case .addLabel: "Add the label"
             case .markRead: "Mark as read"
             case .star: "Star"
@@ -316,11 +339,11 @@ public struct RuleAction: Codable, Sendable, Hashable, Identifiable {
             }
         }
 
-        /// What it needs: a folder's or label's name, or a sound.
-        public var takesName: Bool { self == .moveToFolder || self == .addLabel }
+        /// What it needs: a label's name, or a sound.
+        public var takesName: Bool { self == .addLabel }
         public var takesSound: Bool { self == .playSound }
         /// Whether it takes the message out of the inbox.
-        public var movesOut: Bool { [.moveToJunk, .moveToTrash, .archive, .moveToFolder].contains(self) }
+        public var movesOut: Bool { [.moveToJunk, .moveToTrash, .archive].contains(self) }
     }
 
     /// The sounds macOS comes with, for Play the sound.

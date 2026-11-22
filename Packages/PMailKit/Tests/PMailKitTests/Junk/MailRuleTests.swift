@@ -97,6 +97,14 @@ struct MailRuleTests {
         #expect(!old.filtersJunk && old.junkAction == .moveToJunk && old.exemptsContacts && old.blockedAction == .moveToJunk && old.customRule == .junk)
         let saved = try JSONDecoder().decode(JunkPolicy.self, from: JSONEncoder().encode(policy))
         #expect(saved == policy)
+
+        // A rule saved with an action PMail no longer has loads without it, keeping the rest.
+        let star = UUID(), folder = UUID()
+        let older = #"{"description":"Old","matchesAll":true,"conditions":[],"actions":[{"id":"\#(folder)","kind":"moveToFolder","value":"Promos"},{"id":"\#(star)","kind":"star","value":""}]}"#
+        let rule = try JSONDecoder().decode(MailRule.self, from: Data(older.utf8))
+        #expect(rule.actions == [RuleAction(.star, id: star)])
+        let onlyFolder = #"{"description":"Old","matchesAll":true,"conditions":[],"actions":[{"id":"\#(folder)","kind":"moveToFolder","value":"Promos"}]}"#
+        #expect(try JSONDecoder().decode(MailRule.self, from: Data(onlyFolder.utf8)).actions.map(\.kind) == [.moveToJunk], "and never with no actions at all")
     }
 
     @Test func serversSpamMarks() {
