@@ -21,9 +21,7 @@ struct EventDetailsView: View {
                         model.selectedEventID = nil
                         app.sheet = .eventEditor(model.draft(for: event))
                     }
-                    IconButton(symbol: "trash", help: "Delete event", size: 32, iconSize: 14) {
-                        if event.isRecurring { confirmsDelete = true } else { model.delete(event, scope: .thisEvent) }
-                    }
+                    IconButton(symbol: "trash", help: "Delete event", size: 32, iconSize: 14) { confirmsDelete = true }
                 }
                 if !guests.isEmpty {
                     IconButton(symbol: "envelope", help: "Email guests", size: 32, iconSize: 14) {
@@ -132,10 +130,21 @@ struct EventDetailsView: View {
         .padding(.bottom, 16)
         .frame(width: 440)
         .background(Theme.surfaceRaised)
-        .confirmationDialog("Delete recurring event", isPresented: $confirmsDelete) {
-            Button("This event", role: .destructive) { model.delete(event, scope: .thisEvent) }
-            Button("All events", role: .destructive) { model.delete(event, scope: .allEvents) }
+        #if DEBUG
+        // `-PMConfirmDelete YES` asks about deleting the event showing.
+        .onAppear { if UserDefaults.standard.bool(forKey: "PMConfirmDelete") { confirmsDelete = true } }
+        #endif
+        // Deleting asks first (there's no Undo): a repeating event, whether it's this one or all of them.
+        .confirmationDialog("Delete “\(event.title.isEmpty ? "(No title)" : event.title)”?", isPresented: $confirmsDelete, titleVisibility: .visible) {
+            if event.isRecurring {
+                Button("Delete This Event", role: .destructive) { model.delete(event, scope: .thisEvent) }
+                Button("Delete All Events", role: .destructive) { model.delete(event, scope: .allEvents) }
+            } else {
+                Button("Delete Event", role: .destructive) { model.delete(event, scope: .thisEvent) }
+            }
             Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(event.isRecurring ? "It repeats: delete just this one, or every time it happens? This can’t be undone." : "This can’t be undone.")
         }
     }
 
