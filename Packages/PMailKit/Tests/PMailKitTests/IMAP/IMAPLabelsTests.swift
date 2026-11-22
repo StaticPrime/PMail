@@ -81,26 +81,26 @@ import Testing
             Script.ok("A3", "UID STORE 11:12 +FLAGS (PMail_Work)",
                       untagged: [#"* 2 FETCH (UID 11 FLAGS (\Seen PMail_Work))"#, "* 3 FETCH (UID 12 FLAGS (PMail_Work))"]),
             Script.ok("A4", "UID STORE 12 -FLAGS.SILENT (PMail_Work)"),
-            // Listing the label: every mailbox but Trash and Junk is searched for its keyword.
-            Script.list("A5"),
-            Self.examine("A6", flags: " PMail_Work PMail_Trip"),
-            Script.ok("A7", "UID SEARCH KEYWORD PMail_Work", untagged: ["* SEARCH 11"]),
-            Script.ok("A8", "UID FETCH 11 (UID INTERNALDATE)",
+            // Listing the label: the message PMail put it on is fetched where it is, and still has it.
+            Script.ok("A5", "UID FETCH 11 \(Self.summaryFetch)", untagged: [
+                Self.row(2, uid: 11, flags: "PMail_Work", subject: "Park day", messageID: "<park@example.com>"),
+            ]),
+            // Then every mailbox but Trash and Junk is searched for its keyword (the inbox's find is already in hand).
+            Script.list("A6"),
+            Self.examine("A7", flags: " PMail_Work PMail_Trip"),
+            Script.ok("A8", "UID SEARCH KEYWORD PMail_Work", untagged: ["* SEARCH 11"]),
+            Script.ok("A9", "UID FETCH 11 (UID INTERNALDATE)",
                       untagged: [#"* 2 FETCH (UID 11 INTERNALDATE "21-Nov-2026 18:45:05 +0000")"#]),
-            Self.examine("A9", "Archive", exists: 2, uidValidity: 3),
-            Script.ok("A10", "UID SEARCH KEYWORD PMail_Work", untagged: ["* SEARCH 4"]),
-            Script.ok("A11", "UID FETCH 4 (UID INTERNALDATE)", untagged: [#"* 1 FETCH (UID 4 INTERNALDATE "22-Nov-2026 09:00:00 +0000")"#]),
-            Self.examine("A12", "Sent Messages", exists: 0, uidValidity: 9),
-            .expect(#"A13 EXAMINE "Drafts""#, reply: "A13 NO [NONEXISTENT] No such mailbox\r\n"),
-            // The newest first: the archived message, then the one in the inbox.
-            Self.examine("A14", "Archive", exists: 2, uidValidity: 3),
-            Script.ok("A15", "UID FETCH 4 \(Self.summaryFetch)", untagged: [
+            Self.examine("A10", "Archive", exists: 2, uidValidity: 3),
+            Script.ok("A11", "UID SEARCH KEYWORD PMail_Work", untagged: ["* SEARCH 4"]),
+            Script.ok("A12", "UID FETCH 4 (UID INTERNALDATE)", untagged: [#"* 1 FETCH (UID 4 INTERNALDATE "22-Nov-2026 09:00:00 +0000")"#]),
+            Self.examine("A13", "Sent Messages", exists: 0, uidValidity: 9),
+            .expect(#"A14 EXAMINE "Drafts""#, reply: "A14 NO [NONEXISTENT] No such mailbox\r\n"),
+            // The newest first: the archived message (fetched now), then the one in the inbox.
+            Self.examine("A15", "Archive", exists: 2, uidValidity: 3),
+            Script.ok("A16", "UID FETCH 4 \(Self.summaryFetch)", untagged: [
                 Self.row(1, uid: 4, flags: #"\Seen PMail_Work"#, subject: "Trip plans", messageID: "<trip@example.com>",
                          date: "Sun, 22 Nov 2026 04:00:00 -0500"),
-            ]),
-            Self.examine("A16"),
-            Script.ok("A17", "UID FETCH 11 \(Self.summaryFetch)", untagged: [
-                Self.row(2, uid: 11, flags: "PMail_Work", subject: "Park day", messageID: "<park@example.com>"),
             ]),
         ])
         let imap = service([stream], book: book)
@@ -213,15 +213,12 @@ import Testing
             Script.ok("A6", "UID FETCH 11:13 \(Self.summaryFetch)", untagged: [
                 park, lunch, Self.row(3, uid: 13, flags: "", subject: "Other", messageID: "<other@example.com>"),
             ]),
-            // Listing the label looks its messages up by Message-ID, newest first.
-            Script.list("A7"),
-            Self.examine("A8"),
-            Script.ok("A9", #"UID SEARCH OR HEADER Message-ID "lunch@example.com" HEADER Message-ID "park@example.com""#,
-                      untagged: ["* SEARCH 11 12"]),
-            Script.ok("A10", "UID FETCH 11:12 \(Self.summaryFetch)", untagged: [park, lunch]),
+            // Listing the label fetches its messages where PMail labeled them, without searching the server (whose
+            // searches may not find them).
+            Script.ok("A7", "UID FETCH 11:12 \(Self.summaryFetch)", untagged: [park, lunch]),
             // Taking it off one; a message without a Message-ID can't have one.
-            Self.select("A11", keywords: false),
-            Script.ok("A12", "UID FETCH 13 (UID ENVELOPE)", untagged: [
+            Self.select("A8", keywords: false),
+            Script.ok("A9", "UID FETCH 13 (UID ENVELOPE)", untagged: [
                 #"* 3 FETCH (UID 13 ENVELOPE ("Sun, 22 Nov 2026 12:00:00 +0000" "Other" NIL NIL NIL NIL NIL NIL NIL NIL))"#,
             ]),
         ])
@@ -251,6 +248,46 @@ import Testing
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 
+    /// A label kept on this Mac from before PMail noted where its messages are, on a server whose searches find
+    /// nothing (as an iCloud account's may not): once the inbox has shown the message, the label lists it, fetched
+    /// where it is with no search, and forgets that place once the message no longer has the label.
+    @Test func aLabelListsItsMessagesWithoutTheServersSearches() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let book = LabelBook(file: folder.appendingPathComponent("labels.json"))
+        let work = try await book.create(named: "Work", colorHex: nil)
+        let kept = MessageSummary(id: "earlier", messageIDHeader: "<park@example.com>")
+        _ = try await book.assign(work.id, to: [kept])
+        try await book.noteKeywords(allowed: false)
+        let park = Self.row(1, uid: 11, flags: #"\Seen"#, subject: "Park day", messageID: "<park@example.com>")
+        let stream = ScriptedByteStream(greeting: Script.greeting(), script: [
+            Script.signIn("A1"),
+            // The inbox lists with the label the book keeps, and where that message is gets noted.
+            Self.examine("A2"),
+            Script.ok("A3", "UID SEARCH ALL", untagged: ["* SEARCH 11 12"]),
+            Script.ok("A4", "UID FETCH 11:12 \(Self.summaryFetch)", untagged: [
+                park, Self.row(2, uid: 12, flags: "", subject: "Other", messageID: "<other@example.com>"),
+            ]),
+            // The label lists it from there, without searching.
+            Script.ok("A5", "UID FETCH 11 \(Self.summaryFetch)", untagged: [park]),
+            // Once the label is off it, the place is forgotten.
+            Script.ok("A6", "UID FETCH 11 \(Self.summaryFetch)", untagged: [park]),
+        ])
+        let imap = service([stream], book: book)
+        _ = try await imap.listConversations(ListRequest(folderID: "INBOX"))
+        #expect(await book.places(withLabel: work.id) == [IMAPMessageID.inbox(11)], "only the labeled message's place")
+
+        let page = try await imap.listConversations(ListRequest(folderID: work.id))
+        #expect(page.conversations.flatMap(\.messages).map(\.subject) == ["Park day"] && page.totalCount == 1)
+        #expect(page.conversations.first?.labelIDs == [work.id])
+
+        try await book.unassign(work.id, from: [kept])
+        let after = try await imap.listConversations(ListRequest(folderID: work.id))
+        #expect(after.conversations.isEmpty && after.totalCount == 0)
+        #expect(await book.places(withLabel: work.id).isEmpty)
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
+
     /// A server that says it takes keywords but doesn't keep them: the label is kept on this Mac instead (and every
     /// label after it), and listing the label still finds its conversation on the server.
     @Test func keywordsAServerDropsAreKeptOnThisMac() async throws {
@@ -263,12 +300,11 @@ import Testing
             // The server answers without the keyword, and doesn't report the second message at all.
             Script.ok("A3", "UID STORE 11:12 +FLAGS (PMail_Work)", untagged: [#"* 2 FETCH (UID 11 FLAGS (\Seen))"#]),
             Script.ok("A4", "UID FETCH 12 (UID FLAGS)", untagged: ["* 3 FETCH (UID 12 FLAGS (PMail_Work))"]),
-            // Later labels go straight to the book; listing finds the messages by Message-ID.
-            Script.list("A5"),
-            Self.examine("A6"),
-            Script.ok("A7", #"UID SEARCH HEADER Message-ID "park@example.com""#, untagged: ["* SEARCH 11"]),
-            Script.ok("A8", "UID FETCH 11 \(Self.summaryFetch)", untagged: [
+            // Later labels go straight to the book. Listing fetches both messages where PMail labeled them: one has the
+            // label in the book, the other kept its keyword.
+            Script.ok("A5", "UID FETCH 11:12 \(Self.summaryFetch)", untagged: [
                 Self.row(2, uid: 11, flags: #"\Seen"#, subject: "Park day", messageID: "<park@example.com>"),
+                Self.row(3, uid: 12, flags: "PMail_Work", subject: "Lunch", messageID: "<lunch@example.com>"),
             ]),
         ])
         let imap = service([stream], book: book)
@@ -281,8 +317,8 @@ import Testing
         #expect(await book.messages(withLabel: work.id).map(\.key) == ["park@example.com"], "the dropped one is kept here")
 
         let page = try await imap.listConversations(ListRequest(folderID: work.id))
-        #expect(page.conversations.flatMap(\.messages).map(\.subject) == ["Park day"], "the label lists its conversation")
-        #expect(page.conversations.first?.messages.first?.labelIDs == [work.id])
+        #expect(page.conversations.flatMap(\.messages).map(\.subject) == ["Park day", "Lunch"], "the label lists its conversations")
+        #expect(page.conversations.flatMap(\.messages).allSatisfy { $0.labelIDs == [work.id] })
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 

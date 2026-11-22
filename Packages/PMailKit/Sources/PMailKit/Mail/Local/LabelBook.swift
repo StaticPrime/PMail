@@ -139,6 +139,9 @@ public actor LabelBook {
         var keywordsAllowed: Bool?
         /// The server said it takes keywords but a label keyword didn't stay on the message: labels are kept here.
         var keywordsIgnored: Bool?
+        /// Where messages with each label were last seen (their IDs on the server), newest first, so listing a label
+        /// fetches them without needing the server's searches.
+        var places: [String: [String]] = [:]
 
         init() {}
 
@@ -150,6 +153,7 @@ public actor LabelBook {
             forgotten = (try? container.decode([String].self, forKey: .forgotten)) ?? []
             keywordsAllowed = try? container.decodeIfPresent(Bool.self, forKey: .keywordsAllowed)
             keywordsIgnored = try? container.decodeIfPresent(Bool.self, forKey: .keywordsIgnored)
+            places = (try? container.decode([String: [String]].self, forKey: .places)) ?? [:]
         }
     }
 
@@ -229,6 +233,7 @@ public actor LabelBook {
                 assignment.labels = Self.replacing(old.id, with: newID, in: assignment.labels)
                 contents.assignments[key] = assignment
             }
+            if let places = contents.places.removeValue(forKey: old.id) { contents.places[newID] = places }
             forget(old.id)
             contents.forgotten.removeAll { LabelKeyword.same($0, newID) }
         }
@@ -245,6 +250,7 @@ public actor LabelBook {
             assignment.labels.removeAll { $0 == label.id }
             contents.assignments[key] = assignment.labels.isEmpty ? nil : assignment
         }
+        contents.places[label.id] = nil
         forget(label.id)
         try save()
     }
@@ -360,6 +366,56 @@ public actor LabelBook {
             changed = true
         }
         if changed { try save() }
+    }
+
+    // MARK: Where labeled messages are
+
+    /// The most places kept for a label.
+    static let placesKept = 500
+
+    /// Where messages with a label were last seen, newest first.
+    func places(withLabel labelID: String) -> [String] {
+        loadIfNeeded()
+        return contents.places[label(withID: labelID)?.id ?? labelID] ?? []
+    }
+
+    /// Notes that messages (by their IDs on the server) have a label.
+    func notePlaces(_ ids: [String], forLabel labelID: String) {
+        loadIfNeeded()
+        if add(ids, toPlacesOf: label(withID: labelID)?.id ?? labelID) { try? save() }
+    }
+
+    /// Notes where messages with labels are, each under every label it has.
+    func notePlaces(of summaries: [MessageSummary]) {
+        loadIfNeeded()
+        var changed = false
+        for summary in summaries {
+            for labelID in summary.labelIDs where LabelKeyword.isLabel(labelID) {
+                changed = add([summary.id], toPlacesOf: label(withID: labelID)?.id ?? labelID) || changed
+            }
+        }
+        if changed { try? save() }
+    }
+
+    /// Forgets places that no longer hold a message with the label.
+    func dropPlaces(_ ids: [String], forLabel labelID: String) {
+        loadIfNeeded()
+        let key = label(withID: labelID)?.id ?? labelID
+        guard let current = contents.places[key] else { return }
+        let remaining = current.filter { !ids.contains($0) }
+        guard remaining.count != current.count else { return }
+        contents.places[key] = remaining.isEmpty ? nil : remaining
+        try? save()
+    }
+
+    /// Puts places first in a label's list (the newest at the front), without saving. Returns whether any were new.
+    private func add(_ ids: [String], toPlacesOf key: String) -> Bool {
+        var current = contents.places[key] ?? []
+        let new = ids.filter { !current.contains($0) }
+        guard !new.isEmpty else { return false }
+        current.insert(contentsOf: new, at: 0)
+        contents.places[key] = Array(current.prefix(Self.placesKept))
+        return true
     }
 
     /// The messages the book keeps a label for, newest first.

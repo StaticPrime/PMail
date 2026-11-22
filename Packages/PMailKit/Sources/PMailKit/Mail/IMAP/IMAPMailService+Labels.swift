@@ -46,16 +46,21 @@ extension IMAPMailService {
         return await labelBook.folders()
     }
 
-    /// Summaries from the selected mailbox with their labels as this Mac knows them (see `LabelBook.labeling`).
+    /// Summaries from the selected mailbox with their labels as this Mac knows them (see `LabelBook.labeling`). Where
+    /// each labeled one is gets noted, so its labels list it without searching the server.
     func labeled(_ summaries: [MessageSummary], client: IMAPClient) async -> [MessageSummary] {
         guard let labelBook else { return summaries }
-        return await labelBook.labeling(summaries, mailboxFlags: await client.selectedMailbox?.flags ?? [])
+        let result = await labelBook.labeling(summaries, mailboxFlags: await client.selectedMailbox?.flags ?? [])
+        await labelBook.notePlaces(of: result.filter { !$0.labelIDs.isEmpty && IMAPMessageID(rawValue: $0.id) != nil })
+        return result
     }
 
     /// A page of the messages with a label, newest first, in conversations, or nil when the request isn't for a label.
-    /// It gathers the messages kept on this Mac with the label, those the book keeps it for, and, unless the server has
-    /// shown it doesn't take keywords, those UID SEARCH KEYWORD finds in All Mail (or else where `lookupOrder` looks:
-    /// never Trash or Junk), ordered by when they arrived.
+    /// It gathers the messages kept on this Mac with the label; those where PMail last saw it, fetched by UID (so a
+    /// label lists its messages even where the server's searches can't find them, as an iCloud account's can't); those
+    /// the book keeps it for, looked up by Message-ID; and, unless the server has shown it doesn't take keywords, those
+    /// UID SEARCH KEYWORD finds in All Mail (or else where `lookupOrder` looks: never Trash or Junk). They're ordered by
+    /// when they arrived.
     func labelPage(_ request: ListRequest) async throws -> ConversationPage? {
         guard let labelBook, let requested = request.folderID, LabelKeyword.isLabel(requested),
               !(mailboxes ?? []).contains(where: { $0.name == requested }) else { return nil }
@@ -73,7 +78,21 @@ extension IMAPMailService {
             guard case let .found(summary) = entry.source else { return nil }
             return LabelBook.key(forMessageID: summary.messageIDHeader)
         })
-        let assigned = await labelBook.messages(withLabel: label).filter { !keptKeys.contains($0.key) }
+        // Where PMail last saw the label: fetched as they are now, and kept if they still have it.
+        let places = (await labelBook.places(withLabel: label)).compactMap(IMAPMessageID.init(rawValue:)).prefix(Self.labelLookupLimit)
+        var placedKeys = Set<String>()
+        var placedIDs = Set<String>()
+        if !places.isEmpty {
+            let placed = try await withClient { client in try await self.placedSummaries(Array(places), label: label, client: client) }
+            if !placed.gone.isEmpty { await labelBook.dropPlaces(placed.gone.map(\.rawValue), forLabel: label) }
+            let words = IMAPSearchKey.words(in: query)
+            for summary in placed.found where query.isEmpty || Self.summary(summary, matches: words) {
+                entries.append(LabelEntry(date: summary.date, source: .found(summary)))
+            }
+            placedKeys = Set(placed.found.compactMap { LabelBook.key(forMessageID: $0.messageIDHeader) })
+            placedIDs = Set(placed.found.map(\.id))
+        }
+        let assigned = await labelBook.messages(withLabel: label).filter { !keptKeys.contains($0.key) && !placedKeys.contains($0.key) }
         if query.isEmpty {
             entries += assigned.map { LabelEntry(date: $0.date, source: .messageID($0.key)) }
         } else if !assigned.isEmpty {
@@ -90,7 +109,11 @@ extension IMAPMailService {
         let paged: LabelSlice
         if await labelBook.keywordsAllowed() != false {
             paged = try await withClient { client in
-                let found = try await self.keywordEntries(label, query: query, client: client)
+                // Messages already found where PMail last saw them aren't counted twice.
+                let found = try await self.keywordEntries(label, query: query, client: client).filter { entry in
+                    guard case let .server(id) = entry.source else { return true }
+                    return !placedIDs.contains(id.rawValue)
+                }
                 var slice = Self.slice(gathered + found, pageIndex: pageIndex, pageSize: pageSize)
                 slice.entries = try await self.summarizingServerEntries(slice.entries, client: client)
                 return slice
@@ -128,6 +151,37 @@ extension IMAPMailService {
         }
         return ConversationPage(conversations: Conversation.group(summaries), totalCount: paged.total,
                                 nextPageToken: paged.hasMore ? String(pageIndex + 1) : nil)
+    }
+
+    /// The messages where PMail last saw a label, as they are now: fetched by UID, mailbox by mailbox, keeping those
+    /// that still have the label (by keyword, or in the book). The places that no longer hold such a message come back
+    /// too, to be forgotten.
+    func placedSummaries(_ places: [IMAPMessageID], label: String,
+                         client: IMAPClient) async throws -> (found: [MessageSummary], gone: [IMAPMessageID]) {
+        var found: [MessageSummary] = []
+        var gone: [IMAPMessageID] = []
+        for (mailbox, ids) in Self.grouped(places, by: { $0.mailbox }) {
+            let selected: IMAPSelectedMailbox
+            do {
+                selected = try await ensureSelected(mailbox, writable: false, client: client)
+            } catch PMailError.server {
+                gone += ids  // The mailbox is gone, or not open to this account.
+                continue
+            }
+            let uidValidity = selected.uidValidity ?? 0
+            let current = ids.filter { $0.uidValidity == uidValidity }
+            gone += ids.filter { $0.uidValidity != uidValidity }
+            let summaries = try await self.summaries(of: current.map(\.uid).sorted(), in: mailbox, uidValidity: uidValidity, client: client)
+            let byID = Dictionary(summaries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            for id in current {
+                if let summary = byID[id.rawValue], summary.labelIDs.contains(where: { LabelKeyword.same($0, label) }) {
+                    found.append(summary)
+                } else {
+                    gone.append(id)
+                }
+            }
+        }
+        return (found, gone)
     }
 
     /// One page of a label's entries, newest first, with how many there are in all.
@@ -279,9 +333,17 @@ extension IMAPMailService {
                     // Kept in the book from before (from a mailbox that didn't take keywords), it goes from there too.
                     try await labelBook.unassign(label, from: current.map { $0.0 })
                 } else if adding {
-                    unkeyed += try await labelBook.assign(label, to: try await self.withMessageIDs(current, client: client))
+                    let identified = try await self.withMessageIDs(current, client: client)
+                    unkeyed += try await labelBook.assign(label, to: identified)
+                    // A message without a Message-ID didn't get the label, so where it is isn't noted.
+                    await labelBook.notePlaces(identified.filter { $0.messageIDHeader != nil }.map(\.id), forLabel: label)
                 } else {
                     try await labelBook.unassign(label, from: try await self.withMessageIDs(current, client: client))
+                }
+                if adding, takesKeywords {
+                    await labelBook.notePlaces(current.map { $0.1.rawValue }, forLabel: label)
+                } else if !adding {
+                    await labelBook.dropPlaces(current.map { $0.1.rawValue }, forLabel: label)
                 }
             }
             if skipped { throw PMailError.notFound }
