@@ -204,7 +204,7 @@ public final class PrivateFetcher: RemoteFetcher {
 }
 
 /// Follows a few redirects, and none to an address PMail wouldn't load from in the first place.
-private final class RedirectGuard: NSObject, URLSessionTaskDelegate {
+private final class RedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let throughProxy: Bool
     private let lock = NSLock()
     private var count = 0

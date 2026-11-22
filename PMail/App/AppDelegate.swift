@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let privacy = PrivacySettings(store: DebugLaunchOptions.sampleDefaults, passwords: MemoryProxyPassword())
             privacy.sampleFetcher = SampleRemoteFetcher.shared
             PrivacySettings.shared = privacy
+            BuiltInTor.shared.makeRunner = { _, onEvent in SampleTor(onEvent: onEvent) }
+            BuiltInTor.shared.connectedFetcher = { _ in SampleRemoteFetcher.shared }
         }
         #endif
         PrivacySettings.shared.routeChanged()
@@ -111,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Archives, deletes and moves still waiting out their Undo reach the server before PMail quits.
     func applicationWillTerminate(_ notification: Notification) {
         app.sync?.stop()
+        BuiltInTor.shared.stop()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

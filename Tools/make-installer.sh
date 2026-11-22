@@ -88,9 +88,13 @@ SIGN_IN=""
 SIGN_IN=", sign-in with ${SIGN_IN:-neither Google nor Microsoft}"
 
 # 2. With a Developer ID, sign the app again for distribution: the hardened runtime, a secure timestamp,
-#    and the same entitlements the build gave it. The app has no nested code, so one signature covers it.
+#    and the same entitlements the build gave it. The Tor client inside it is signed first, from the inside out:
+#    its library, then tor with the entitlements that keep it in PMail's sandbox, then the app around them.
 if [ -n "${DEVELOPER_ID_APPLICATION:-}" ]; then
     echo "Signing PMail.app with the Developer ID…"
+    codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID_APPLICATION" "$APP/Contents/Frameworks/libevent-2.1.7.dylib"
+    codesign --force --options runtime --timestamp --entitlements Vendor/Tor/tor.entitlements \
+        --sign "$DEVELOPER_ID_APPLICATION" "$APP/Contents/Helpers/tor"
     codesign -d --entitlements - --xml "$APP" > "$WORK/entitlements.plist" 2>/dev/null || true
     if [ -s "$WORK/entitlements.plist" ]; then
         codesign --force --options runtime --timestamp --entitlements "$WORK/entitlements.plist" \

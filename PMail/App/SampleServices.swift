@@ -349,6 +349,35 @@ nonisolated final class SampleRemoteFetcher: RemoteFetcher, @unchecked Sendable 
     }
 }
 
+/// Tor for sample runs: connects in half a second without going anywhere, so automated runs never reach the Tor
+/// network.
+nonisolated final class SampleTor: TorRunner, @unchecked Sendable {
+    private let onEvent: @Sendable (TorEvent) -> Void
+    private let lock = NSLock()
+    private var stopped = false
+
+    init(onEvent: @escaping @Sendable (TorEvent) -> Void) {
+        self.onEvent = onEvent
+    }
+
+    func start() throws {
+        let steps: [(Double, TorEvent)] = [(0.1, .progress(10, "Connecting to a relay")), (0.3, .progress(50, "Loading relay descriptors")),
+                                           (0.5, .progress(100, "Done"))]
+        for (delay, event) in steps {
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, !lock.withLock({ stopped }) else { return }
+                onEvent(event)
+            }
+        }
+    }
+
+    func stop() {
+        lock.withLock { stopped = true }
+        let onEvent = onEvent
+        DispatchQueue.global().async { onEvent(.exited(0)) }
+    }
+}
+
 actor SampleCalendarService: CalendarService {
     let account: Account
     private var calendars: [CalendarInfo]

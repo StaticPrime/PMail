@@ -940,14 +940,15 @@ enum SelfTest {
         let internet = SampleRemoteFetcher.shared
         let salePicture = URL(string: "https://images.example.com/sale.jpg")!
         var askedBefore = 0
+        let torLoad = ResultBox<Bool>()
         step {
             mail.select(folderID: mail.inbox?.id)
             if let first = mail.inboxTabs.first?.id { mail.select(tabID: first) }
             wait("the inbox's first tab") { mail.selectedTabID == mail.inboxTabs.first?.id && !mail.isLoadingList }
         }
         step {
-            check(privacy.blocksRemoteContent && !privacy.protectsMailActivity && !privacy.usesProxy,
-                  "remote content starts out blocked, with nothing loaded ahead and no proxy")
+            check(privacy.blocksRemoteContent && !privacy.protectsMailActivity && !privacy.hidesIPAddress && privacy.ipRoute == .tor,
+                  "remote content starts out blocked, with nothing loaded ahead and the IP address not hidden (Tor ready to choose)")
             let newsletter = MailMessage(summary: MessageSummary(id: "self-test-news", from: MailAddress(email: "news@shop.example")),
                                          htmlBody: "<p>Sale<img src=\"https://images.example.com/sale.jpg\"></p>")
             check(MessageHTML.hasRemoteContent(newsletter) && !mail.showsImages(for: newsletter), "a message's pictures wait to be asked for")
@@ -994,8 +995,10 @@ enum SelfTest {
                   MessageBodyView.remoteContentServed.map(\.absoluteString).joined(separator: " "))
             check(internet.requests.count - askedBefore == 1, "without asking the internet again", "\(internet.requests.count - askedBefore) requests")
             let before = internet.requests.count
-            privacy.usesProxy = true
+            privacy.ipRoute = .proxy
             privacy.proxy = RemoteContentProxy(host: "")
+            privacy.hidesIPAddress = true
+            check(BuiltInTor.shared.state == .off, "a proxy of your own leaves the built-in Tor off")
             let other = URL(string: "https://images.example.com/other.jpg")!
             let refused = read { (try? await RemoteContentLoader.shared.data(from: other)) == nil }
             check(refused == true && internet.requests.count == before, "with the proxy on but not filled in, nothing loads at all")
@@ -1004,9 +1007,26 @@ enum SelfTest {
             let router = URL(string: "http://192.168.1.1/admin")!
             let local = read { (try? await RemoteContentLoader.shared.data(from: router)) == nil }
             check(local == true && internet.requests.count == before, "and nothing on the local network loads", "\(internet.requests.map(\.absoluteString))")
-            privacy.usesProxy = false
+            // The built-in Tor (a stand-in in sample runs, which never reaches the Tor network): a request made while
+            // it connects waits for it, then goes through it.
+            privacy.ipRoute = .tor
+            check(BuiltInTor.shared.state != .off && RemoteContentLoader.shared.isThroughProxy, "choosing Tor starts the one built into PMail",
+                  "\(BuiltInTor.shared.state)")
+            check(!BuiltInTor.shared.fetcher.isReady, "and holds requests while it connects")
+            torLoad.value = nil
+            let early = URL(string: "https://images.example.com/early.jpg")!
+            let box = torLoad
+            Task.detached { box.value = (try? await RemoteContentLoader.shared.data(from: early)) != nil }
+            wait("Tor to connect") { BuiltInTor.shared.state == .connected && box.value != nil }
+        }
+        step {
+            check(BuiltInTor.shared.state == .connected, "Tor connects", "\(BuiltInTor.shared.state)")
+            check(torLoad.value == true && internet.requests.last?.absoluteString == "https://images.example.com/early.jpg",
+                  "and the request that waited loads through it")
+            privacy.hidesIPAddress = false
+            check(BuiltInTor.shared.state == .off && !RemoteContentLoader.shared.isThroughProxy, "turning Hide IP Address off stops Tor")
             privacy.protectsMailActivity = false
-            check(!RemoteContentLoader.shared.isThroughProxy && privacy.blocksRemoteContent && !privacy.protectsMailActivity, "the settings go back")
+            check(privacy.blocksRemoteContent && !privacy.protectsMailActivity, "the settings go back")
             mail.closeConversation()
             wait("the inbox list") { mail.openConversation == nil && !mail.isLoadingList }
         }

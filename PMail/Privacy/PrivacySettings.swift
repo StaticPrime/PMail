@@ -14,7 +14,8 @@ final class PrivacySettings {
         static let protect = "ProtectMailActivity"
         static let block = "BlockRemoteContent"
         static let trusted = "TrustedImageSenders"
-        static let proxyOn = "RemoteContentProxyOn"
+        static let hideIP = "HideIPAddress"
+        static let route = "HideIPAddressThrough"
         static let proxy = "RemoteContentProxy"
         /// Before Settings had a Privacy pane: Mail ▸ “Show pictures in messages without asking”.
         static let alwaysShowPictures = "AlwaysShowPictures"
@@ -24,6 +25,12 @@ final class PrivacySettings {
     @ObservationIgnored private let passwords: any ProxyPasswordStore
     /// Sample runs' pretend internet, used in place of the real one whatever the settings say.
     @ObservationIgnored var sampleFetcher: (any RemoteFetcher)?
+
+    /// What hides the IP address: the Tor client built into PMail, or a proxy of the person's own.
+    enum IPRoute: String {
+        case tor
+        case proxy
+    }
 
     /// Loads each new message's pictures privately in the background as it arrives, so senders can't tell whether or
     /// when it was read, and every message shows its pictures.
@@ -42,11 +49,18 @@ final class PrivacySettings {
         didSet { store.set(trustedImageSenders.sorted(), forKey: Keys.trusted) }
     }
 
-    /// Sends every request for remote content through `proxy`, so senders see its address instead of the Mac's, and
-    /// none at all when the proxy can't be reached.
-    var usesProxy: Bool {
+    /// Sends every request for remote content through Tor or the person's proxy, so senders see its address instead
+    /// of the Mac's, and none at all while that can't be reached.
+    var hidesIPAddress: Bool {
         didSet {
-            store.set(usesProxy, forKey: Keys.proxyOn)
+            store.set(hidesIPAddress, forKey: Keys.hideIP)
+            routeChanged()
+        }
+    }
+
+    var ipRoute: IPRoute {
+        didSet {
+            store.set(ipRoute.rawValue, forKey: Keys.route)
             routeChanged()
         }
     }
@@ -64,7 +78,8 @@ final class PrivacySettings {
         protectsMailActivity = store.bool(forKey: Keys.protect)
         blocksRemoteContent = store.object(forKey: Keys.block) as? Bool ?? !store.bool(forKey: Keys.alwaysShowPictures)
         trustedImageSenders = Set(store.stringArray(forKey: Keys.trusted) ?? [])
-        usesProxy = store.bool(forKey: Keys.proxyOn)
+        hidesIPAddress = store.bool(forKey: Keys.hideIP)
+        ipRoute = store.string(forKey: Keys.route).flatMap(IPRoute.init) ?? .tor
         proxy = store.data(forKey: Keys.proxy).flatMap { try? JSONDecoder().decode(RemoteContentProxy.self, from: $0) } ?? RemoteContentProxy()
     }
 
@@ -84,18 +99,30 @@ final class PrivacySettings {
         return sender.map { trustedImageSenders.contains($0.lowercased()) } ?? false
     }
 
-    /// Points the app's loader at the internet as these settings say: only through the proxy while it's on (and
-    /// nowhere while it's on but not filled in), directly otherwise.
+    /// Points the app's loader at the internet as these settings say. Hiding the IP address, only through the built-in
+    /// Tor (started here, and waited for while it connects) or the person's proxy (and nowhere while that isn't filled
+    /// in); otherwise directly, with Tor stopped.
     func routeChanged() {
         let loader = RemoteContentLoader.shared
-        let notFilledIn = RefusingFetcher(reason: "Remote content loads only through a proxy, and the proxy in Settings ▸ Privacy isn’t filled in.")
-        if let sampleFetcher {
-            loader.use(usesProxy && !proxy.isComplete ? notFilledIn : sampleFetcher, throughProxy: usesProxy)
-        } else if usesProxy {
-            let password = proxy.username.isEmpty ? nil : passwords.password()
-            loader.use(PrivateFetcher(proxy: proxy, password: password) ?? notFilledIn, throughProxy: true)
-        } else if let direct = PrivateFetcher(proxy: nil, password: nil) {
-            loader.use(direct, throughProxy: false)
+        let tor = BuiltInTor.shared
+        guard hidesIPAddress else {
+            tor.stop()
+            if let direct = sampleFetcher ?? PrivateFetcher(proxy: nil, password: nil) { loader.use(direct, throughProxy: false) }
+            return
+        }
+        switch ipRoute {
+        case .tor:
+            loader.use(tor.fetcher, throughProxy: true)
+            tor.start()
+        case .proxy:
+            tor.stop()
+            let notFilledIn = RefusingFetcher(reason: "Remote content loads only through a proxy, and the proxy in Settings ▸ Privacy isn’t filled in.")
+            if let sampleFetcher {
+                loader.use(proxy.isComplete ? sampleFetcher : notFilledIn, throughProxy: true)
+            } else {
+                let password = proxy.username.isEmpty ? nil : passwords.password()
+                loader.use(PrivateFetcher(proxy: proxy, password: password) ?? notFilledIn, throughProxy: true)
+            }
         }
     }
 }

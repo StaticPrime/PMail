@@ -85,6 +85,7 @@
 				5E0000000000000000000008 /* Sources */,
 				5E0000000000000000000009 /* Frameworks */,
 				5E000000000000000000000A /* Resources */,
+				5E0000000000000000000017 /* Embed Tor */,
 			);
 			buildRules = (
 			);
@@ -147,6 +148,39 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		5E0000000000000000000017 /* Embed Tor */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Tools/embed-tor.sh",
+				"$(SRCROOT)/Vendor/Tor/tor",
+				"$(SRCROOT)/Vendor/Tor/libevent-2.1.7.dylib",
+				"$(SRCROOT)/Vendor/Tor/tor.entitlements",
+				"$(SRCROOT)/Vendor/Tor/Licenses/Tor.txt",
+				"$(SRCROOT)/Vendor/Tor/Licenses/libevent.txt",
+				"$(SRCROOT)/Vendor/Tor/Licenses/OpenSSL.txt",
+			);
+			name = "Embed Tor";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Helpers/tor",
+				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Frameworks/libevent-2.1.7.dylib",
+				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Resources/Tor/Tor.txt",
+				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Resources/Tor/libevent.txt",
+				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Resources/Tor/OpenSSL.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/Tools/embed-tor.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		5E0000000000000000000008 /* Sources */ = {
@@ -215,6 +249,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PMail/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = PMail;
@@ -246,6 +281,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PMail/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = PMail;

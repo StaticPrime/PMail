@@ -268,9 +268,11 @@ private struct AccountSettings: View {
 }
 
 /// Privacy: pictures and other content from the internet in messages. Loading them privately ahead of time, blocking
-/// them, and sending them through a proxy of the person's own, so senders see the proxy's address instead of theirs.
+/// them, and hiding the IP address by sending them through the Tor client built into PMail or a proxy of the person's
+/// own, so senders see its address instead of theirs.
 private struct PrivacySettingsPane: View {
     @Bindable private var privacy = PrivacySettings.shared
+    private var tor: BuiltInTor { BuiltInTor.shared }
     @State private var password = ""
     @State private var savingPassword: Task<Void, Never>?
     @State private var checking = false
@@ -291,8 +293,16 @@ private struct PrivacySettingsPane: View {
                     .font(.pm(11.5)).foregroundStyle(.secondary)
             }
             Section("Hide IP address") {
-                Toggle("Load remote content through my own proxy", isOn: $privacy.usesProxy)
-                if privacy.usesProxy {
+                Toggle("Hide my IP address from senders", isOn: $privacy.hidesIPAddress)
+                if privacy.hidesIPAddress {
+                    Picker("Through", selection: $privacy.ipRoute) {
+                        Text("Tor, built into PMail").tag(PrivacySettings.IPRoute.tor)
+                        Text("My own proxy").tag(PrivacySettings.IPRoute.proxy)
+                    }
+                }
+                if privacy.hidesIPAddress, privacy.ipRoute == .tor {
+                    torStatus
+                } else if privacy.hidesIPAddress {
                     Picker("Type", selection: Binding(get: { privacy.proxy.kind }, set: changeKind)) {
                         ForEach(RemoteContentProxy.Kind.allCases, id: \.self) { Text($0.name).tag($0) }
                     }
@@ -310,8 +320,7 @@ private struct PrivacySettingsPane: View {
                         }
                     }
                 }
-                Text("Senders see your proxy’s address instead of yours, and so can’t tell where you are. Use Tor (SOCKS5 on 127.0.0.1, port 9050, or 9150 while Tor Browser is open) or a proxy from your VPN provider. While this is on, nothing loads directly: if the proxy can’t be reached, pictures don’t load. Your mail servers are still reached directly.")
-                    .font(.pm(11.5)).foregroundStyle(.secondary)
+                Text(hideIPCaption).font(.pm(11.5)).foregroundStyle(.secondary)
             }
             if !privacy.trustedImageSenders.isEmpty {
                 Section("Senders whose pictures always show") {
@@ -330,6 +339,43 @@ private struct PrivacySettingsPane: View {
         .onAppear { password = privacy.proxyPassword }
         .onDisappear { savePassword(after: .zero) }
         .onChange(of: privacy.proxy) { check = nil }
+    }
+
+    /// How the built-in Tor is getting on.
+    @ViewBuilder private var torStatus: some View {
+        switch tor.state {
+        case .off:
+            EmptyView()
+        case let .connecting(percent, step):
+            VStack(alignment: .leading, spacing: 4) {
+                ProgressView(value: Double(percent), total: 100)
+                Text("Connecting to Tor… \(percent)% (\(step))").font(.pm(11.5)).foregroundStyle(.secondary)
+            }
+        case .connected:
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                Text("Connected to Tor")
+            }
+        case let .failed(reason):
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
+                Text(reason).font(.pm(11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("Try Again") { tor.retry() }
+            }
+        }
+    }
+
+    private var hideIPCaption: String {
+        guard privacy.hidesIPAddress else {
+            return "Senders see a Tor relay’s address, or your own proxy’s, instead of yours, so they can’t tell where you are. Tor is built into PMail and runs only while this is on."
+        }
+        switch privacy.ipRoute {
+        case .tor:
+            return "Senders see a Tor relay’s address instead of yours. Tor runs only while this is on; connecting takes a few seconds, pictures load more slowly, and a few image hosts refuse Tor. Nothing loads directly meanwhile, or if Tor can’t connect. Your mail servers are still reached directly."
+        case .proxy:
+            return "Senders see your proxy’s address instead of yours. Use a SOCKS5 or HTTP proxy, from your VPN provider, say. While this is on, nothing loads directly: if the proxy can’t be reached, pictures don’t load. Your mail servers are still reached directly."
+        }
     }
 
     /// A new type of proxy, moving the port to that type's usual one if it was the old type's.
