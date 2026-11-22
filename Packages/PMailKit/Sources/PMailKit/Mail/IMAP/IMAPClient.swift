@@ -32,10 +32,12 @@ public actor IMAPClient {
     /// What the client logs (debug level, mailbox names kept private): what LIST found, for diagnosing a server.
     static let log = Logger(subsystem: "com.pugglesoft.PMail", category: "IMAP")
 
-    /// The fetch items for a message list row: flags, dates, size, envelope, structure, the threading headers, and the
-    /// headers that say whether it came from a list or a machine (for sorting the inbox into categories).
+    /// The fetch items for a message list row: flags, dates, size, envelope, structure, the threading headers, the
+    /// headers that say whether it came from a list or a machine (for sorting the inbox into categories), and the ones a
+    /// server's spam filter marks junk with.
     public static let summaryItems = "UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE "
-        + "BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE LIST-ID PRECEDENCE AUTO-SUBMITTED)]"
+        + "BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE LIST-ID PRECEDENCE AUTO-SUBMITTED "
+        + "X-SPAM-FLAG X-SPAM-STATUS X-SPAM X-MS-EXCHANGE-ORGANIZATION-SCL)]"
 
     private let connector: any ByteStreamConnector
     private var connection: LineConnection?

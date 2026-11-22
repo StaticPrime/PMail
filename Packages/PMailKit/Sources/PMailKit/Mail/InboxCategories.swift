@@ -61,16 +61,21 @@ public struct SenderHints: Codable, Sendable, Hashable {
     public var isBulk: Bool
     /// Auto-Submitted (other than "no"): sent by a machine, not a person.
     public var isAutomatic: Bool
+    /// Whether a mail server's spam filter marked it as junk in its headers (X-Spam-Flag, X-Spam-Status, X-Spam,
+    /// X-MS-Exchange-Organization-SCL) without moving it; nil when no such header says either way.
+    public var serverMarkedJunk: Bool?
 
-    public init(canUnsubscribe: Bool = false, listID: String? = nil, isBulk: Bool = false, isAutomatic: Bool = false) {
+    public init(canUnsubscribe: Bool = false, listID: String? = nil, isBulk: Bool = false, isAutomatic: Bool = false,
+                serverMarkedJunk: Bool? = nil) {
         self.canUnsubscribe = canUnsubscribe
         self.listID = listID
         self.isBulk = isBulk
         self.isAutomatic = isAutomatic
+        self.serverMarkedJunk = serverMarkedJunk
     }
 
-    /// What a message's List-Unsubscribe, List-Id, Precedence and Auto-Submitted header fields say. `field` gives a
-    /// field's value by its name in lowercase, or nil when the message doesn't have it.
+    /// What a message's List-Unsubscribe, List-Id, Precedence and Auto-Submitted header fields say, and any spam filter's
+    /// marks. `field` gives a field's value by its name in lowercase, or nil when the message doesn't have it.
     public init(field: (String) -> String?) {
         func value(_ name: String) -> String? {
             guard let value = field(name)?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
@@ -82,7 +87,17 @@ public struct SenderHints: Codable, Sendable, Hashable {
         }
         self.init(canUnsubscribe: value("list-unsubscribe") != nil, listID: value("list-id").flatMap(Self.listIdentifier),
                   isBulk: keyword("precedence").map { ["bulk", "list", "junk"].contains($0) } ?? false,
-                  isAutomatic: keyword("auto-submitted").map { !$0.isEmpty && $0 != "no" } ?? false)
+                  isAutomatic: keyword("auto-submitted").map { !$0.isEmpty && $0 != "no" } ?? false,
+                  serverMarkedJunk: Self.spamMark(keyword))
+    }
+
+    /// What spam filters' headers say: "X-Spam-Flag: YES", "X-Spam-Status: Yes, score=7.1", "X-Spam: Yes", or an
+    /// Exchange spam confidence level of 5 or more (-1 means the sender is trusted).
+    static func spamMark(_ keyword: (String) -> String?) -> Bool? {
+        let saysYes = ["x-spam-flag", "x-spam-status", "x-spam"].compactMap(keyword).map { $0.hasPrefix("yes") || $0.hasPrefix("true") }
+        let level = keyword("x-ms-exchange-organization-scl").flatMap { Int($0) }
+        guard !saysYes.isEmpty || level != nil else { return nil }
+        return saysYes.contains(true) || (level ?? 0) >= 5
     }
 
     /// The identifier in a List-Id ("dev.lists.example.org" in "Dev talk <dev.lists.example.org>"), or the whole

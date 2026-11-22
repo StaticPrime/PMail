@@ -126,6 +126,15 @@ enum DebugLaunchOptions {
                 }
             }
         }
+        // `-PMJunkMark 2` marks the second conversation in the list as junk (`-PMBlockedMark 3` as from a blocked sender).
+        for (option, mark) in [("PMJunkMark", JunkMarks.Mark.junk), ("PMBlockedMark", .blocked)] {
+            guard let conversation = mail.conversations[safe: defaults.integer(forKey: option) - 1] else { continue }
+            let marks = session.storage.junkMarks
+            Task {
+                await marks.mark(conversation.messages, as: mark)
+                mail.refreshJunkMarks()
+            }
+        }
         // `-PMOffline YES`: the sample servers stop answering, as if the network were down.
         if defaults.bool(forKey: "PMOffline"), let service = session.services.mail as? SampleMailService {
             Task { await service.setFailsLikeOffline(true) }
@@ -178,7 +187,8 @@ enum DebugLaunchOptions {
         let main = delegate.windowController?.window
         let about = windows.first { $0.windowController is AboutWindowController }
         let settings = windows.first { $0.title == "Settings" || $0.identifier?.rawValue == "PMailSettings" }
-        guard let base = about ?? settings ?? main else {
+        // A sheet over Settings (Junk Mail ▸ Advanced, say) is drawn on its own.
+        guard let base = about ?? settings?.attachedSheet ?? settings ?? main else {
             print("PMSnapshot: no window")
             exit(1)
         }

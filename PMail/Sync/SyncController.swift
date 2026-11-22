@@ -4,9 +4,9 @@ import Observation
 import PMailKit
 
 /// Keeps every account up to date while PMail runs: checks each inbox for new mail every few minutes (or the moment
-/// the server says so, where it can), loads new mail's pictures privately when mail activity is protected, sends
-/// messages whose time has come and the Outbox once the network is back, brings snoozed conversations back, and posts
-/// notifications.
+/// the server says so, where it can), deals with junk and blocked senders' mail as it arrives, loads new mail's
+/// pictures privately when mail activity is protected, sends messages whose time has come and the Outbox once the
+/// network is back, brings snoozed conversations back, and posts notifications.
 @Observable
 final class SyncController {
     @ObservationIgnored private weak var app: AppModel?
@@ -20,6 +20,8 @@ final class SyncController {
     @ObservationIgnored private var sending: Set<UUID> = []
     @ObservationIgnored private var unsupported: Set<UUID> = []
     @ObservationIgnored var now: () -> Date = { AppClock.now() }
+    /// What happens to new mail as it arrives (Settings ▸ Junk Mail).
+    @ObservationIgnored let mailFilter: NewMailFilter
 
     /// Whether the Mac has a network connection (as the system sees it).
     private(set) var isOnline = true
@@ -29,6 +31,7 @@ final class SyncController {
     init(app: AppModel, notifier: any MailNotifier) {
         self.app = app
         self.notifier = notifier
+        mailFilter = NewMailFilter(sessions: { [weak app] in app.map { Array($0.accounts.sessions.values) } ?? [] })
         notifier.onOpen = { [weak app] account, message in app?.openConversation(message, in: account) }
     }
 
@@ -51,6 +54,11 @@ final class SyncController {
         }
         timer?.tolerance = 5
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.tick() }
+        // The junk filter starts off on each account it hasn't yet, once things have settled.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self, let app = self.app else { return }
+            Task { for session in app.accounts.sessions.values { await self.startLearning(session) } }
+        }
         // Copies of remote content go after half a year, or the oldest once an account's pass half a gigabyte.
         let caches = app?.accounts.sessions.values.map(\.storage.remoteContent) ?? []
         Task.detached(priority: .background) {
@@ -113,19 +121,20 @@ final class SyncController {
         do {
             let result = try await session.services.mail.checkForNewMail(since: state)
             await storage.cache.save(syncState: result.state)
-            // Mail from blocked senders goes straight to the spam folder, unannounced.
-            let blocked = await storage.blockedSenders.blocked(among: result.messages)
-            if !blocked.isEmpty { try? await session.services.mail.perform(.markSpam, on: blocked) }
-            let blockedIDs = Set(blocked.map(\.id))
-            if let unread = result.inboxUnread { unreadCounts[id] = max(0, unread - blocked.filter(\.isUnread).count) }
-            let fresh = result.messages.filter { $0.isUnread && !blockedIDs.contains($0.id) }
-            if session.isActivated, pushed || !result.messages.isEmpty || !blocked.isEmpty { session.mail.serverChanged() }
-            // (Not on the first check, which finds the whole inbox.)
-            if state != nil { prefetchRemoteContent(of: result.messages.filter { !blockedIDs.contains($0.id) }, in: session) }
+            // Blocked senders' mail and junk are dealt with first, unannounced (junk not on the first check, which finds
+            // the whole inbox).
+            let sorted = await mailFilter.sort(result.messages, in: session, judgesJunk: state != nil)
+            if let unread = result.inboxUnread {
+                unreadCounts[id] = max(0, unread - result.messages.filter { $0.isUnread && sorted.movedOut.contains($0.id) }.count)
+            }
+            let fresh = result.messages.filter { $0.isUnread && !sorted.quiet.contains($0.id) }
+            if session.isActivated, pushed || !result.messages.isEmpty { session.mail.serverChanged() }
+            if state != nil { prefetchRemoteContent(of: result.messages.filter { !sorted.quiet.contains($0.id) }, in: session) }
             // The first check only learns where the inbox is; announcing it would announce the whole inbox.
             if state != nil, !fresh.isEmpty, UserDefaults.standard.bool(forKey: "NotifyNewMail"), !isShowingInbox(of: session) {
                 notifier.notify(newMail: fresh, in: session.account)
             }
+            if !sorted.announce.isEmpty { notifier.notify(newMail: sorted.announce, in: session.account) }
         } catch PMailError.notSupported {
             unsupported.insert(id)
         } catch {
@@ -151,6 +160,11 @@ final class SyncController {
                 await RemoteContentLoader.shared.prefetch(html: html, into: cache)
             }
         }
+    }
+
+    /// Starts the junk filter off on an account it hasn't learned from yet.
+    func startLearning(_ session: AccountSession) async {
+        await mailFilter.startLearning(session)
     }
 
     /// Whether the window is in front and showing this account's inbox, where a notification would only repeat it.
@@ -211,6 +225,7 @@ final class SyncController {
                 var message = item.message
                 message.date = now()
                 try await session.services.mail.send(message)
+                await session.storage.recipients.record((message.to + message.cc + message.bcc).map(\.email))
                 await queue.remove(item.id)
                 if let draft = item.draft { try? await session.services.mail.deleteDraft(draft) }
                 app?.show(item.isScheduled ? "Your scheduled message was sent." : "A message from your Outbox was sent.")

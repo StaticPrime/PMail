@@ -4,18 +4,19 @@ import ServiceManagement
 import SwiftUI
 
 /// PMail ▸ Settings, in panes along a toolbar so none grows taller than the screen: General (new mail, opening at
-/// login, the keyboard), Mail (Undo Send, inbox categories), Privacy (remote content), Accounts (each account's
-/// settings, blocked senders and sender categories) and Signing In.
+/// login, the keyboard), Mail (Undo Send, inbox categories), Junk Mail (junk and blocked senders' mail), Privacy (remote
+/// content), Accounts (each account's settings, blocked senders and sender categories) and Signing In.
 final class SettingsWindowController: NSWindowController {
     private static var shared: SettingsWindowController?
 
     enum Pane: Int, CaseIterable {
-        case general, mail, privacy, accounts, signingIn
+        case general, mail, junk, privacy, accounts, signingIn
 
         var title: String {
             switch self {
             case .general: "General"
             case .mail: "Mail"
+            case .junk: "Junk Mail"
             case .privacy: "Privacy"
             case .accounts: "Accounts"
             case .signingIn: "Signing In"
@@ -26,6 +27,7 @@ final class SettingsWindowController: NSWindowController {
             switch self {
             case .general: "gearshape"
             case .mail: "envelope"
+            case .junk: "xmark.bin"
             case .privacy: "hand.raised"
             case .accounts: "person.crop.circle"
             case .signingIn: "key"
@@ -36,6 +38,7 @@ final class SettingsWindowController: NSWindowController {
             switch self {
             case .general: AnyView(GeneralSettings(app: app))
             case .mail: AnyView(MailSettings(app: app))
+            case .junk: AnyView(JunkMailSettingsPane(app: app))
             case .privacy: AnyView(PrivacySettingsPane())
             case .accounts: AnyView(AccountSettings(app: app))
             case .signingIn: AnyView(SigningInSettings(app: app))
@@ -78,7 +81,7 @@ final class SettingsWindowController: NSWindowController {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 }
 
-private extension View {
+extension View {
     /// A settings pane: grouped sections at a fixed width, as tall as they need.
     func settingsPane() -> some View {
         formStyle(.grouped).frame(width: 520).fixedSize()

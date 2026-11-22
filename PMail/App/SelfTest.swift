@@ -1031,6 +1031,146 @@ enum SelfTest {
             wait("the inbox list") { mail.openConversation == nil && !mail.isLoadingList }
         }
 
+        // MARK: Junk mail
+        let junk = JunkSettings.shared
+        /// Delivers mail (to the account's bare address, as junk mostly is, unless `byName`), then checks for it, in that order.
+        func deliver(_ mail: [(subject: String, from: String, text: String)], hints: SenderHints? = nil, byName: Bool = false, minutes: Double) {
+            let service = sampleMail
+            let session = session
+            let to = byName ? session.account.address : MailAddress(email: session.account.email)
+            Task {
+                for (index, item) in mail.enumerated() {
+                    await service?.deliver(from: MailAddress(name: "Sender", email: item.from), to: [to], subject: item.subject, text: item.text,
+                                           hints: hints, at: AppClock.now().addingTimeInterval(minutes * 60 + Double(index)))
+                }
+                await app.sync?.check(session)
+            }
+        }
+        func deliver(_ subject: String, from email: String, text: String, hints: SenderHints? = nil, byName: Bool = false, minutes: Double) {
+            deliver([(subject, email, text)], hints: hints, byName: byName, minutes: minutes)
+        }
+        func serverLabels(_ subject: String) -> [String] {
+            guard let service = sampleMail else { return [] }
+            return read { await service.labels(ofSubject: subject) } ?? []
+        }
+        func serverSummary(_ subject: String) -> MessageSummary? {
+            guard let service = sampleMail else { return nil }
+            return read { await service.summary(ofSubject: subject) } ?? nil
+        }
+        let prize = "Click here to claim your free prize money before it expires"
+        step {
+            let policy = junk.policy
+            check(policy.filtersJunk && policy.junkAction == .mark && policy.exemptsContacts && policy.exemptsPreviousRecipients && policy.exemptsFullName
+                  && policy.trustsServerMarks && policy.filtersBlocked && policy.blockedAction == .moveToJunk,
+                  "junk starts out filtered, marked and left in the inbox, with blocked senders' mail going to Junk")
+            let recipients = session.storage.recipients
+            check(read { await recipients.contains("alex.kim@example.com") } == true, "PMail remembers who the account has written to")
+            // The sample spam folder is too little to learn from: some made-up junk and good mail first.
+            let account = session.account.email
+            let made = (0..<25).map { index in
+                (MessageSummary(id: "st-junk-\(index)", from: MailAddress(name: "Lucky Winner", email: "prizes\(index % 3)@lucky-winner.example"),
+                                subject: ["You WON a FREE prize!!", "Claim your prize money now", "URGENT: free prize waiting"][index % 3],
+                                snippet: prize, messageIDHeader: "<st-junk-\(index)@example>"),
+                 MessageSummary(id: "st-good-\(index)", from: MailAddress(name: "Priya Shah", email: "priya\(index % 3)@acme.example"),
+                                to: [MailAddress(email: account)], subject: ["Notes from the planning meeting", "Lunch on Friday?", "Draft of the report"][index % 3],
+                                snippet: "Here are the notes from the meeting, let me know what I missed", messageIDHeader: "<st-good-\(index)@example>"))
+            }
+            let filter = junk.filter
+            let ready = read {
+                await filter.learn(made.map(\.0), asJunk: true)
+                await filter.learn(made.map(\.1), asJunk: false)
+                return await filter.isReady
+            }
+            check(ready == true, "the junk filter learns from junk and good mail")
+            deliver("You WON a FREE prize!!", from: "winner@lucky-winner.example", text: prize, minutes: 4)
+            wait("the junk to arrive, marked") { mail.conversations.contains { $0.subject == "You WON a FREE prize!!" && mail.junkMark(for: $0) == .junk } }
+        }
+        step {
+            guard let found = mail.conversations.first(where: { $0.subject == "You WON a FREE prize!!" }) else {
+                return check(false, "the junk arrives in the inbox")
+            }
+            check(mail.junkMark(for: found) == .junk, "junk is marked as junk and left in the inbox")
+            check(!(notifier?.newMail.contains { $0.messages.contains { $0.subject == "You WON a FREE prize!!" } } ?? true), "without a notification")
+            mail.open(found)
+            wait("the junk to open") { mail.openMessages.last?.summary.subject == "You WON a FREE prize!!" && !mail.junkMarks.isEmpty }
+        }
+        var goodBefore = 0
+        step {
+            guard let message = mail.openMessages.last else { return check(false, "the junk opens") }
+            check(mail.junkMarks[message.id] == .junk, "its message says PMail thinks it's junk")
+            check(!mail.showsImages(for: message), "and junk's pictures wait to be asked for")
+            goodBefore = read { await junk.filter.learnedCounts().good } ?? 0
+            mail.notJunk(message.summary)
+            check(mail.junkMarks[message.id] == nil, "Not Junk takes the mark off")
+            wait("the filter to learn it's good") { (read { await junk.filter.learnedCounts().good } ?? 0) > goodBefore }
+        }
+        step {
+            check((read { await junk.filter.learnedCounts().good } ?? 0) > goodBefore, "and the junk filter learns from it")
+            mail.closeConversation()
+            junk.policy.junkAction = .moveToJunk
+            let recipients = session.storage.recipients
+            _ = read { await recipients.record(["friend@lucky-winner.example"]) }
+            deliver([("Claim your prize money now", "friend@lucky-winner.example", prize), ("URGENT: free prize waiting", "stranger@lucky-winner.example", prize)],
+                    minutes: 5)
+            deliver("Your FREE prize, Jamie!!", from: "named@lucky-winner.example", text: prize, byName: true, minutes: 6)
+            wait("the junk to go to the spam folder") {
+                serverLabels("URGENT: free prize waiting").contains("SPAM") && !serverLabels("Your FREE prize, Jamie!!").isEmpty
+            }
+        }
+        step {
+            check(serverLabels("URGENT: free prize waiting").contains("SPAM"), "set to move junk, it goes straight to the spam folder")
+            check(!serverLabels("Claim your prize money now").contains("SPAM"), "but junk-like mail from someone written to before is never junk",
+                  serverLabels("Claim your prize money now").joined(separator: " "))
+            check(!serverLabels("Your FREE prize, Jamie!!").contains("SPAM"), "nor mail addressed to the person by their full name")
+            junk.policy.junkAction = .custom
+            junk.policy.customRule = MailRule(description: "Invoices", conditions: [RuleCondition(.subject, .contains, "invoice")],
+                                              actions: [RuleAction(.star), RuleAction(.markRead)])
+            deliver("Your invoice 42", from: "billing@shop.example", text: "Your invoice is attached.", minutes: 7)
+            wait("the rule to star the invoice and mark it read") {
+                let invoice = serverSummary("Your invoice 42")
+                return invoice?.isStarred == true && invoice?.isUnread == false
+            }
+        }
+        step {
+            let invoice = serverSummary("Your invoice 42")
+            check(invoice?.isStarred == true && invoice?.isUnread == false, "the Advanced rule's actions are done to the mail it matches")
+            junk.policy = JunkPolicy()
+            deliver("Weekly digest", from: "digest@neutral.example", text: "This week's digest.", hints: SenderHints(serverMarkedJunk: true), minutes: 8)
+            wait("the server's junk mark to count") { mail.conversations.contains { $0.subject == "Weekly digest" && mail.junkMark(for: $0) == .junk } }
+        }
+        step {
+            check(mail.conversations.contains { $0.subject == "Weekly digest" && mail.junkMark(for: $0) == .junk },
+                  "a server's junk mark in a message's headers is trusted")
+            junk.policy.blockedAction = .mark
+            let book = session.storage.blockedSenders
+            _ = read { try? await book.add([.address("pest@blocked.example")]) }
+            deliver("Still here", from: "pest@blocked.example", text: "Remember me?", minutes: 9)
+            wait("blocked mail to arrive, marked") { mail.conversations.contains { $0.subject == "Still here" && mail.junkMark(for: $0) == .blocked } }
+        }
+        step {
+            guard let blocked = mail.conversations.first(where: { $0.subject == "Still here" }) else { return check(false, "blocked mail arrives") }
+            check(mail.junkMark(for: blocked) == .blocked && !serverLabels("Still here").contains("SPAM"),
+                  "set to mark blocked mail, it's marked and left in the inbox")
+            if let message = blocked.messages.first { mail.unblockSender(of: message) }
+            wait("the sender to be unblocked") { mail.blockedSenders.isEmpty && mail.junkMark(for: blocked) == nil }
+        }
+        step {
+            check(mail.blockedSenders.isEmpty, "Unblock on a blocked message unblocks its sender")
+            junk.policy.blockedAction = .moveToTrash
+            let book = session.storage.blockedSenders
+            _ = read { try? await book.add([.address("pest@blocked.example")]) }
+            deliver("Back again", from: "pest@blocked.example", text: "Me again.", minutes: 10)
+            wait("blocked mail to go to the Trash") { serverLabels("Back again").contains("TRASH") }
+        }
+        step {
+            check(serverLabels("Back again").contains("TRASH"), "set to trash blocked mail, it goes to the Trash")
+            let book = session.storage.blockedSenders
+            _ = read { try? await book.remove(id: BlockedSender.address("pest@blocked.example").id) }
+            junk.policy = JunkPolicy()
+            mail.loadList()
+            wait("the inbox list") { !mail.isLoadingList }
+        }
+
         // MARK: Accounts, windows and menus
         step {
             check(app.oauth.google == nil || ProcessInfo.processInfo.environment["PMAIL_GOOGLE_CLIENT_ID"] != nil, "sign-in setup comes from the environment")

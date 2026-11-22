@@ -226,6 +226,9 @@ private struct ExpandedMessage: View {
                 }
                 .buttonStyle(.plain)
                 .popover(isPresented: $showsDetails, arrowEdge: .bottom) { MessageDetails(mail: mail, message: message) }
+                if let mark = mail.junkMarks[message.id] {
+                    JunkBanner(mail: mail, message: summary, mark: mark).padding(.top, 8)
+                }
                 if MessageHTML.hasRemoteContent(message), !mail.showsImages(for: message) {
                     HStack(spacing: 8) {
                         Text("Pictures in this message are hidden.").font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
@@ -438,5 +441,33 @@ private struct AttachmentCard: View {
         .help("Click to save to Downloads, double-click to open")
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// Above a message left in the inbox marked as junk or as from a blocked sender: what PMail thinks, with Not Junk (or
+/// Unblock) and a move to the Junk folder.
+private struct JunkBanner: View {
+    let mail: MailViewModel
+    let message: MessageSummary
+    let mark: JunkMarks.Mark
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: mark == .junk ? "xmark.bin" : "hand.raised").foregroundStyle(mark == .junk ? Theme.junk : Theme.textSecondary)
+            Text(mark == .junk ? "PMail thinks this message is junk." : "This message is from a sender you blocked.")
+                .font(.pm(12.5)).foregroundStyle(Theme.textPrimary)
+            Button(mark == .junk ? "Not Junk" : "Unblock") {
+                if mark == .junk { mail.notJunk(message) } else { mail.unblockSender(of: message) }
+            }
+            .buttonStyle(.link).font(.pm(12.5))
+            if mail.canReportSpam {
+                Text("·").foregroundStyle(Theme.textTertiary)
+                Button("Move to \(mail.spamFolderName)") { mail.perform(.markSpam, onMessage: message) }
+                    .buttonStyle(.link).font(.pm(12.5))
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(RoundedRectangle(cornerRadius: 8).fill((mark == .junk ? Theme.junk : Theme.chip).opacity(mark == .junk ? 0.12 : 0.5)))
     }
 }

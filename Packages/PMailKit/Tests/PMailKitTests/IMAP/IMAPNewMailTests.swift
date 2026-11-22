@@ -137,7 +137,7 @@ import Testing
         #expect(later.messages.isEmpty && later.state == MailSyncState("7:102"))
         let fresh = try await harness.service.checkForNewMail(since: nil)
         #expect(fresh.messages.isEmpty && fresh.state == MailSyncState("7:102"))
-        #expect(!stream.lines.contains { $0.contains("STATUS") })
+        #expect(!stream.lines.contains { $0.split(separator: " ").dropFirst().first == "STATUS" }, "no STATUS command")
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 

@@ -69,6 +69,8 @@ enum Theme {
     static let star = dynamic(light: 0xF4B400, dark: 0xFDD663)
     static let important = dynamic(light: 0xF4B400, dark: 0xFDD663)
     static let danger = dynamic(light: 0xD93025, dark: 0xF28B82)
+    /// Junk's mark and banner.
+    static let junk = dynamic(light: 0xA0522D, dark: 0xE3A57E)
     static let now = dynamic(light: 0xEA4335, dark: 0xF28B82)
     static let chip = dynamic(light: 0xE8EAED, dark: 0x3C4043)
     static let composeHeader = dynamic(light: 0xF2F6FC, dark: 0x303134)

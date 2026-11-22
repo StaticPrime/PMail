@@ -327,6 +327,11 @@ struct MessageRow: View {
             .frame(width: 190, alignment: .leading)
             .padding(.leading, 8)
             HStack(spacing: 0) {
+                if let mark = mail.junkMark(for: conversation) {
+                    Chip(text: mark == .junk ? "Junk" : "Blocked", color: mark == .junk ? Theme.junk : Theme.textTertiary)
+                        .padding(.trailing, 4)
+                        .help(mark == .junk ? "PMail thinks this is junk" : "From a sender you blocked")
+                }
                 if !labelChips.isEmpty {
                     ForEach(labelChips, id: \.id) { folder in
                         Chip(text: folder.name, color: Theme.color(hexString: folder.colorHex)).padding(.trailing, 4)

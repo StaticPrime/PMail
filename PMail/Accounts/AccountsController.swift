@@ -35,6 +35,10 @@ struct AccountStorage {
     let sorter: InboxSorter
     /// Copies of the pictures, style sheets and fonts its mail loads from the internet.
     let remoteContent: RemoteContentCache
+    /// Messages left in the inbox marked as junk or as from a blocked sender.
+    let junkMarks: JunkMarks
+    /// Everyone it has sent mail to, whose mail is never taken for junk.
+    let recipients: PreviousRecipients
 
     init(folder: URL) {
         cache = AccountCache(folder: folder.appendingPathComponent("Cache", isDirectory: true))
@@ -44,6 +48,8 @@ struct AccountStorage {
         labelBook = LabelBook(file: folder.appendingPathComponent("Labels.json"))
         sorter = InboxSorter(file: folder.appendingPathComponent("Categories.json"))
         remoteContent = RemoteContentCache(folder: folder.appendingPathComponent("Remote Content", isDirectory: true))
+        junkMarks = JunkMarks(file: folder.appendingPathComponent("JunkMarks.json"))
+        recipients = PreviousRecipients(file: folder.appendingPathComponent("Recipients.json"))
     }
 }
 
@@ -236,7 +242,8 @@ final class AccountsController {
         try? secrets.setSecret(nil, for: id)
         // The copies and waiting messages go; calendars, contacts and mail kept only on this Mac stay in its folder.
         let folder = storageFolder(for: id)
-        for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json", "Remote Content"] { try? FileManager.default.removeItem(at: folder.appendingPathComponent(name)) }
+        for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json", "Remote Content", "JunkMarks.json",
+                     "Recipients.json"] { try? FileManager.default.removeItem(at: folder.appendingPathComponent(name)) }
         accounts.removeAll { $0.id == id }
         sessions[id] = nil
         save()

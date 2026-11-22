@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let privacy = PrivacySettings(store: DebugLaunchOptions.sampleDefaults, passwords: MemoryProxyPassword())
             privacy.sampleFetcher = SampleRemoteFetcher.shared
             PrivacySettings.shared = privacy
+            JunkSettings.shared = JunkSettings(store: DebugLaunchOptions.sampleDefaults,
+                                               filterFile: DebugLaunchOptions.sampleStorage.appendingPathComponent("Junk Filter.json"))
             BuiltInTor.shared.makeRunner = { _, onEvent in SampleTor(onEvent: onEvent) }
             BuiltInTor.shared.connectedFetcher = { _ in SampleRemoteFetcher.shared }
         }

@@ -300,6 +300,11 @@ actor SampleMailService: MailService {
         return NewMail(messages: arrived, state: MailSyncState(String(max(newest, since).timeIntervalSinceReferenceDate)), inboxUnread: unread)
     }
 
+    /// A message's summary as the server has it now, found by its subject, for the self-test.
+    func summary(ofSubject subject: String) -> MessageSummary? {
+        messages.last(where: { $0.summary.subject == subject })?.summary
+    }
+
     /// A message's labels and folder, found by its subject, for the self-test.
     func labels(ofSubject subject: String) -> [String] {
         guard let summary = messages.first(where: { $0.summary.subject == subject })?.summary else { return [] }
@@ -319,13 +324,14 @@ actor SampleMailService: MailService {
     func setFailsLikeOffline(_ fails: Bool) { failsLikeOffline = fails }
 
     /// A new message arriving in the inbox, as if from outside (for the self-test).
-    func deliver(from: MailAddress, subject: String, text: String, html: String? = nil, at date: Date) {
+    func deliver(from: MailAddress, to recipients: [MailAddress]? = nil, subject: String, text: String, html: String? = nil, hints: SenderHints? = nil,
+                 at date: Date) {
         counter += 1
         let id = "arrived-\(counter)"
         let labels = capabilities.usesLabels ? ["INBOX", "CATEGORY_PERSONAL", "UNREAD"] : []
         let summary = MessageSummary(id: id, folderID: capabilities.usesLabels ? nil : role(.inbox), labelIDs: labels, from: from,
-                                     to: [account.address], subject: subject, snippet: HTMLText.snippet(from: text), date: date,
-                                     isUnread: true, messageIDHeader: "<\(id)@example.com>")
+                                     to: recipients ?? [account.address], subject: subject, snippet: HTMLText.snippet(from: text), date: date,
+                                     isUnread: true, messageIDHeader: "<\(id)@example.com>", senderHints: hints)
         messages.append(SampleData.Message(summary: summary, html: html, text: text))
     }
 }

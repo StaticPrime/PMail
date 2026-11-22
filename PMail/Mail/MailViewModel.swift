@@ -76,6 +76,8 @@ final class MailViewModel {
         var leaves = false
         /// Drafts thrown away: deleted as drafts rather than moved.
         var discardsDrafts = false
+        /// Taken out of the spam folder: the junk filter learns they're good mail.
+        var fromSpam = false
     }
     @ObservationIgnored private var pending: [UUID: PendingAction] = [:]
     @ObservationIgnored private var committing: [UUID: PendingAction] = [:]
@@ -321,7 +323,12 @@ final class MailViewModel {
         let service = self.service
         Task {
             for item in waiting {
-                do { try await Self.apply(item, with: service) } catch { app?.report(error, doing: "That change") }
+                do {
+                    try await Self.apply(item, with: service)
+                    learn(from: item)
+                } catch {
+                    app?.report(error, doing: "That change")
+                }
             }
             await loadFolders(thenList: false)
             loadList()
@@ -388,6 +395,7 @@ final class MailViewModel {
         hasNextPage = page.nextPageToken != nil
         if let token = page.nextPageToken { pageTokens[pageIndex + 1] = token }
         checkedIDs.formIntersection(Set(conversations.map(\.id)))
+        refreshJunkMarks()
     }
 
     /// Lists Snoozed, Scheduled or Outbox from the Mac.
@@ -656,6 +664,7 @@ final class MailViewModel {
     private func show(_ messages: [MailMessage], for conversation: Conversation) {
         let firstShow = openMessages.isEmpty
         openMessages = messages
+        refreshJunkMarks()
         if firstShow {
             // The newest message and every unread one start open; the rest are one line each.
             var expanded = Set(conversation.messages.filter(\.isUnread).map(\.id))
@@ -696,7 +705,10 @@ final class MailViewModel {
     /// copy when it has one), as Settings ▸ Privacy says: always while mail activity is protected; otherwise, while
     /// remote content is blocked, only when asked for this message or its sender.
     func showsImages(for message: MailMessage) -> Bool {
-        PrivacySettings.shared.loadsRemoteContent(from: message.summary.from?.email, shownByHand: imagesShownFor.contains(message.id))
+        let shownByHand = imagesShownFor.contains(message.id)
+        // Junk never loads its pictures by itself.
+        if junkMarks[message.id] != nil || currentFolder?.role == .spam { return shownByHand }
+        return PrivacySettings.shared.loadsRemoteContent(from: message.summary.from?.email, shownByHand: shownByHand)
     }
 
     /// The account's copies of what its mail loads from the internet.
@@ -873,6 +885,7 @@ final class MailViewModel {
         var item = PendingAction(id: id, action: action, messages: messages, listKey: listKey, snapshot: snapshot, total: total, onUndo: onUndo)
         item.leaves = leaves
         item.discardsDrafts = discardsDrafts
+        item.fromSpam = currentFolder?.role == .spam
         let delay = undoable ? undoDelay : 0
         item.task = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
@@ -891,6 +904,7 @@ final class MailViewModel {
         defer { committing[id] = nil }
         do {
             try await Self.apply(item, with: service)
+            learn(from: item)
             if item.discardsDrafts { draftsChanged() }
             await loadFolders(thenList: false)
             refreshTabCounts()
@@ -926,6 +940,7 @@ final class MailViewModel {
             Task { [weak self] in
                 do {
                     try await Self.apply(item, with: service)
+                    self?.learn(from: item)
                 } catch where Self.isConnectionProblem(error) {
                     self?.waitingForNetwork.append(item)
                 } catch {
@@ -942,7 +957,7 @@ final class MailViewModel {
         waitingForNetwork.removeAll()
         for item in items {
             item.task?.cancel()
-            try? await Self.apply(item, with: service)
+            if (try? await Self.apply(item, with: service)) != nil { learn(from: item) }
         }
     }
 
@@ -1250,6 +1265,74 @@ final class MailViewModel {
                          await self?.loadBlockedSenders()
                      }
                  })
+    }
+
+    // MARK: Junk
+
+    /// Messages showing that were left in the inbox marked as junk or as from a blocked sender, by message ID.
+    private(set) var junkMarks: [String: JunkMarks.Mark] = [:]
+
+    func refreshJunkMarks() {
+        let summaries = conversations.flatMap(\.messages) + openMessages.map(\.summary)
+        let marks = storage.junkMarks
+        Task { junkMarks = await marks.marks(for: summaries) }
+    }
+
+    /// A conversation's mark: junk if any of its messages is, else blocked if one is.
+    func junkMark(for conversation: Conversation) -> JunkMarks.Mark? {
+        let marks = conversation.messages.compactMap { junkMarks[$0.id] }
+        return marks.contains(.junk) ? .junk : marks.first
+    }
+
+    /// A message marked as junk isn't: the mark goes, and the junk filter learns from it.
+    func notJunk(_ message: MessageSummary) {
+        junkMarks[message.id] = nil
+        let marks = storage.junkMarks
+        let filter = JunkSettings.shared.filter
+        Task {
+            await marks.clear([message])
+            await filter.learn([message], asJunk: false)
+        }
+        app?.show("Marked as not junk. PMail will learn from it.")
+    }
+
+    /// A message marked as from a blocked sender: its sender is unblocked (every rule that covers them) and the mark goes.
+    func unblockSender(of message: MessageSummary) {
+        guard let email = message.from?.email else { return }
+        junkMarks[message.id] = nil
+        let book = storage.blockedSenders
+        let marks = storage.junkMarks
+        Task {
+            for rule in await book.all() where rule.matches(email) { try? await book.remove(id: rule.id) }
+            await marks.clear([message])
+            await loadBlockedSenders()
+        }
+        app?.show("Unblocked \(email).")
+    }
+
+    /// What the junk filter learns from a change that reached the server: spam reported is junk, and mail taken out of
+    /// the spam folder isn't.
+    private func learn(from item: PendingAction) {
+        let filter = JunkSettings.shared.filter
+        let marks = storage.junkMarks
+        let messages = item.messages
+        switch item.action {
+        case .markSpam:
+            Task {
+                await filter.learn(messages, asJunk: true)
+                await marks.clear(messages)
+            }
+        case .notSpam:
+            Task {
+                await filter.learn(messages, asJunk: false)
+                await marks.clear(messages)
+            }
+        case .moveToInbox, .move:
+            guard item.fromSpam else { return }
+            Task { await filter.learn(messages, asJunk: false) }
+        default:
+            break
+        }
     }
 
     /// Unblocks a sender (Settings ▸ Blocked senders).
