@@ -87,7 +87,8 @@ final class AccountSession: Identifiable {
         mail = MailViewModel(account: account, service: services.mail, storage: storage, defaults: defaults)
         calendar = CalendarViewModel(account: account, service: services.calendar, cache: storage.cache, changes: storage.calendarChanges,
                                      defaults: defaults, today: { AppClock.now() })
-        contacts = ContactsViewModel(account: account, service: services.contacts, cache: storage.cache, changes: storage.contactChanges)
+        contacts = ContactsViewModel(account: account, service: services.contacts, cache: storage.cache, changes: storage.contactChanges,
+                                     defaults: defaults)
         attach(app)
     }
 

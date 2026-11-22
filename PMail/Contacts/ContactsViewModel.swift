@@ -31,11 +31,15 @@ final class ContactsViewModel {
     /// Counts changes made here (and the server's answers to them), so a load that may have missed one is done again.
     @ObservationIgnored private var changeCount = 0
 
-    init(account: Account, service: any ContactsService, cache: AccountCache? = nil, changes: PendingChanges<ContactChange>? = nil) {
+    @ObservationIgnored let defaults: UserDefaults
+
+    init(account: Account, service: any ContactsService, cache: AccountCache? = nil, changes: PendingChanges<ContactChange>? = nil,
+         defaults: UserDefaults = .standard) {
         self.account = account
         self.service = service
         self.cache = cache
         pending = changes
+        self.defaults = defaults
     }
 
     /// Whether what's showing is a copy, because the server couldn't be reached.
@@ -137,14 +141,14 @@ final class ContactsViewModel {
     }
 
     /// Saves a contact (a new one if it has no server ID yet) and returns it as saved. When the server can't be
-    /// reached, it's kept on this Mac (and returned as kept) and sent once it can.
+    /// reached, it's kept on this Mac (and returned as kept) and sent once it can. Quietly, it says nothing when it works.
     @discardableResult
-    func save(_ contact: Contact, isNew: Bool) async -> Contact? {
+    func save(_ contact: Contact, isNew: Bool, quietly: Bool = false) async -> Contact? {
         var made = contact
         if isNew { made.id = LocalID.make() }
         let later: ContactChange = isNew ? .create(made) : .update(contact)
         if waits(contact.id), await keep(later) {
-            app?.show("Saved on this Mac. It’ll go to your contacts when you’re back online.")
+            if !quietly { app?.show("Saved on this Mac. It’ll go to your contacts when you’re back online.") }
             return made
         }
         changeCount += 1
@@ -156,11 +160,11 @@ final class ContactsViewModel {
             } else {
                 contacts.append(saved)
             }
-            app?.show(isNew ? "Contact created." : "Changes saved.")
+            if !quietly { app?.show(isNew ? "Contact created." : "Changes saved.") }
             return saved
         } catch {
             if PMailError.isConnectionProblem(error), await keep(later) {
-                app?.show("Saved on this Mac. It’ll go to your contacts when you’re back online.")
+                if !quietly { app?.show("Saved on this Mac. It’ll go to your contacts when you’re back online.") }
                 return made
             }
             app?.report(error, doing: isNew ? "Creating the contact" : "Saving the contact")
@@ -168,7 +172,7 @@ final class ContactsViewModel {
         }
     }
 
-    func delete(_ contact: Contact) {
+    func delete(_ contact: Contact, quietly: Bool = false) {
         let snapshot = contacts
         contacts.removeAll { $0.id == contact.id }
         changeCount += 1
@@ -177,13 +181,13 @@ final class ContactsViewModel {
         let waitingText = "Deleted on this Mac. It’ll be deleted from your contacts when you’re back online."
         Task {
             if waits(contact.id), await keep(.delete(contact)) {
-                app?.show(LocalID.isLocal(contact.id) ? "Contact deleted." : waitingText)
+                if !quietly { app?.show(LocalID.isLocal(contact.id) ? "Contact deleted." : waitingText) }
                 return
             }
             do {
                 try await service.delete(contact)
                 changeCount += 1
-                app?.show("Contact deleted.")
+                if !quietly { app?.show("Contact deleted.") }
             } catch {
                 if PMailError.isConnectionProblem(error), await keep(.delete(contact)) {
                     app?.show(waitingText)
@@ -193,6 +197,108 @@ final class ContactsViewModel {
                 app?.report(error, doing: "Deleting the contact")
             }
         }
+    }
+
+    // MARK: People written to
+
+    /// Settings ▸ Mail: whether people written to are added to contacts.
+    static let addsPeopleKey = "AddPeopleToContacts"
+
+    /// People just written to (To, Cc and Bcc) who aren't in contacts yet: added at once when the account can tell more
+    /// about them (its organization's directory, or people it has written to), with what it finds; otherwise offered
+    /// with "Add to Contacts?", once for each address. The account's own address and automated ones (no-reply) are
+    /// left out.
+    func addPeopleWritten(to addresses: [MailAddress]) async {
+        guard UserDefaults.standard.object(forKey: Self.addsPeopleKey) as? Bool ?? true, let known = await knownEmails() else { return }
+        var seen = Set<String>()
+        let newPeople = addresses.filter { address in
+            let email = address.email.lowercased()
+            return seen.insert(email).inserted && !known.contains(email) && email != account.email.lowercased() && !Self.isAutomated(email)
+        }
+        guard !newPeople.isEmpty else { return }
+        var added: [Contact] = []
+        var unknown: [MailAddress] = []
+        for address in newPeople {
+            if let found = try? await service.lookUp(email: address.email), Self.tellsMore(found, than: address) {
+                if let saved = await save(Self.filledIn(found, from: address), isNew: true, quietly: true) { added.append(saved) }
+            } else {
+                unknown.append(address)
+            }
+        }
+        // Each address is asked about once.
+        let askedKey = "AskedToAddContacts-\(account.id.uuidString)"
+        let asked = Set(defaults.stringArray(forKey: askedKey) ?? [])
+        let ask = unknown.filter { !asked.contains($0.email.lowercased()) }
+        if !ask.isEmpty { defaults.set(Array(asked.union(ask.map { $0.email.lowercased() })), forKey: askedKey) }
+        announce(added: added, ask: ask)
+    }
+
+    /// Says who was added (with Undo), and offers to add the rest.
+    private func announce(added: [Contact], ask: [MailAddress]) {
+        let addedText = added.count == 1 ? (added[0].displayName.isEmpty ? added[0].primaryEmail ?? "1 person" : added[0].displayName)
+            : "\(added.count) people"
+        if ask.isEmpty {
+            guard !added.isEmpty else { return }
+            app?.show("Added \(addedText) to your contacts.", actionTitle: "Undo") { [weak self] in
+                for contact in added { self?.delete(contact, quietly: true) }
+            }
+            return
+        }
+        let question = ask.count == 1 ? "Add \(ask[0].name ?? ask[0].email) to Contacts?" : "Add \(ask.count) people to Contacts?"
+        let id = account.id
+        app?.show((added.isEmpty ? "" : "Added \(addedText). ") + question, actionTitle: "Add…", duration: 12) { [weak self] in
+            self?.app?.sheet = .addPeople(id, ask)
+        }
+    }
+
+    /// The email addresses of saved contacts (and of contacts waiting to be sent); nil when they can't be known, so
+    /// nobody is added twice.
+    private func knownEmails() async -> Set<String>? {
+        var list: [Contact]
+        if loaded {
+            list = contacts
+        } else if let fresh = try? await service.loadContacts() {
+            list = ContactChange.applying(await pending?.all() ?? [], to: fresh)
+        } else if let cached = await cache?.contacts() {
+            list = ContactChange.applying(await pending?.all() ?? [], to: cached)
+        } else {
+            return nil
+        }
+        return Set(list.filter { $0.kind == .contact }.flatMap { $0.emails.map { $0.value.lowercased() } })
+    }
+
+    /// Addresses that send mail by themselves, where nobody reads replies.
+    static func isAutomated(_ email: String) -> Bool {
+        let local = email.split(separator: "@").first.map(String.init) ?? email
+        return ["noreply", "no-reply", "no_reply", "donotreply", "do-not-reply", "mailer-daemon", "postmaster", "bounce"].contains { local.contains($0) }
+    }
+
+    /// Whether what was looked up says more than the address does: a phone, a job, a company, a place, a picture, or
+    /// a name it didn't have.
+    static func tellsMore(_ found: Contact, than address: MailAddress) -> Bool {
+        !found.phones.isEmpty || !found.company.isEmpty || !found.jobTitle.isEmpty || !found.department.isEmpty || !found.addresses.isEmpty
+            || found.photoData != nil || ((address.name ?? "").isEmpty && !(found.givenName + found.familyName).isEmpty)
+    }
+
+    /// A contact for someone written to: what was found, with the address and the name it was written with where it
+    /// has none.
+    static func filledIn(_ found: Contact, from address: MailAddress) -> Contact {
+        var contact = found
+        contact.id = "new-" + UUID().uuidString
+        if !contact.emails.contains(where: { $0.value.caseInsensitiveCompare(address.email) == .orderedSame }) {
+            contact.emails.insert(LabeledValue(label: "other", value: address.email), at: 0)
+        }
+        if contact.givenName.isEmpty, contact.familyName.isEmpty, let name = address.name {
+            (contact.givenName, contact.familyName) = PersonName.split(name)
+        }
+        return contact
+    }
+
+    /// A new contact for someone, from the name and address they were written to with.
+    static func newContact(for address: MailAddress) -> Contact {
+        let name = PersonName.split(address.name ?? "")
+        return Contact(id: "new-" + UUID().uuidString, givenName: name.given, familyName: name.family,
+                       emails: [LabeledValue(label: "other", value: address.email)])
     }
 
     // MARK: Changes made offline

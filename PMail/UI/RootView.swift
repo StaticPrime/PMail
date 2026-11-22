@@ -52,6 +52,15 @@ struct RootView: View {
             if let session = app.current { EventEditor(app: app, model: session.calendar, contacts: session.contacts, draft: draft) }
         case let .contactEditor(contact):
             if let session = app.current { ContactEditor(app: app, model: session.contacts, contact: contact) }
+        case let .addPeople(account, people):
+            // One person in the contact editor, filled in; several in a list.
+            if let session = app.accounts.sessions[account] {
+                if people.count == 1, let person = people.first {
+                    ContactEditor(app: app, model: session.contacts, contact: ContactsViewModel.newContact(for: person))
+                } else {
+                    AddPeopleSheet(model: session.contacts, people: people)
+                }
+            }
         case .shortcuts:
             ShortcutsView()
         }

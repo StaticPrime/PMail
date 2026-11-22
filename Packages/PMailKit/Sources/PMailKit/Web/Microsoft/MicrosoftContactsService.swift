@@ -24,6 +24,23 @@ public actor MicrosoftContactsService: ContactsService {
         try await client.graphItems(Self.url("contacts", [("$top", "500")])).compactMap(Self.contact(from:))
     }
 
+    /// Someone in the account's organization (a work or school account), from the people Microsoft finds for it:
+    /// their name, job, company, department and phone numbers.
+    public func lookUp(email: String) async throws -> Contact? {
+        let wanted = email.lowercased()
+        guard let people = try? await client.graphItems(Self.url("people", [("$search", "\"\(email)\""), ("$top", "5")])),
+              let person = people.first(where: { $0["scoredEmailAddresses"].array.contains { $0["address"].string?.lowercased() == wanted } })
+        else { return nil }
+        let phones = person["phones"].array.compactMap { phone -> LabeledValue? in
+            guard let number = phone["number"].nonEmpty else { return nil }
+            let type = phone["type"].string ?? "other"
+            return LabeledValue(label: type == "business" ? "work" : type, value: number)
+        }
+        return Contact(givenName: person["givenName"].string ?? "", familyName: person["surname"].string ?? "",
+                       company: person["companyName"].string ?? "", jobTitle: person["jobTitle"].string ?? "",
+                       department: person["department"].string ?? "", emails: [LabeledValue(label: "work", value: email)], phones: phones)
+    }
+
     public func create(_ contact: Contact) async throws -> Contact {
         let saved = try await client.post(Self.url("contacts"), .object(Self.body(for: contact, isNew: true)))
         return try Self.saved(saved, from: contact)

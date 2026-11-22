@@ -223,6 +223,8 @@ final class ComposeModel: Identifiable {
         do {
             try await service.send(message)
             await session.storage.recipients.record((message.to + message.cc + message.bcc).map(\.email))
+            let contacts = session.contacts
+            Task { await contacts.addPeopleWritten(to: message.to + message.cc + message.bcc) }
             if !labelIDs.isEmpty { labelSentCopy(of: message) }
             if let savedDraft {
                 try? await service.deleteDraft(savedDraft)

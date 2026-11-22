@@ -189,6 +189,18 @@ enum DebugLaunchOptions {
             if let contact = contacts.contacts(in: .contacts, matching: "")[safe: defaults.integer(forKey: "PMContact") - 1] {
                 contacts.openContactID = contact.id
             }
+            // `-PMAddPeople 1` (or 2) offers to add people written to: the bubble, then (with `-PMAddPeopleSheet YES`) the editor or list.
+            let people = [MailAddress(name: "Morgan Diaz", email: "morgan@elsewhere.example"), MailAddress(name: "Casey Park", email: "casey@elsewhere.example")]
+            let offered = Array(people.prefix(defaults.integer(forKey: "PMAddPeople")))
+            if !offered.isEmpty {
+                let id = session.id
+                if defaults.bool(forKey: "PMAddPeopleSheet") {
+                    app.sheet = .addPeople(id, offered)
+                } else {
+                    let question = offered.count == 1 ? "Add Morgan Diaz to Contacts?" : "Add \(offered.count) people to Contacts?"
+                    app.show("Added Taylor Brooks. " + question, actionTitle: "Add…", duration: 60) { app.sheet = .addPeople(id, offered) }
+                }
+            }
             if defaults.bool(forKey: "PMContactEditor") {
                 app.sheet = .contactEditor(contacts.contacts(in: .contacts, matching: "").first ?? Contact())
             }

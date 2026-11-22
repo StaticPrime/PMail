@@ -41,7 +41,8 @@ public struct OAuthProvider: Sendable, Hashable {
                                // The signature, kept with the account's send-as address.
                                "https://www.googleapis.com/auth/gmail.settings.basic",
                                "https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/contacts",
-                               "https://www.googleapis.com/auth/contacts.other.readonly", "https://www.googleapis.com/auth/tasks"],
+                               "https://www.googleapis.com/auth/contacts.other.readonly", "https://www.googleapis.com/auth/tasks",
+                               "https://www.googleapis.com/auth/directory.readonly"],
                       // Offline access with consent, so the answer always includes a refresh token.
                       extraParameters: ["access_type": "offline", "prompt": "consent", "include_granted_scopes": "true"])
     }
@@ -57,7 +58,7 @@ public struct OAuthProvider: Sendable, Hashable {
                              clientID: clientID,
                              redirectURI: redirectURI ?? "msauth.com.pugglesoft.PMail://auth",
                              scopes: ["openid", "profile", "email", "offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send",
-                                      "MailboxSettings.ReadWrite", "Calendars.ReadWrite", "Contacts.ReadWrite", "Tasks.ReadWrite"],
+                                      "MailboxSettings.ReadWrite", "Calendars.ReadWrite", "Contacts.ReadWrite", "Tasks.ReadWrite", "People.Read"],
                              extraParameters: ["prompt": "select_account", "response_mode": "query"])
     }
 

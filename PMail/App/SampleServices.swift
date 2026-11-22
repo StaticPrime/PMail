@@ -21,7 +21,7 @@ struct SampleServiceFactory: ServiceFactory {
             mail: SampleMailService(account: account, folders: mail.folders, messages: mail.messages, sorter: storage?.sorter),
             calendar: CalendarWithTasks(calendars: calendars, tasks: tasks,
                                         types: EventTypeBook(file: place.appendingPathComponent(EventTypeBook.fileName))),
-            contacts: SampleContactsService(contacts: SampleData.contacts(for: account)))
+            contacts: SampleContactsService(contacts: SampleData.contacts(for: account), directory: SampleData.directory(for: account)))
     }
 }
 
@@ -604,12 +604,21 @@ actor SampleTaskService: TaskService {
 
 actor SampleContactsService: ContactsService {
     private var contacts: [Contact]
+    /// People in the account's pretend organization directory, found by `lookUp`.
+    private let directory: [Contact]
     private var counter = 0
     /// Acts as if the network were down (for the self-test).
     private var failsLikeOffline = false
 
-    init(contacts: [Contact]) {
+    init(contacts: [Contact], directory: [Contact] = []) {
         self.contacts = contacts
+        self.directory = directory
+    }
+
+    func lookUp(email: String) async throws -> Contact? {
+        await pause()
+        try reach()
+        return directory.first { person in person.emails.contains { $0.value.caseInsensitiveCompare(email) == .orderedSame } }
     }
 
     func setFailsLikeOffline(_ fails: Bool) { failsLikeOffline = fails }

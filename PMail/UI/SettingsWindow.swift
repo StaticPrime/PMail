@@ -132,10 +132,11 @@ private struct GeneralSettings: View {
     }
 }
 
-/// Mail: Undo Send, and sorting inboxes into categories.
+/// Mail: Undo Send, adding the people written to to contacts, and sorting inboxes into categories.
 private struct MailSettings: View {
     let app: AppModel
     @AppStorage("UndoSendSeconds") private var undoSeconds = 5
+    @AppStorage(ContactsViewModel.addsPeopleKey) private var addsPeople = true
     @AppStorage("SortInboxCategories") private var sortsCategories = true
 
     var body: some View {
@@ -145,6 +146,9 @@ private struct MailSettings: View {
                     ForEach([5, 10, 20, 30], id: \.self) { Text("\($0) seconds").tag($0) }
                 }
                 Text("Whether pictures in messages load is set in Privacy.").font(.pm(11.5)).foregroundStyle(.secondary)
+                Toggle("Add people I write to to Contacts", isOn: $addsPeople)
+                Text("Everyone you send mail to (To, Cc and Bcc) who isn't in your contacts yet. Where your account can look people up (your organization’s directory on Google Workspace and Microsoft work or school accounts, or the people Google has seen you write to), they’re added with what it finds: name, phone, job and company. Otherwise PMail asks “Add to Contacts?” once for each address.")
+                    .font(.pm(11.5)).foregroundStyle(.secondary)
             }
             Section("Inbox categories") {
                 Toggle("Sort the inbox into categories", isOn: Binding(get: { sortsCategories }, set: { on in

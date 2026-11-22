@@ -50,6 +50,8 @@ final class AppModel {
         case accountSettings(UUID)
         case eventEditor(EventDraft)
         case contactEditor(Contact)
+        /// "Add to Contacts?" for people written to: the account, and who.
+        case addPeople(UUID, [MailAddress])
         case shortcuts
 
         var id: String {
@@ -58,6 +60,7 @@ final class AppModel {
             case let .accountSettings(id): "settings-\(id)"
             case let .eventEditor(draft): "event-\(draft.id)"
             case let .contactEditor(contact): "contact-\(contact.id)"
+            case let .addPeople(account, people): "add-people-\(account)-\(people.map(\.email).joined(separator: ","))"
             case .shortcuts: "shortcuts"
             }
         }

@@ -806,6 +806,58 @@ enum SelfTest {
             check(contacts.contact(biscuit.id) == nil, "deleting a contact")
         }
 
+        // MARK: People written to, added to contacts
+        let taylor = MailAddress(name: "Taylor Brooks", email: "taylor.brooks@pawprint.example")
+        let morgan = MailAddress(name: "Morgan Diaz", email: "morgan@elsewhere.example")
+        let casey = MailAddress(name: "Park, Casey", email: "casey@elsewhere.example")
+        func sendSelfTest(to people: [MailAddress], bcc: [MailAddress] = []) {
+            guard let composer = app.compose(to: people, subject: "Self-test hello", body: "Hi!") else { return }
+            composer.bcc = bcc
+            composer.undoSendDelay = 0.1
+            composer.send()
+        }
+        step {
+            app.toast = nil
+            sendSelfTest(to: [taylor, morgan, SampleData.person("Alex Kim")], bcc: [MailAddress(email: "no-reply@shop.example")])
+            wait("the people written to", upTo: 6) {
+                session.contacts.savedContacts.contains { $0.givenName == "Taylor" } && app.toast?.actionTitle == "Add…"
+            }
+        }
+        step {
+            let contacts = session.contacts
+            let added = contacts.savedContacts.first { $0.givenName == "Taylor" }
+            check(added?.jobTitle == "Product Designer" && added?.company == "Pawprint Studio" && added?.phones.first?.value == "(503) 555-0161",
+                  "someone written to who's in the organization's directory is added, with their details")
+            check(contacts.savedContacts.filter { $0.emails.contains { $0.value == "alex.kim@example.com" } }.count == 1, "someone already there isn't added again")
+            check(!contacts.savedContacts.contains { $0.emails.contains { $0.value == "no-reply@shop.example" } }, "nor a no-reply address")
+            check(!contacts.savedContacts.contains { $0.emails.contains { $0.value == morgan.email } }, "someone who can't be looked up isn't added by itself")
+            check(app.toast?.text == "Added Taylor Brooks. Add Morgan Diaz to Contacts?", "but offered", app.toast?.text ?? "none")
+            app.toast?.action?()
+            if case let .addPeople(_, people)? = app.sheet {
+                check(people.map(\.email) == [morgan.email], "Add… opens the contact editor for them")
+            } else {
+                check(false, "Add… opens the contact editor for them")
+            }
+            check(ContactsViewModel.newContact(for: morgan).givenName == "Morgan" && ContactsViewModel.newContact(for: casey).familyName == "Park",
+                  "filled in with their name and address")
+            app.sheet = nil
+            app.toast = nil
+            sendSelfTest(to: [casey])
+            wait("Casey to be offered") { app.toast?.text == "Add Park, Casey to Contacts?" }
+        }
+        step {
+            check(app.toast?.text == "Add Park, Casey to Contacts?", "someone new is offered once", app.toast?.text ?? "none")
+            app.toast = nil
+            sendSelfTest(to: [casey])
+            wait(upTo: 1.5) { false }
+        }
+        step {
+            check(app.toast?.actionTitle != "Add…", "and not again", app.toast?.text ?? "none")
+            check(!session.contacts.savedContacts.contains { $0.emails.contains { $0.value == casey.email } }, "without being added")
+            if let added = session.contacts.savedContacts.first(where: { $0.givenName == "Taylor" }) { session.contacts.delete(added, quietly: true) }
+            wait("Taylor tidied away") { !session.contacts.savedContacts.contains { $0.givenName == "Taylor" } }
+        }
+
         // MARK: The real services, made for each kind of account (nothing connects)
         step {
             let folder = FileManager.default.temporaryDirectory.appendingPathComponent("PMail Factory Check \(UUID().uuidString)")

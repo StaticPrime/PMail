@@ -9,6 +9,8 @@ public actor GoogleContactsService: ContactsService {
     private var groupsLoaded = false
     /// The contacts as last loaded or saved, so an update sends only the fields the person changed.
     private var loaded: [String: Contact] = [:]
+    /// Whether Google has been asked to get other contacts ready for searching (it wants that first).
+    private var otherContactsReady = false
 
     static let base = "https://people.googleapis.com/v1/"
     static let personFields = "names,nicknames,emailAddresses,phoneNumbers,organizations,addresses,birthdays,biographies,urls,"
@@ -64,6 +66,48 @@ public actor GoogleContactsService: ContactsService {
         for (index, data) in photos where contacts.indices.contains(index) { contacts[index].photoData = data }
         loaded = Dictionary(contacts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return contacts
+    }
+
+    // MARK: Looking people up
+
+    /// Someone in the account's organization directory (a Google Workspace account), with their picture; failing that,
+    /// among the "other contacts" Google keeps of people the account has written to.
+    public func lookUp(email: String) async throws -> Contact? {
+        let wanted = email.lowercased()
+        func matches(_ person: JSONValue) -> Bool {
+            person["emailAddresses"].array.contains { $0["value"].string?.lowercased() == wanted }
+        }
+        let directoryQuery = [("query", email), ("readMask", "names,emailAddresses,phoneNumbers,organizations,addresses,urls,photos"),
+                              ("sources", "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"), ("sources", "DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"),
+                              ("pageSize", "5")]
+        if let found = try? await client.get(Self.url("people:searchDirectoryPeople", directoryQuery)),
+           let person = found["people"].array.first(where: matches), let contact = Self.contact(from: person, kind: .contact, groups: [:]) {
+            var fresh = Self.fresh(contact)
+            if let url = Self.photoURL(person) { fresh.photoData = try? await client.download(url) }
+            return fresh
+        }
+        let fields = "names,emailAddresses,phoneNumbers"
+        if !otherContactsReady {
+            _ = try? await client.get(Self.url("otherContacts:search", [("query", ""), ("readMask", fields)]))
+            otherContactsReady = true
+        }
+        if let found = try? await client.get(Self.url("otherContacts:search", [("query", email), ("readMask", fields), ("pageSize", "5")])),
+           let person = found["results"].array.map({ $0["person"] }).first(where: matches),
+           let contact = Self.contact(from: person, kind: .contact, groups: [:]) {
+            return Self.fresh(contact)
+        }
+        return nil
+    }
+
+    /// Someone looked up, as a new contact of the account's own: none of their IDs, groups or stars.
+    static func fresh(_ contact: Contact) -> Contact {
+        var fresh = contact
+        fresh.id = UUID().uuidString
+        fresh.kind = .contact
+        fresh.etag = nil
+        fresh.labels = []
+        fresh.isStarred = false
+        return fresh
     }
 
     private func loadGroups() async throws {

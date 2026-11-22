@@ -256,6 +256,9 @@ final class SyncController {
                 try await session.services.mail.send(message)
                 await session.storage.recipients.record((message.to + message.cc + message.bcc).map(\.email))
                 await queue.remove(item.id)
+                let contacts = session.contacts
+                let people = message.to + message.cc + message.bcc
+                Task { await contacts.addPeopleWritten(to: people) }
                 if let draft = item.draft { try? await session.services.mail.deleteDraft(draft) }
                 app?.show(item.isScheduled ? "Your scheduled message was sent." : "A message from your Outbox was sent.")
                 session.mail.queueChanged()

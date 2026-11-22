@@ -148,4 +148,30 @@ public protocol ContactsService: AnyObject, Sendable {
     func create(_ contact: Contact) async throws -> Contact
     func update(_ contact: Contact) async throws -> Contact
     func delete(_ contact: Contact) async throws
+
+    /// What the provider can tell about someone from their email address, for filling in a new contact: someone in
+    /// the account's organization directory, or someone it has written to before. Nil when it knows nothing (or has
+    /// no way to look people up).
+    func lookUp(email: String) async throws -> Contact?
+}
+
+extension ContactsService {
+    public func lookUp(email: String) async throws -> Contact? { nil }
+}
+
+/// A name written in one piece ("Sam Rivera", "Rivera, Sam") as a given name and a family name.
+public enum PersonName {
+    public static func split(_ name: String) -> (given: String, family: String) {
+        var text = name.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        // What's in brackets ("Sam Rivera (Work)") isn't part of the name.
+        text = text.replacingOccurrences(of: "\\s*[\\(\\[][^\\)\\]]*[\\)\\]]", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, !text.contains("@") else { return ("", "") }
+        if let comma = text.firstIndex(of: ",") {
+            return (text[text.index(after: comma)...].trimmingCharacters(in: .whitespaces), text[..<comma].trimmingCharacters(in: .whitespaces))
+        }
+        let parts = text.split(separator: " ").map(String.init)
+        guard parts.count > 1, let family = parts.last else { return (text, "") }
+        return (parts.dropLast().joined(separator: " "), family)
+    }
 }

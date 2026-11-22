@@ -69,6 +69,22 @@ enum SampleData {
         return MailAddress(name: name, email: match?.email ?? "\(name.lowercased().replacingOccurrences(of: " ", with: "."))@example.com")
     }
 
+    /// People in the sample Google and Microsoft accounts' organization directories, who aren't in their contacts.
+    static func directory(for account: Account) -> [Contact] {
+        switch account.kind {
+        case .google:
+            [Contact(givenName: "Taylor", familyName: "Brooks", company: "Pawprint Studio", jobTitle: "Product Designer", department: "Design",
+                     emails: [LabeledValue(label: "work", value: "taylor.brooks@pawprint.example")],
+                     phones: [LabeledValue(label: "work", value: "(503) 555-0161")])]
+        case .microsoft:
+            [Contact(givenName: "Jordan", familyName: "Lee", company: "Northwind Traders", jobTitle: "Account Manager",
+                     emails: [LabeledValue(label: "work", value: "jordan.lee@northwind.example")],
+                     phones: [LabeledValue(label: "work", value: "(425) 555-0177")])]
+        default:
+            []
+        }
+    }
+
     static func contacts(for account: Account) -> [Contact] {
         let subset: [Person] = switch account.kind {
         case .microsoft: Array(people.filter { $0.labels.contains("Work") || $0.company.contains("Northwind") || $0.company.contains("Turner") })
