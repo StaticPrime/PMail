@@ -55,48 +55,58 @@ public actor IMAPMailService: MailService {
     static let longestWait: TimeInterval = 24 * 60 * 60
 
     public nonisolated let account: Account
-    private let incoming: ServerSettings
-    private let credential: Credential
-    private let sender: any MailSending
-    private let connector: any ByteStreamConnector
-    private var client: IMAPClient?
+    let incoming: ServerSettings
+    let credential: Credential
+    let sender: any MailSending
+    let connector: any ByteStreamConnector
+    var client: IMAPClient?
     /// The user name the server accepted, once one has worked (iCloud takes the whole address or the part before
     /// the @, depending on the account).
-    private var workingUsername: String?
+    var workingUsername: String?
     /// The mailboxes from the last LIST, for finding Sent, Drafts, Trash, Junk and Archive.
-    private var mailboxes: [IMAPMailbox]?
-    private var isBusy = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    var mailboxes: [IMAPMailbox]?
+    var isBusy = false
+    var waiters: [CheckedContinuation<Void, Never>] = []
     /// Sent, Drafts and Trash kept on this Mac for a server without them (nil: such a server's mail can't be deleted
     /// and its sent copies aren't kept).
-    private let localFolders: LocalFolders?
+    let localFolders: LocalFolders?
     /// The second connection, which waits for changes in the inbox.
-    private var changeClient: IMAPClient?
+    var changeClient: IMAPClient?
     /// How long each read on `changeClient` may take, when the connector is the network's.
-    private var changeStreamTimeout: TimeInterval = 0
-    private var isWaitingForChange = false
-    private var changeWaiters: [CheckedContinuation<Void, Never>] = []
+    var changeStreamTimeout: TimeInterval = 0
+    var isWaitingForChange = false
+    var changeWaiters: [CheckedContinuation<Void, Never>] = []
     /// How many times `close()` has run, so a wait can tell it was cut short.
-    private var closeCount = 0
+    var closeCount = 0
     /// How often a server without IDLE is asked about the inbox while waiting for a change, in seconds.
     var pollInterval: TimeInterval = 60
 
     public init(account: Account, incoming: ServerSettings, credential: Credential, sender: any MailSending,
-                connector: any ByteStreamConnector = URLSessionConnector(), localStore: LocalMailStore? = nil) {
+                connector: any ByteStreamConnector = URLSessionConnector(), localStore: LocalMailStore? = nil,
+                labelBook: LabelBook? = nil, sorter: InboxSorter? = nil) {
         self.account = account
         self.incoming = incoming
         self.credential = credential
         self.sender = sender
         self.connector = connector
         localFolders = localStore.map(LocalFolders.init(store:))
+        self.labelBook = labelBook
+        self.sorter = sorter
     }
+
+    /// The account's labels kept on this Mac (their names and colors, and which messages have them where the server
+    /// can't keep that); nil leaves labels out.
+    nonisolated let labelBook: LabelBook?
+    /// Sorts the inbox into categories, shown as tabs; nil leaves the inbox as one list.
+    nonisolated let sorter: InboxSorter?
 
     public nonisolated var capabilities: MailCapabilities {
-        MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: false, hasInboxTabs: false, searchesOnServer: true,
-                         canArchive: true, supportsDrafts: true, canMove: true)
+        MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: false, hasInboxTabs: sorter != nil, searchesOnServer: true,
+                         canArchive: true, supportsDrafts: true, canMove: true, canLabel: labelBook != nil,
+                         canEditLabels: labelBook != nil)
     }
 
-    public nonisolated var inboxTabs: [InboxTab] { [] }
+    public nonisolated var inboxTabs: [InboxTab] { sorter == nil ? [] : InboxCategory.tabs }
 
     // MARK: Folders
 
@@ -125,6 +135,7 @@ public actor IMAPMailService: MailService {
                 folders.append(MailFolder(id: box.name, name: box.displayName, role: roles[box.name], unreadCount: unread,
                                           totalCount: total, parentID: parent, isSelectable: box.isSelectable))
             }
+            folders += try await self.labelFolders(client: client)
             // Sent, Drafts and Trash the server doesn't have are kept on this Mac.
             if let local = self.localFolders { folders += await local.folders(besides: Set(roles.values)) }
             // The inbox first, then its starred messages as a folder of their own.
@@ -139,6 +150,8 @@ public actor IMAPMailService: MailService {
 
     public func listConversations(_ request: ListRequest) async throws -> ConversationPage {
         if let local = localFolders, LocalFolders.contains(request.folderID) { return await local.page(request) }
+        if let page = try await labelPage(request) { return page }
+        if let page = try await categoryPage(request) { return page }
         return try await withClient { client in
             let (mailbox, filter) = try await self.listTarget(for: request.folderID, client: client)
             // Opened again each time, so the list sees the mailbox as it is now.
@@ -161,7 +174,7 @@ public actor IMAPMailService: MailService {
 
     /// The mailbox to list for a folder ID, and the search that narrows it (the starred folder is the inbox's
     /// flagged messages; no folder means all mail, or the inbox on servers without an All Mail folder).
-    private func listTarget(for folderID: String?, client: IMAPClient) async throws -> (String, IMAPSearchKey?) {
+    func listTarget(for folderID: String?, client: IMAPClient) async throws -> (String, IMAPSearchKey?) {
         switch folderID {
         case Self.starredFolderID?:
             return ("INBOX", .flagged)
@@ -173,7 +186,7 @@ public actor IMAPMailService: MailService {
     }
 
     /// Summaries for messages in the selected mailbox, with snippets.
-    private func summaries(of uids: [UInt32], in mailbox: String, uidValidity: UInt32,
+    func summaries(of uids: [UInt32], in mailbox: String, uidValidity: UInt32,
                            client: IMAPClient) async throws -> [MessageSummary] {
         guard !uids.isEmpty else { return [] }
         let fetched = try await client.fetchSummaries(uids)
@@ -186,7 +199,7 @@ public actor IMAPMailService: MailService {
     }
 
     /// Snippets from the start of each message's text part: one partial fetch for each part number in use.
-    private func snippets(for fetched: [IMAPFetchResponse], client: IMAPClient) async throws -> [UInt32: String] {
+    func snippets(for fetched: [IMAPFetchResponse], client: IMAPClient) async throws -> [UInt32: String] {
         struct Request: Hashable, Comparable {
             var section: String
             var length: Int
@@ -222,12 +235,14 @@ public actor IMAPMailService: MailService {
         let inReplyTo = envelope?.inReplyTo ?? headers["in-reply-to"].flatMap(MessageIDs.first(in:))
         let messageID = envelope?.messageID
         let threadID = response.threadID ?? references.first ?? inReplyTo ?? messageID ?? id.rawValue
-        return MessageSummary(id: id.rawValue, threadID: threadID, folderID: id.mailbox, from: envelope?.from.first,
+        return MessageSummary(id: id.rawValue, threadID: threadID, folderID: id.mailbox, labelIDs: keywordLabelIDs(response.flags),
+                              from: envelope?.from.first,
                               to: envelope?.to ?? [], cc: envelope?.cc ?? [], subject: envelope?.subject ?? "", snippet: snippet,
                               date: envelope?.date ?? response.internalDate ?? Date(timeIntervalSince1970: 0),
                               isUnread: !response.hasFlag("\\Seen"), isStarred: response.hasFlag("\\Flagged"),
                               isDraft: response.hasFlag("\\Draft"), hasAttachments: response.bodyStructure?.hasAttachments ?? false,
-                              messageIDHeader: messageID, inReplyTo: inReplyTo, references: references, size: response.size)
+                              messageIDHeader: messageID, inReplyTo: inReplyTo, references: references, size: response.size,
+                              senderHints: senderHints(from: headers))
     }
 
     // MARK: Reading
@@ -283,7 +298,7 @@ public actor IMAPMailService: MailService {
 
     /// The messages in a mailbox that belong to a conversation: replies to its first message (by References or
     /// In-Reply-To) and that message itself (by Message-ID).
-    private func relatedMessages(in mailbox: String, roots: [String], skipping loaded: Set<IMAPMessageID>,
+    func relatedMessages(in mailbox: String, roots: [String], skipping loaded: Set<IMAPMessageID>,
                                  knownMessageIDs: inout Set<String>, client: IMAPClient) async throws -> [MailMessage] {
         let selected = try await ensureSelected(mailbox, writable: false, client: client)
         let criteria = roots.map { root in
@@ -371,7 +386,7 @@ public actor IMAPMailService: MailService {
         case .markImportant, .markNotImportant:
             throw PMailError.notSupported("This account doesn’t mark messages as important.")
         case .addLabel, .removeLabel:
-            throw PMailError.notSupported("This account uses folders, not labels.")
+            return try await applyLabel(action, to: messages)
         default:
             break
         }
@@ -395,7 +410,7 @@ public actor IMAPMailService: MailService {
     }
 
     /// The mailbox an action moves messages to, found by its role.
-    private func destination(for action: MailAction, client: IMAPClient) async throws -> String? {
+    func destination(for action: MailAction, client: IMAPClient) async throws -> String? {
         switch action {
         case .archive:
             if let archive = try await mailboxName(for: .archive, client: client) { return archive }
@@ -421,7 +436,7 @@ public actor IMAPMailService: MailService {
         }
     }
 
-    private func apply(_ action: MailAction, to uids: [UInt32], in mailbox: String, destination: String?,
+    func apply(_ action: MailAction, to uids: [UInt32], in mailbox: String, destination: String?,
                        client: IMAPClient) async throws {
         switch action {
         case .markRead: try await client.uidStore(uids, adding: true, flags: ["\\Seen"])
@@ -456,14 +471,14 @@ public actor IMAPMailService: MailService {
 
     /// The server's mailbox with a role, from the last LIST when there's been one, so a folder kept on this Mac can be
     /// used without connecting.
-    private func serverMailbox(for role: FolderRole) async throws -> String? {
+    func serverMailbox(for role: FolderRole) async throws -> String? {
         if let mailboxes { return IMAPFolderRoles.assign(mailboxes).first { $0.value == role }?.key }
         return try await withClient { client in try await self.mailboxName(for: role, client: client) }
     }
 
     /// Copies messages from the selected mailbox into a folder kept on this Mac, with their flags, then deletes them
     /// from the server. Only what's safely on the Mac leaves the server.
-    private func keepOnMac(_ uids: [UInt32], in folderID: String, client: IMAPClient) async throws {
+    func keepOnMac(_ uids: [UInt32], in folderID: String, client: IMAPClient) async throws {
         guard let store = localFolders?.store else { return }
         var kept: [UInt32] = []
         for response in try await client.fetchMessages(uids) {
@@ -479,7 +494,7 @@ public actor IMAPMailService: MailService {
     /// Actions on messages kept on this Mac. Flags change here. Delete moves a message to the Trash (the server's, or
     /// the one kept here), and deletes it for good from the Trash kept here. Moving one to a server folder, back to the
     /// inbox say, uploads it there.
-    private func performKept(_ action: MailAction, on messages: [MessageSummary], local: LocalFolders) async throws {
+    func performKept(_ action: MailAction, on messages: [MessageSummary], local: LocalFolders) async throws {
         let store = local.store
         let ids = messages.map(\.id)
         switch action {
@@ -530,7 +545,7 @@ public actor IMAPMailService: MailService {
 
     /// Uploads messages kept on this Mac to a server mailbox, with their flags, letting each copy here go once it's
     /// there.
-    private func upload(_ ids: [String], to mailbox: String) async throws {
+    func upload(_ ids: [String], to mailbox: String) async throws {
         guard let store = localFolders?.store else { return }
         try await withClient { client in
             for id in ids {
@@ -605,7 +620,7 @@ public actor IMAPMailService: MailService {
     }
 
     /// Finds a just-saved draft by its Message-ID, for servers that don't say where APPEND put it.
-    private func findDraft(messageID: String, in drafts: String, client: IMAPClient) async throws -> IMAPAppendResult? {
+    func findDraft(messageID: String, in drafts: String, client: IMAPClient) async throws -> IMAPAppendResult? {
         let selected = try await client.select(drafts, readOnly: true)
         guard let uid = try await client.uidSearch([.header("Message-ID", messageID)]).max() else { return nil }
         return IMAPAppendResult(uidValidity: selected.uidValidity ?? 0, uid: uid)
@@ -620,7 +635,7 @@ public actor IMAPMailService: MailService {
     }
 
     /// Deletes messages for good, mailbox by mailbox.
-    private func delete(_ ids: [IMAPMessageID], client: IMAPClient) async throws {
+    func delete(_ ids: [IMAPMessageID], client: IMAPClient) async throws {
         for (mailbox, group) in Self.grouped(ids, by: { $0.mailbox }) {
             let selected = try await ensureSelected(mailbox, writable: true, client: client)
             let uids = group.filter { $0.uidValidity == (selected.uidValidity ?? 0) }.map(\.uid)
@@ -675,7 +690,7 @@ public actor IMAPMailService: MailService {
 
     /// What's new in the inbox while it's the selected mailbox: the messages from the stored UIDNEXT up, found with
     /// UID SEARCH. `uidNext` is a UIDNEXT the server gave meanwhile, for the next state.
-    private func newMail(inSelectedInbox selected: IMAPSelectedMailbox, since known: IMAPInboxState?, atLeast uidNext: UInt32 = 0,
+    func newMail(inSelectedInbox selected: IMAPSelectedMailbox, since known: IMAPInboxState?, atLeast uidNext: UInt32 = 0,
                          client: IMAPClient) async throws -> NewMail {
         let uidValidity = selected.uidValidity ?? 0
         let continuing = known?.uidValidity == uidValidity
@@ -818,7 +833,7 @@ public actor IMAPMailService: MailService {
 
     /// Waits for a change on a server without IDLE by asking with NOOP every `pollInterval` seconds: true once the
     /// inbox's message count or a message's flags change, false at the deadline.
-    private func pollForChange(on client: IMAPClient, until deadline: ContinuousClock.Instant) async throws -> Bool {
+    func pollForChange(on client: IMAPClient, until deadline: ContinuousClock.Instant) async throws -> Bool {
         var count = await client.selectedMailbox?.exists
         while ContinuousClock.now < deadline {
             let next = min(deadline, ContinuousClock.now + .seconds(max(pollInterval, 0.01)))
@@ -845,7 +860,7 @@ public actor IMAPMailService: MailService {
 
     /// The connection that waits for changes, signed in and with the inbox open read-only. It's made when there's none
     /// or it has dropped, and made again when its reads can't wait as long as needed.
-    private func changeConnection(streamTimeout: TimeInterval) async throws -> IMAPClient {
+    func changeConnection(streamTimeout: TimeInterval) async throws -> IMAPClient {
         let client: IMAPClient
         if let current = changeClient, await current.isConnected,
            !(connector is URLSessionConnector) || changeStreamTimeout >= streamTimeout {
@@ -869,14 +884,14 @@ public actor IMAPMailService: MailService {
 
     /// The service's connector, with reads that wait at least `streamTimeout` seconds when it's the network's (a
     /// quiet IDLE mustn't look like a server that stopped answering).
-    private func changeConnector(streamTimeout: TimeInterval) -> any ByteStreamConnector {
+    func changeConnector(streamTimeout: TimeInterval) -> any ByteStreamConnector {
         guard var network = connector as? URLSessionConnector else { return connector }
         network.timeout = max(network.timeout, streamTimeout)
         return network
     }
 
     /// Runs `body` with no other wait in flight: they share one connection.
-    private func oneWaitAtATime<T: Sendable>(_ body: () async throws -> T) async throws -> T {
+    func oneWaitAtATime<T: Sendable>(_ body: () async throws -> T) async throws -> T {
         if isWaitingForChange {
             await withCheckedContinuation { changeWaiters.append($0) }
         } else {
@@ -897,7 +912,7 @@ public actor IMAPMailService: MailService {
 
     /// Runs `body` with a signed-in client, alone. If the connection had dropped since it was last used, the
     /// service connects again and runs `body` once more.
-    private func withClient<T: Sendable>(_ body: (IMAPClient) async throws -> T) async throws -> T {
+    func withClient<T: Sendable>(_ body: (IMAPClient) async throws -> T) async throws -> T {
         try await exclusively {
             if let client = self.client, await client.isConnected {
                 do {
@@ -912,7 +927,7 @@ public actor IMAPMailService: MailService {
     }
 
     /// Connects and signs in the main connection.
-    private func openClient() async throws -> IMAPClient {
+    func openClient() async throws -> IMAPClient {
         let client = IMAPClient(connector: connector)
         try await connectAndSignIn(client)
         self.client = client
@@ -921,7 +936,7 @@ public actor IMAPMailService: MailService {
 
     /// Connects a client and signs it in. On iCloud, a user name the server turns down is tried once more as the part
     /// before the @ (or as the whole address), and whichever works is remembered.
-    private func connectAndSignIn(_ client: IMAPClient) async throws {
+    func connectAndSignIn(_ client: IMAPClient) async throws {
         let names = usernameCandidates()
         for (index, name) in names.enumerated() {
             do {
@@ -942,7 +957,7 @@ public actor IMAPMailService: MailService {
         throw PMailError.authenticationFailed("")
     }
 
-    private func usernameCandidates() -> [String] {
+    func usernameCandidates() -> [String] {
         let configured = incoming.username.isEmpty ? credential.username : incoming.username
         if let workingUsername { return [workingUsername] }
         let isICloud = account.kind == .icloud || incoming.host.lowercased().hasSuffix("mail.me.com")
@@ -957,18 +972,18 @@ public actor IMAPMailService: MailService {
     }
 
     /// Selects a mailbox unless it's already selected in a way that will do.
-    private func ensureSelected(_ mailbox: String, writable: Bool, client: IMAPClient) async throws -> IMAPSelectedMailbox {
+    func ensureSelected(_ mailbox: String, writable: Bool, client: IMAPClient) async throws -> IMAPSelectedMailbox {
         if let current = await client.selectedMailbox, current.name == mailbox, !writable || !current.isReadOnly { return current }
         return try await client.select(mailbox, readOnly: !writable)
     }
 
     /// The mailbox with a role, from the last LIST (listing first if there hasn't been one).
-    private func mailboxName(for role: FolderRole, client: IMAPClient) async throws -> String? {
+    func mailboxName(for role: FolderRole, client: IMAPClient) async throws -> String? {
         IMAPFolderRoles.assign(try await knownMailboxes(client: client)).first { $0.value == role }?.key
     }
 
     /// The mailboxes from the last LIST, listing them first if there hasn't been one.
-    private func knownMailboxes(client: IMAPClient) async throws -> [IMAPMailbox] {
+    func knownMailboxes(client: IMAPClient) async throws -> [IMAPMailbox] {
         if let mailboxes { return mailboxes }
         let boxes = try await client.listMailboxes()
         mailboxes = boxes
@@ -977,7 +992,7 @@ public actor IMAPMailService: MailService {
 
     /// Runs `body` with no other operation in flight, so one operation's SELECT can't pull the mailbox out from
     /// under another's FETCH.
-    private func exclusively<T: Sendable>(_ body: () async throws -> T) async throws -> T {
+    func exclusively<T: Sendable>(_ body: () async throws -> T) async throws -> T {
         if isBusy {
             await withCheckedContinuation { waiters.append($0) }
         } else {

@@ -55,6 +55,16 @@ public protocol MailService: AnyObject, Sendable {
     /// Waits until the server says the inbox changed (true) or `timeout` seconds pass (false), on a connection of its
     /// own so other calls aren't held up. Services that can't be told return false straight away.
     func waitForChange(timeout: TimeInterval) async throws -> Bool
+
+    // Labels (where `capabilities.canEditLabels`). Labels are listed by `loadFolders` as folders of kind `.label`;
+    // listing one lists the conversations with it, wherever they are.
+
+    /// Makes a label. `colorHex` is "#RRGGBB", or nil for the account's default.
+    func createLabel(named name: String, colorHex: String?) async throws -> MailFolder
+    /// Renames or recolors a label, and returns it as it is now (its ID may change).
+    func updateLabel(_ label: MailFolder, name: String, colorHex: String?) async throws -> MailFolder
+    /// Deletes a label; the messages that had it keep everything else.
+    func deleteLabel(_ label: MailFolder) async throws
 }
 
 /// Where a service is up to in an account's inbox, for asking what's new since then. Only the service that made it
@@ -95,6 +105,18 @@ extension MailService {
     public var pushesChanges: Bool { false }
 
     public func waitForChange(timeout: TimeInterval) async throws -> Bool { false }
+
+    public func createLabel(named name: String, colorHex: String?) async throws -> MailFolder {
+        throw PMailError.notSupported("This account can’t make labels.")
+    }
+
+    public func updateLabel(_ label: MailFolder, name: String, colorHex: String?) async throws -> MailFolder {
+        throw PMailError.notSupported("This account can’t change labels.")
+    }
+
+    public func deleteLabel(_ label: MailFolder) async throws {
+        throw PMailError.notSupported("This account can’t delete labels.")
+    }
 }
 
 /// Hands a finished message to an outgoing (SMTP) server.

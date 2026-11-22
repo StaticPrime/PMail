@@ -124,12 +124,16 @@ public struct MessageSummary: Codable, Sendable, Identifiable, Hashable {
     public var inReplyTo: String?
     public var references: [String]
     public var size: Int?
+    /// What the message's headers say about its sender, for sorting an inbox into categories on the Mac; nil when
+    /// the service didn't read them.
+    public var senderHints: SenderHints?
 
     public init(id: String, threadID: String? = nil, folderID: String? = nil, labelIDs: [String] = [], from: MailAddress? = nil,
                 to: [MailAddress] = [], cc: [MailAddress] = [], subject: String = "", snippet: String = "", date: Date = Date(),
                 isUnread: Bool = false, isStarred: Bool = false, isImportant: Bool = false, isDraft: Bool = false,
                 hasAttachments: Bool = false, messageIDHeader: String? = nil, inReplyTo: String? = nil, references: [String] = [],
-                size: Int? = nil) {
+                size: Int? = nil, senderHints: SenderHints? = nil) {
+        self.senderHints = senderHints
         self.id = id
         self.threadID = threadID ?? id
         self.folderID = folderID
@@ -403,9 +407,14 @@ public struct MailCapabilities: Sendable, Hashable {
     public var supportsDrafts: Bool
     /// Messages can be moved between folders (POP accounts keep one inbox).
     public var canMove: Bool
+    /// Messages can carry labels, several each, beside whatever folder they're in (`.addLabel`, `.removeLabel`).
+    public var canLabel: Bool
+    /// Labels can be made, renamed, recolored and deleted.
+    public var canEditLabels: Bool
 
     public init(usesLabels: Bool = false, canStar: Bool = true, canMarkImportant: Bool = false, hasInboxTabs: Bool = false,
-                searchesOnServer: Bool = true, canArchive: Bool = true, supportsDrafts: Bool = true, canMove: Bool = true) {
+                searchesOnServer: Bool = true, canArchive: Bool = true, supportsDrafts: Bool = true, canMove: Bool = true,
+                canLabel: Bool = false, canEditLabels: Bool = false) {
         self.usesLabels = usesLabels
         self.canStar = canStar
         self.canMarkImportant = canMarkImportant
@@ -414,5 +423,7 @@ public struct MailCapabilities: Sendable, Hashable {
         self.canArchive = canArchive
         self.supportsDrafts = supportsDrafts
         self.canMove = canMove
+        self.canLabel = canLabel
+        self.canEditLabels = canEditLabels
     }
 }

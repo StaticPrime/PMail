@@ -16,40 +16,50 @@ public actor POPMailService: MailService {
     public static let spamID = "Spam"
 
     /// The folders messages can be moved between (Starred only shows messages, it doesn't hold them).
-    private static let localFolderIDs: Set<String> = [inboxID, sentID, draftsID, archiveID, spamID, trashID]
+    static let localFolderIDs: Set<String> = [inboxID, sentID, draftsID, archiveID, spamID, trashID]
     /// Folders whose messages stay out of All Mail, Starred and conversations opened from elsewhere.
-    private static let setAsideIDs: Set<String> = [spamID, trashID]
-    private static let firstSyncKey = "pop.firstSyncDone"
+    static let setAsideIDs: Set<String> = [spamID, trashID]
+    static let firstSyncKey = "pop.firstSyncDone"
     /// The most messages one check for new mail returns (the newest).
     static let newMailLimit = 50
 
     public let account: Account
-    private let incoming: ServerSettings
-    private let credential: Credential
-    private let store: LocalMailStore
-    private let sender: any MailSending
-    private let connector: any ByteStreamConnector
+    let incoming: ServerSettings
+    let credential: Credential
+    let store: LocalMailStore
+    let sender: any MailSending
+    let connector: any ByteStreamConnector
     /// The sync in progress, which hands back the IDs it downloaded, newest first.
-    private var syncTask: Task<[String], Error>?
+    var syncTask: Task<[String], Error>?
     /// How many of the newest messages the first sync downloads; older ones stay on the server only.
     var firstSyncLimit = 300
 
     public init(account: Account, incoming: ServerSettings, credential: Credential, store: LocalMailStore,
-                sender: any MailSending, connector: any ByteStreamConnector = URLSessionConnector()) {
+                sender: any MailSending, connector: any ByteStreamConnector = URLSessionConnector(),
+                labelBook: LabelBook? = nil, sorter: InboxSorter? = nil) {
         self.account = account
         self.incoming = incoming
         self.credential = credential
         self.store = store
         self.sender = sender
         self.connector = connector
+        self.labelBook = labelBook
+        self.sorter = sorter
     }
+
+    /// The account's labels (names and colors); the messages' labels are kept with them in the store. Nil leaves
+    /// labels out.
+    nonisolated let labelBook: LabelBook?
+    /// Sorts the inbox into categories, shown as tabs; nil leaves the inbox as one list.
+    nonisolated let sorter: InboxSorter?
 
     public nonisolated var capabilities: MailCapabilities {
-        MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: false, hasInboxTabs: false, searchesOnServer: false,
-                         canArchive: true, supportsDrafts: true, canMove: true)
+        MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: false, hasInboxTabs: sorter != nil, searchesOnServer: false,
+                         canArchive: true, supportsDrafts: true, canMove: true, canLabel: labelBook != nil,
+                         canEditLabels: labelBook != nil)
     }
 
-    public nonisolated var inboxTabs: [InboxTab] { [] }
+    public nonisolated var inboxTabs: [InboxTab] { sorter == nil ? [] : InboxCategory.tabs }
 
     // MARK: Listing
 
@@ -68,11 +78,13 @@ public actor POPMailService: MailService {
                                           totalCount: counts.total))
             }
         }
-        return folders
+        return folders + (await labelFolders())
     }
 
     /// A page of conversations. Listing the inbox's first page checks the server for new mail first.
     public func listConversations(_ request: ListRequest) async throws -> ConversationPage {
+        if let page = try await labelPage(request) { return page }
+        if let page = try await categoryPage(request) { return page }
         let pageIndex = max(0, request.pageToken.flatMap { Int($0) } ?? request.pageIndex)
         let pageSize = max(1, request.pageSize)
         var summaries: [MessageSummary]
@@ -110,7 +122,7 @@ public actor POPMailService: MailService {
     }
 
     /// Runs a sync, or joins the one in progress, and returns the IDs of the messages it downloaded, newest first.
-    private func sync() async throws -> [String] {
+    func sync() async throws -> [String] {
         if let running = syncTask { return try await running.value }
         let task = Task { try await self.downloadNewMessages() }
         syncTask = task
@@ -118,7 +130,7 @@ public actor POPMailService: MailService {
         return try await task.value
     }
 
-    private func downloadNewMessages() async throws -> [String] {
+    func downloadNewMessages() async throws -> [String] {
         let client = POPClient(settings: incoming, credential: credential, connector: connector)
         try await client.connect()
         do {
@@ -187,7 +199,7 @@ public actor POPMailService: MailService {
     public nonisolated var pushesChanges: Bool { false }
 
     /// A Message-ID in a form for comparing: without angle brackets or space around it, in lowercase.
-    private static func messageIDKey(_ id: String) -> String {
+    static func messageIDKey(_ id: String) -> String {
         id.trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n")).lowercased()
     }
 
@@ -247,7 +259,7 @@ public actor POPMailService: MailService {
         case .markSpam: try await store.move(ids: ids, to: Self.spamID)
         case .notSpam: try await store.move(ids: ids, to: Self.inboxID)
         case .addLabel, .removeLabel:
-            throw PMailError.notSupported("POP accounts don’t use labels.")
+            try await applyLabel(action, to: messages)
         case .markImportant, .markNotImportant:
             throw PMailError.notSupported("POP accounts can’t mark mail as important.")
         }
