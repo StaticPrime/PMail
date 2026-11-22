@@ -7,6 +7,15 @@ extension POPMailService {
     ///
     /// The inbox's messages are sorted by the sorter (the category chosen for a sender, else the rules), then listed the
     /// way the inbox is: as conversations, newest first, and the first page checks the server for new mail first.
+    /// Unread messages in each category of the inbox, from the mail kept on the Mac.
+    public func unreadCounts(inTabs tabs: [InboxTab]) async throws -> [String: Int] {
+        guard let sorter, tabs.contains(where: { InboxCategory(tabID: $0.id) != nil }) else { return [:] }
+        let unread = await store.summaries(in: Self.inboxID).filter(\.isUnread)
+        var counts = Dictionary(uniqueKeysWithValues: InboxCategory.allCases.map { ($0.tabID, 0) })
+        for category in await sorter.categories(of: unread) { counts[category.tabID, default: 0] += 1 }
+        return counts
+    }
+
     func categoryPage(_ request: ListRequest) async throws -> ConversationPage? {
         guard let sorter, request.folderID == Self.inboxID, let category = InboxCategory(tabID: request.tabID),
               (request.query ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }

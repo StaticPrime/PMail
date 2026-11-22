@@ -398,3 +398,18 @@ public actor MicrosoftMailService: MailService {
 
     public func close() async {}
 }
+
+extension MicrosoftMailService {
+    /// Unread messages in Focused and Other, counted by the server. Nothing where the inbox isn't split that way.
+    public func unreadCounts(inTabs tabs: [InboxTab]) async throws -> [String: Int] {
+        guard !focusedFilterRefused else { return [:] }
+        var counts: [String: Int] = [:]
+        for tab in tabs where ["focused", "other"].contains(tab.id) {
+            let query = [("$filter", "inferenceClassification eq '\(tab.id)' and isRead eq false"), ("$count", "true"),
+                         ("$top", "1"), ("$select", "id")]
+            let page = try await client.get(Self.url("mailFolders/inbox/messages", query), headers: Self.headers)
+            counts[tab.id] = page["@odata.count"].int ?? page["value"].array.count
+        }
+        return counts
+    }
+}

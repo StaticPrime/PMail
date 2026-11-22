@@ -19,6 +19,23 @@ import Testing
         #expect(GoogleMailService.labelPalette.allSatisfy { WebColor.hex($0) != nil })
     }
 
+    @Test func eachTabCountsItsUnreadInboxMessages() async throws {
+        let transport = StubTransport()
+        transport.on("GET", "\(Self.api)/messages") { request in
+            let labels = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
+                .filter { $0.name == "labelIds" }.compactMap(\.value) ?? []
+            #expect(labels.contains("INBOX") && labels.contains("UNREAD"))
+            if labels.contains("CATEGORY_PROMOTIONS") {
+                return .json(#"{"messages": [{"id": "a"}, {"id": "b"}], "nextPageToken": "next", "resultSizeEstimate": 812}"#)
+            }
+            if labels.contains("CATEGORY_PERSONAL") { return .json(#"{"messages": [{"id": "c"}, {"id": "d"}, {"id": "e"}]}"#) }
+            return .json(#"{"resultSizeEstimate": 0}"#)
+        }
+        let tabs = Array(GoogleMailService.tabs.prefix(3))
+        let counts = try await service(transport).unreadCounts(inTabs: tabs)
+        #expect(counts == ["CATEGORY_PERSONAL": 3, "CATEGORY_PROMOTIONS": 812, "CATEGORY_SOCIAL": 0])
+    }
+
     @Test func labelsAreMadeRenamedWithTheLabelsInsideThemAndDeleted() async throws {
         let transport = StubTransport()
         transport.on("POST", "\(Self.api)/labels") { request in

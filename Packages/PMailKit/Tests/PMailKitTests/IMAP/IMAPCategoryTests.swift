@@ -126,6 +126,23 @@ import Testing
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 
+    @Test func eachCategoryCountsItsUnreadMessages() async throws {
+        let stream = ScriptedByteStream(greeting: Script.greeting(), script: [
+            Script.signIn("A1"),
+            Script.select("A2", exists: 5, readOnly: true),
+            Script.ok("A3", "UID SEARCH ALL", untagged: ["* SEARCH 1 2 3 4 5"]),
+            Self.fetch("A4", "1:5", Self.indexFetch, [Self.lunch, Self.sale, Self.shipped, Self.comment, Self.newsletter].map(Self.indexLine)),
+            Script.ok("A5", "UID SEARCH UNSEEN", untagged: ["* SEARCH 2 4 5"]),
+        ])
+        let harness = Harness([stream])
+        defer { try? FileManager.default.removeItem(at: harness.folder) }
+        let counts = try await harness.service.unreadCounts(inTabs: InboxCategory.tabs)
+        #expect(counts == [InboxCategory.primary.tabID: 1, InboxCategory.promotions.tabID: 1, InboxCategory.social.tabID: 1,
+                           InboxCategory.transactions.tabID: 0, InboxCategory.updates.tabID: 0])
+        #expect(try await IMAPHarness([]).service.unreadCounts(inTabs: InboxCategory.tabs).isEmpty, "no sorter, no counts")
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
+
     @Test func newMailIsSortedAloneAndMessagesThatLeftAreForgotten() async throws {
         let promos = (1...4).map { Mail(uid: UInt32($0), from: "offers@shop.example", subject: "Offer number \($0)") }
         let stream = ScriptedByteStream(greeting: Script.greeting(), script: [

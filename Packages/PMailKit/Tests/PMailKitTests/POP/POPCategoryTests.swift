@@ -73,6 +73,9 @@ import Testing
         #expect(Self.ids(try await pop.listConversations(Self.request(.promotions))) == ["pop:b"])
         #expect(Self.ids(try await pop.listConversations(Self.request(.transactions))) == ["pop:c"])
         #expect(Self.ids(try await pop.listConversations(Self.request(.social))) == ["pop:d"])
+        let counts = try await pop.unreadCounts(inTabs: InboxCategory.tabs)
+        #expect(counts.values.reduce(0, +) == 5 && counts[InboxCategory.primary.tabID] == 1 && counts[InboxCategory.promotions.tabID] == 1,
+                "each category counts its unread messages")
         #expect(Self.ids(try await pop.listConversations(Self.request(.updates))) == ["pop:e"])
 
         // The person puts the shop's deals in Primary.

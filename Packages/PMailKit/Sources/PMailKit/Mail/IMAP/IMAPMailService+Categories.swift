@@ -14,6 +14,28 @@ extension IMAPMailService {
     /// Each message's sender is kept beside its category, so a category the person chooses for a sender applies straight
     /// away. Older messages aren't sorted: they're listed under Primary, so none go missing. The page is the category's
     /// messages, newest first, fetched the way other lists are, and the total counts them.
+    /// Unread messages in each category of the inbox: the inbox sorted as for listing (only what isn't yet), then one
+    /// search for what's unread.
+    public func unreadCounts(inTabs tabs: [InboxTab]) async throws -> [String: Int] {
+        guard let sorter, tabs.contains(where: { InboxCategory(tabID: $0.id) != nil }) else { return [:] }
+        let chosen = await sorter.senderCategories()
+        return try await withClient { client in
+            let selected = try await client.select("INBOX", readOnly: true)
+            let uidValidity = selected.uidValidity ?? 0
+            var counts = Dictionary(uniqueKeysWithValues: InboxCategory.allCases.map { ($0.tabID, 0) })
+            guard selected.exists > 0 else { return counts }
+            let newestFirst = Array(Set(try await client.uidSearch([.all]))).sorted(by: >)
+            try await self.sortInbox(newestFirst, uidValidity: uidValidity, client: client)
+            let unread = Set(try await client.uidSearch([.unseen]))
+            guard !unread.isEmpty else { return counts }
+            for category in InboxCategory.allCases {
+                counts[category.tabID] = self.categoryIndex.uids(in: category, newestFirst: newestFirst, chosen: chosen)
+                    .filter(unread.contains).count
+            }
+            return counts
+        }
+    }
+
     func categoryPage(_ request: ListRequest) async throws -> ConversationPage? {
         guard let sorter, request.folderID == "INBOX", let category = InboxCategory(tabID: request.tabID),
               (request.query ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }

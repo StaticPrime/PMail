@@ -47,6 +47,18 @@ import Testing
         transport.sent("POST", "/v1.0/$batch").flatMap { $0.bodyJSONValue["requests"].array }
     }
 
+    @Test func focusedAndOtherCountTheirUnreadMessages() async throws {
+        let transport = StubTransport()
+        transport.on("GET", "\(Self.api)/mailFolders/inbox/messages") { request in
+            let filter = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
+                .first { $0.name == "$filter" }?.value ?? ""
+            #expect(filter.contains("isRead eq false"))
+            return .json(filter.contains("'focused'") ? #"{"@odata.count": 4, "value": [{"id": "x"}]}"# : #"{"@odata.count": 17, "value": [{"id": "y"}]}"#)
+        }
+        let counts = try await service(transport).unreadCounts(inTabs: MicrosoftMailService.tabs)
+        #expect(counts == ["focused": 4, "other": 17])
+    }
+
     @Test func presetsHaveColors() {
         #expect(MicrosoftMailService.categoryColor("preset7") == "#3267B8")
         #expect(MicrosoftMailService.categoryColor("PRESET24") == "#82375F")

@@ -66,6 +66,10 @@ public protocol MailService: AnyObject, Sendable {
     func updateLabel(_ label: MailFolder, name: String, colorHex: String?) async throws -> MailFolder
     /// Deletes a label; the messages that had it keep everything else.
     func deleteLabel(_ label: MailFolder) async throws
+
+    /// How many unread messages the inbox has under each of its tabs, by tab ID, for the counts on the tabs. Empty
+    /// when the service can't say.
+    func unreadCounts(inTabs tabs: [InboxTab]) async throws -> [String: Int]
 }
 
 /// Where a service is up to in an account's inbox, for asking what's new since then. Only the service that made it
@@ -118,6 +122,8 @@ extension MailService {
     public func deleteLabel(_ label: MailFolder) async throws {
         throw PMailError.notSupported("This account can’t delete labels.")
     }
+
+    public func unreadCounts(inTabs tabs: [InboxTab]) async throws -> [String: Int] { [:] }
 }
 
 /// Hands a finished message to an outgoing (SMTP) server.
