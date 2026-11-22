@@ -148,11 +148,15 @@ struct AccountSettingsSections: View {
     var body: some View {
         Section("Sending") {
             TextField("Name on sent mail", text: $account.name)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Signature").font(.pm(12)).foregroundStyle(Theme.textSecondary)
-                TextEditor(text: $account.signature).font(.pm(13)).frame(height: 90)
+            let session = app.accounts.session(for: account.id)
+            SignatureEditor(account: account, syncsWithServer: session?.services.mail.capabilities.syncsSignature == true) { html, plain in
+                account.signatureHTML = html
+                account.signature = plain
             }
+            // A new editor when another account shows, or when the signature changed on the server.
+            .id("\(account.id)-\(session?.signatureRevision ?? 0)")
         }
+        .task(id: account.id) { await app.accounts.refreshSignature(of: account.id) }
         if let incoming = account.incoming {
             Section("Servers") {
                 LabeledContent("Incoming (\(incoming.mailProtocol.displayName))", value: "\(incoming.host):\(incoming.port), \(incoming.security.displayName)")

@@ -262,6 +262,8 @@ final class MailViewModel {
             await refreshLocalFolders()
             await loadBlockedSenders()
             await loadFolders(thenList: true)
+            // A signature kept on the server may have changed there.
+            await app?.accounts.refreshSignature(of: account.id)
         }
     }
 

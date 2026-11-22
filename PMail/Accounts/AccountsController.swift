@@ -87,6 +87,9 @@ final class AccountSession: Identifiable {
 
     var isActivated: Bool { activated }
 
+    /// Bumped when the signature changed on the server, so an open signature editor shows the new one.
+    var signatureRevision = 0
+
     func update(_ account: Account) {
         self.account = account
         mail.account = account
@@ -145,6 +148,21 @@ final class AccountsController {
 
     func session(for id: UUID) -> AccountSession? { sessions[id] }
 
+    /// Takes the signature an account keeps on its server when it differs from the one here (it changed there).
+    func refreshSignature(of id: UUID) async {
+        guard let session = sessions[id], session.services.mail.capabilities.syncsSignature else { return }
+        // A failed request changes nothing; a server with no signature clears it here too.
+        let loaded: String?
+        do { loaded = try await session.services.mail.loadSignature() } catch { return }
+        guard var account = accounts.first(where: { $0.id == id }) else { return }
+        let html = loaded ?? ""
+        guard (account.signatureHTML ?? "") != html else { return }
+        account.signatureHTML = html.isEmpty ? nil : html
+        account.signature = html.isEmpty ? "" : RichTextHTML.plainText(from: RichTextHTML.attributedString(fromHTML: html))
+        update(account, sendingSignature: false)
+        session.signatureRevision += 1
+    }
+
     func switchTo(_ id: UUID) {
         guard sessions[id] != nil else { return }
         currentID = id
@@ -180,8 +198,10 @@ final class AccountsController {
     }
 
     /// Saves changes to an account's name, signature or servers.
-    func update(_ account: Account) {
+    /// Saves an account's settings; a changed signature goes to its server too, where it keeps one.
+    func update(_ account: Account, sendingSignature: Bool = true) {
         guard let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
+        let signatureChanged = accounts[index].signatureHTML != account.signatureHTML || accounts[index].signature != account.signature
         let serversChanged = accounts[index].incoming != account.incoming || accounts[index].outgoing != account.outgoing
             || accounts[index].calendarServer != account.calendarServer || accounts[index].contactsServer != account.contactsServer
         accounts[index] = account
@@ -191,6 +211,16 @@ final class AccountsController {
             sessions[account.id]?.update(account)
         }
         save()
+        if sendingSignature, signatureChanged, let mail = sessions[account.id]?.services.mail, mail.capabilities.syncsSignature {
+            let html = account.signatureHTML ?? ""
+            Task { [weak self] in
+                do {
+                    try await mail.saveSignature(html: html)
+                } catch {
+                    self?.app?.report(error, doing: "Saving the signature to \(account.email)")
+                }
+            }
+        }
     }
 
     /// Removes an account from PMail and its secret from the keychain. Nothing is deleted on the server.

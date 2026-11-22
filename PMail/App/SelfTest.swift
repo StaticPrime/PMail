@@ -758,6 +758,41 @@ enum SelfTest {
             wait("the inbox") { mail.currentFolder?.role == .inbox && !mail.isLoadingList }
         }
 
+        // MARK: Signatures
+        step {
+            check(session.account.signatureHTML?.contains("PuggleSoft") == true, "a Google account's signature comes from its server",
+                  session.account.signatureHTML ?? "none")
+            guard let composer = app.compose() else { return check(false, "a new message opens") }
+            var links = 0
+            composer.body.enumerateAttribute(.link, in: NSRange(location: 0, length: composer.body.length)) { value, _, _ in
+                if value != nil { links += 1 }
+            }
+            check(composer.body.string.contains("Jamie Rivera") && links > 0, "and a new message starts with it, formatted, link and all")
+            composer.discard()
+            var account = session.account
+            account.signatureHTML = "<i>Self-test signature</i>"
+            account.signature = "Self-test signature"
+            app.accounts.update(account)
+            let service = sampleMail
+            wait("the signature to reach the server") {
+                guard let service else { return false }
+                return (read { await service.savedSignature } ?? nil) == "<i>Self-test signature</i>"
+            }
+        }
+        step {
+            let service = sampleMail
+            check(service.flatMap { service in read { await service.savedSignature } ?? nil } == "<i>Self-test signature</i>",
+                  "a signature changed here is saved to the account's server")
+            var account = session.account
+            account.signatureHTML = #"<div><b>Jamie Rivera</b> · <a href="https://pugglesoft.example/">PuggleSoft</a></div>"#
+            account.signature = "Jamie Rivera · PuggleSoft"
+            app.accounts.update(account)
+            wait("the signature back as it was") {
+                guard let service else { return false }
+                return (read { await service.savedSignature } ?? nil)?.contains("PuggleSoft") == true
+            }
+        }
+
         // MARK: Writing options
         step {
             guard let composer = app.compose(to: [SampleData.person("Alex Kim")], subject: "Self-test options", body: "Plain words.") else {

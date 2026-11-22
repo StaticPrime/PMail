@@ -190,18 +190,25 @@ struct ComposeWindow: View {
     }
 
     private func insertSignature() {
-        let signature = model.account.signature.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !signature.isEmpty else {
+        guard let signature = model.richSignature else {
             return app.show("This account has no signature yet. Add one in its settings, from the account menu at the top right.")
         }
-        editor.insertText("\n-- \n" + signature)
+        let piece = NSMutableAttributedString(string: "\n-- \n", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor])
+        piece.append(signature)
+        if model.isPlainText {
+            editor.insertText("\n-- \n" + model.account.signature)
+        } else {
+            editor.insertAttributed(piece)
+        }
     }
 }
 
 /// The formatting bar: font, size, bold, italic, underline, text and highlight colors, alignment, lists, indenting,
 /// quoting, strikethrough and clearing formatting.
-private struct FormattingBar: View {
+struct FormattingBar: View {
     let editor: RichTextController
+    /// Leaves lists, indenting, quotes and strikethrough out, for a narrow place (a signature).
+    var compact = false
     @State private var showsColors = false
 
     var body: some View {
@@ -264,13 +271,15 @@ private struct FormattingBar: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("Align")
-            IconButton(symbol: "list.number", help: "Numbered list", size: 30, iconSize: 13) { editor.toggleList(ordered: true) }
-            IconButton(symbol: "list.bullet", help: "Bulleted list", size: 30, iconSize: 13) { editor.toggleList(ordered: false) }
-            IconButton(symbol: "decrease.indent", help: "Indent less", size: 30, iconSize: 13) { editor.indent(by: -1) }
-            IconButton(symbol: "increase.indent", help: "Indent more", size: 30, iconSize: 13) { editor.indent(by: 1) }
-            IconButton(symbol: "text.quote", help: "Quote", size: 30, iconSize: 13) { editor.toggleQuote() }
-            separator
-            IconButton(symbol: "strikethrough", help: "Strikethrough", size: 30, iconSize: 13) { editor.toggleAttribute(.strikethroughStyle) }
+            if !compact {
+                IconButton(symbol: "list.number", help: "Numbered list", size: 30, iconSize: 13) { editor.toggleList(ordered: true) }
+                IconButton(symbol: "list.bullet", help: "Bulleted list", size: 30, iconSize: 13) { editor.toggleList(ordered: false) }
+                IconButton(symbol: "decrease.indent", help: "Indent less", size: 30, iconSize: 13) { editor.indent(by: -1) }
+                IconButton(symbol: "increase.indent", help: "Indent more", size: 30, iconSize: 13) { editor.indent(by: 1) }
+                IconButton(symbol: "text.quote", help: "Quote", size: 30, iconSize: 13) { editor.toggleQuote() }
+                separator
+                IconButton(symbol: "strikethrough", help: "Strikethrough", size: 30, iconSize: 13) { editor.toggleAttribute(.strikethroughStyle) }
+            }
             Menu {
                 Button { editor.clearFormatting() } label: { Label("Remove formatting", systemImage: "textformat.alt") }
             } label: {
@@ -756,6 +765,36 @@ final class RichTextController {
         textView.insertText(picture, replacementRange: textView.selectedRange())
     }
 
+    /// Puts a picture shown from its web address in the text at the cursor; it's fetched to be seen, and goes out by
+    /// its address.
+    func insertWebPicture(_ url: URL) {
+        guard let textView else { return }
+        let attachment = NSTextAttachment()
+        attachment.bounds = CGRect(x: 0, y: 0, width: 120, height: 40)
+        let picture = NSMutableAttributedString(attachment: attachment)
+        picture.addAttributes(textView.typingAttributes, range: NSRange(location: 0, length: picture.length))
+        picture.addAttribute(RichTextHTML.imageSourceKey, value: url.absoluteString, range: NSRange(location: 0, length: picture.length))
+        textView.window?.makeFirstResponder(textView)
+        textView.insertText(picture, replacementRange: textView.selectedRange())
+        // Shown at its own size once it arrives, no wider than the message.
+        Task { [weak textView] in
+            guard let (data, _) = try? await URLSession.shared.data(from: url), let image = NSImage(data: data), let textView else { return }
+            let width = min(image.size.width, 480)
+            attachment.bounds = CGRect(x: 0, y: 0, width: width, height: image.size.width > 0 ? image.size.height * width / image.size.width : 40)
+            attachment.image = image
+            textView.layoutManager?.invalidateLayout(forCharacterRange: NSRange(location: 0, length: textView.textStorage?.length ?? 0), actualCharacterRange: nil)
+            textView.didChangeText()
+        }
+    }
+
+    /// Puts formatted text at the cursor (a signature), fetching any pictures it shows from the web.
+    func insertAttributed(_ text: NSAttributedString) {
+        guard let textView else { return }
+        textView.window?.makeFirstResponder(textView)
+        textView.insertText(text, replacementRange: textView.selectedRange())
+        RemotePictures.load(in: textView)
+    }
+
     /// Types text at the cursor (a signature), with the current style.
     func insertText(_ text: String) {
         guard let textView else { return }
@@ -913,6 +952,7 @@ struct RichTextEditor: NSViewRepresentable {
         textView.textStorage?.setAttributedString(model.body)
         context.coordinator.revision = model.bodyRevision
         controller.textView = textView
+        RemotePictures.load(in: textView)
         if let composeView = textView as? ComposeTextView {
             composeView.controller = controller
             composeView.onSend = { [weak model] in model?.send() }

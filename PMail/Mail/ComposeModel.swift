@@ -47,12 +47,25 @@ final class ComposeModel: Identifiable {
     init(app: AppModel, session: AccountSession) {
         self.app = app
         self.session = session
-        let signature = session.account.signature.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !signature.isEmpty { setPlainBody("\n\n-- \n" + signature) }
+        // A new message starts with the signature, formatted where it has formatting.
+        if let rich = richSignature {
+            let body = NSMutableAttributedString(string: "\n\n-- \n", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor])
+            body.append(rich)
+            self.body = body
+            bodyRevision += 1
+        }
         isExpanded = UserDefaults.standard.bool(forKey: "ComposeFullScreen")
     }
 
     var account: Account { session.account }
+
+    /// The account's signature as text with its formatting (plain where it has none), or nil when it has none.
+    var richSignature: NSAttributedString? {
+        if let html = account.signatureHTML, !html.isEmpty { return RichTextHTML.attributedString(fromHTML: html) }
+        let plain = account.signature.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !plain.isEmpty else { return nil }
+        return NSAttributedString(string: plain, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.textColor])
+    }
 
     /// The saved draft this window is editing, so opening that draft again brings this window forward.
     var editingDraftID: String? { savedDraft?.id }

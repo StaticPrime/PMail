@@ -42,7 +42,8 @@ actor SampleMailService: MailService {
         switch account.kind {
         case .google:
             capabilities = MailCapabilities(usesLabels: true, canStar: true, canMarkImportant: true, hasInboxTabs: true,
-                                            canLabel: true, canEditLabels: true)
+                                            canLabel: true, canEditLabels: true, syncsSignature: true)
+            serverSignature = #"<div><b>Jamie Rivera</b> · <a href="https://pugglesoft.example/">PuggleSoft</a></div>"#
             inboxTabs = [InboxTab(id: "CATEGORY_PERSONAL", name: "Primary", symbol: "tray"),
                          InboxTab(id: "CATEGORY_PROMOTIONS", name: "Promotions", symbol: "tag"),
                          InboxTab(id: "CATEGORY_SOCIAL", name: "Social", symbol: "person.2"),
@@ -234,6 +235,25 @@ actor SampleMailService: MailService {
             }
         }
         return counts
+    }
+
+    // MARK: The signature (a Google account keeps it on its server)
+
+    private var serverSignature: String?
+
+    /// The signature as the server has it, for the self-test.
+    var savedSignature: String? { serverSignature }
+
+    func loadSignature() async throws -> String? {
+        await pause()
+        guard capabilities.syncsSignature else { throw PMailError.notSupported("No signature on this server.") }
+        return serverSignature
+    }
+
+    func saveSignature(html: String) async throws {
+        await pause()
+        guard capabilities.syncsSignature else { throw PMailError.notSupported("No signature on this server.") }
+        serverSignature = html.isEmpty ? nil : html
     }
 
     // MARK: Labels
