@@ -389,6 +389,48 @@ enum SampleData {
         }
     }
 
+    /// The kinds of event each sample calendar holds itself, as the provider's do: a Google account's main calendar holds
+    /// out of office and focus time, a Microsoft calendar out of office, and the others only events.
+    static func eventTypes(for account: Account) -> [String: Set<EventType>] {
+        switch account.kind {
+        case .google: ["primary": [.event, .outOfOffice, .focusTime], "family": [.event], "puppy": [.event]]
+        case .microsoft: ["calendar": [.event, .outOfOffice]]
+        default: ["home": [.event], "work": [.event]]
+        }
+    }
+
+    static func taskLists(for account: Account) -> [TaskList] {
+        switch account.kind {
+        case .google: [TaskList(id: "my-tasks", name: "My Tasks", isDefault: true), TaskList(id: "waffles-tasks", name: "Waffles")]
+        case .microsoft: [TaskList(id: "tasks", name: "Tasks", isDefault: true)]
+        default: []
+        }
+    }
+
+    static func tasks(for account: Account, today: Date) -> [CalendarEvent] {
+        let calendar = Calendar.current
+        let week = CalendarGrid(calendar: calendar).startOfWeek(today)
+        var tasks: [CalendarEvent] = []
+        func add(_ listID: String, _ title: String, day: Int, notes: String? = nil, done: Bool = false) {
+            let date = calendar.date(byAdding: .day, value: day, to: week) ?? week
+            tasks.append(TaskDates.event(id: "sample-task-\(account.kind.rawValue)-\(tasks.count + 1)", listID: listID, title: title, notes: notes,
+                                         day: date, isCompleted: done))
+        }
+        switch account.kind {
+        case .google:
+            add("my-tasks", "Send slides to Priya", day: 2, done: true)
+            add("my-tasks", "Renew passport", day: 3, notes: "Photos are in the desk drawer.")
+            add("waffles-tasks", "Order dog food", day: 5)
+            add("my-tasks", "Book the offsite bus", day: 7)
+        case .microsoft:
+            add("tasks", "Submit expense report", day: 2)
+            add("tasks", "Review the Northwind SOW", day: 4, done: true)
+        default:
+            break
+        }
+        return tasks
+    }
+
     /// A few holidays on their real dates, this year and next.
     static func holidays(around today: Date) -> [(String, Date)] {
         let calendar = Calendar.current
@@ -428,13 +470,14 @@ enum SampleData {
         var events: [CalendarEvent] = []
         var counter = 0
         func add(_ calendarID: String, _ title: String, _ start: Date, _ end: Date, allDay: Bool = false, location: String? = nil, notes: String? = nil,
-                 attendees: [Attendee] = [], conference: Conference? = nil, myResponse: AttendeeResponse? = nil, recurring: Bool = false) {
+                 attendees: [Attendee] = [], conference: Conference? = nil, myResponse: AttendeeResponse? = nil, recurring: Bool = false,
+                 type: EventType = .event, declines: Bool = false) {
             counter += 1
             events.append(CalendarEvent(id: "sample-event-\(account.kind.rawValue)-\(counter)", calendarID: calendarID, title: title, start: start, end: end,
                                         isAllDay: allDay, location: location, notes: notes, attendees: attendees,
                                         organizer: attendees.first(where: \.isOrganizer)?.address, conference: conference,
                                         recurrence: recurring ? ["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"] : [], seriesID: recurring ? "series-\(title)" : nil,
-                                        myResponse: myResponse, reminderMinutes: allDay ? [] : [10]))
+                                        myResponse: myResponse, reminderMinutes: allDay ? [] : [10], type: type, declinesInvitations: declines))
         }
         switch account.kind {
         case .google:
@@ -450,8 +493,9 @@ enum SampleData {
             add("primary", "Roadmap planning", at(3, 10), at(3, 12), attendees: guests(["Priya Shah", "Zoe Anderson", "Aisha Rahman"]), conference: meet("map-plan-q4x"))
             add("primary", "Interview: product designer", at(3, 11), at(3, 12), attendees: guests(["Zoe Anderson"]), conference: meet("hir-inga-dsn"))
             add("primary", "Lunch with Olivia", at(2, 12, 30), at(2, 13, 30), location: "Bluebird Bakery")
-            add("primary", "Focus time", at(1, 13), at(1, 16))
+            add("primary", "Focus time", at(1, 13), at(1, 16), type: .focusTime, declines: true)
             add("primary", "Dentist", at(5, 8), at(5, 9), location: "Bright Smiles Dental")
+            add("primary", "Out of office", at(5, 13), at(5, 17), type: .outOfOffice, declines: true)
             add("family", "Hike at Dog Mountain", at(6, 8), at(6, 14), location: "Dog Mountain Trailhead", attendees: guests(["Sam Rivera"]))
             add("family", "Call Grandma", at(0, 17), at(0, 17, 30), conference: meet("grn-dmar-ose"))
             let birthday = allDay(4)
@@ -480,6 +524,8 @@ enum SampleData {
             for day in 1...5 { add("calendar", "Daily sync", at(day, 9), at(day, 9, 15), attendees: guests(["Alex Kim"]), conference: teams, recurring: true) }
             let birthday = allDay(3)
             add("birthdays", "Marcus Lee's birthday", birthday.0, birthday.1, allDay: true)
+            let vacation = allDay(8, days: 3)
+            add("calendar", "Vacation", vacation.0, vacation.1, allDay: true, type: .outOfOffice)
         default:
             let faceTime = Conference(kind: .faceTime, joinURL: URL(string: "https://facetime.apple.com/join#v=1&p=sampleLink&k=sampleKey")!)
             add("home", "FaceTime with Mom", at(0, 19), at(0, 19, 30), conference: faceTime)

@@ -9,16 +9,25 @@ struct SampleServiceFactory: ServiceFactory {
     func services(for account: Account, secrets: any SecretStore, storage: AccountStorage?) -> AccountServices {
         let now = today()
         let mail = SampleData.mail(for: account, today: now)
+        // Kept where the sample run keeps the account's other files, as a real account keeps them in its folder.
+        let place = DebugLaunchOptions.sampleStorage.appendingPathComponent(account.id.uuidString, isDirectory: true)
+        let calendars = SampleCalendarService(account: account, calendars: SampleData.calendars(for: account),
+                                              events: SampleData.events(for: account, today: now), holds: SampleData.eventTypes(for: account))
+        // Google and Microsoft accounts have task lists on their servers; the others keep tasks on the Mac.
+        let tasks: any TaskService = account.kind == .google || account.kind == .microsoft
+            ? SampleTaskService(lists: SampleData.taskLists(for: account), tasks: SampleData.tasks(for: account, today: now))
+            : LocalTaskService(file: place.appendingPathComponent(LocalTaskService.fileName))
         return AccountServices(
             mail: SampleMailService(account: account, folders: mail.folders, messages: mail.messages, sorter: storage?.sorter),
-            calendar: SampleCalendarService(account: account, calendars: SampleData.calendars(for: account),
-                                            events: SampleData.events(for: account, today: now)),
+            calendar: CalendarWithTasks(calendars: calendars, tasks: tasks,
+                                        types: EventTypeBook(file: place.appendingPathComponent(EventTypeBook.fileName))),
             contacts: SampleContactsService(contacts: SampleData.contacts(for: account)))
     }
 }
 
-/// A short pause, as a real server would take.
-private func pause() async { try? await Task.sleep(for: .milliseconds(40)) }
+/// A short pause, as a real server would take. Off the main thread, as a server's wait is (the self-test blocks the
+/// main thread while it reads from the services).
+private nonisolated func pause() async { try? await Task.sleep(for: .milliseconds(40)) }
 
 actor SampleMailService: MailService {
     let account: Account
@@ -388,12 +397,24 @@ actor SampleCalendarService: CalendarService {
     let account: Account
     private var calendars: [CalendarInfo]
     private var events: [CalendarEvent]
+    /// The kinds of event each calendar holds itself (others are saved as ordinary events), as the provider's do.
+    private let holds: [String: Set<EventType>]
     private var counter = 0
 
-    init(account: Account, calendars: [CalendarInfo], events: [CalendarEvent]) {
+    init(account: Account, calendars: [CalendarInfo], events: [CalendarEvent], holds: [String: Set<EventType>] = [:]) {
         self.account = account
         self.calendars = calendars
         self.events = events
+        self.holds = holds
+    }
+
+    /// The event as its calendar keeps it: as an ordinary event when the calendar can't hold its kind.
+    private func kept(_ event: CalendarEvent) -> CalendarEvent {
+        var saved = event
+        saved.isTypeLocal = false
+        if !(holds[event.calendarID] ?? []).contains(event.type) { saved.type = .event }
+        if saved.type == .event { (saved.declinesInvitations, saved.declineMessage) = (false, nil) }
+        return saved
     }
 
     func loadCalendars() async throws -> [CalendarInfo] {
@@ -424,7 +445,7 @@ actor SampleCalendarService: CalendarService {
     func create(_ event: CalendarEvent, addingConference: Bool) async throws -> CalendarEvent {
         await pause()
         counter += 1
-        var saved = event
+        var saved = kept(event)
         saved.id = "created-\(counter)"
         if addingConference, let meeting = meeting(for: event.calendarID) { saved.conference = meeting }
         events.append(saved)
@@ -433,7 +454,7 @@ actor SampleCalendarService: CalendarService {
 
     func update(_ event: CalendarEvent, scope: RecurrenceScope, addingConference: Bool) async throws -> CalendarEvent {
         await pause()
-        var saved = event
+        var saved = kept(event)
         if addingConference, saved.conference == nil, let meeting = meeting(for: event.calendarID) { saved.conference = meeting }
         events.removeAll { $0.id == event.id }
         events.append(saved)
@@ -452,6 +473,56 @@ actor SampleCalendarService: CalendarService {
     }
 
     var allEvents: [CalendarEvent] { events }
+}
+
+/// Made-up task lists, as a Google or Microsoft account's: in memory, a moment later.
+actor SampleTaskService: TaskService {
+    private let lists: [TaskList]
+    private var tasks: [CalendarEvent]
+    private var counter = 0
+
+    init(lists: [TaskList], tasks: [CalendarEvent]) {
+        self.lists = lists
+        self.tasks = tasks
+    }
+
+    func loadTaskLists() async throws -> [TaskList] {
+        await pause()
+        return lists
+    }
+
+    func loadTasks(in listIDs: [String], from start: Date, to end: Date) async throws -> [CalendarEvent] {
+        await pause()
+        return tasks.filter { listIDs.contains(TaskLists.listID(from: $0.calendarID) ?? "") && $0.start < end && $0.end > start }
+    }
+
+    func create(_ task: CalendarEvent) async throws -> CalendarEvent {
+        await pause()
+        counter += 1
+        let saved = Self.task(task, id: "sample-task-created-\(counter)")
+        tasks.append(saved)
+        return saved
+    }
+
+    func update(_ task: CalendarEvent) async throws -> CalendarEvent {
+        await pause()
+        guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { throw PMailError.notFound }
+        tasks[index] = Self.task(task, id: task.id)
+        return tasks[index]
+    }
+
+    func delete(_ task: CalendarEvent) async throws {
+        await pause()
+        tasks.removeAll { $0.id == task.id }
+    }
+
+    /// What a task list keeps: a title, notes, a day and whether it's done.
+    private static func task(_ task: CalendarEvent, id: String) -> CalendarEvent {
+        TaskDates.event(id: id, listID: TaskLists.listID(from: task.calendarID) ?? "", title: task.title, notes: task.notes,
+                        day: Calendar.current.startOfDay(for: task.start), isCompleted: task.isCompleted)
+    }
+
+    var allTasks: [CalendarEvent] { tasks }
 }
 
 actor SampleContactsService: ContactsService {

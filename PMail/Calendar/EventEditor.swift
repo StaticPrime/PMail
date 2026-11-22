@@ -2,8 +2,8 @@ import AppKit
 import PMailKit
 import SwiftUI
 
-/// Making or changing an event: title, when, video meeting, where, reminder, calendar and color, description and
-/// guests.
+/// Making or changing an event (or a task, out of office or focus time): its kind, title, when, video meeting, where,
+/// reminder, calendar and color, description and guests, as suit the kind.
 struct EventEditor: View {
     let app: AppModel
     let model: CalendarViewModel
@@ -13,6 +13,7 @@ struct EventEditor: View {
     @State private var error: String?
     @State private var asksScope = false
     @State private var showsFaceTime = false
+    @State private var colorMenu = PopUpMenu()
     @Environment(\.dismiss) private var dismiss
 
     init(app: AppModel, model: CalendarViewModel, contacts: ContactsViewModel, draft: EventDraft) {
@@ -40,6 +41,9 @@ struct EventEditor: View {
             .padding(.horizontal, 20)
             .padding(.top, 18)
             .padding(.bottom, 10)
+            typeRow
+                .padding(.horizontal, 68)
+                .padding(.bottom, 12)
             whenRow
                 .padding(.horizontal, 68)
                 .padding(.bottom, 14)
@@ -51,9 +55,11 @@ struct EventEditor: View {
             HStack(alignment: .top, spacing: 0) {
                 ScrollView { details.padding(20) }
                 Divider().overlay(Theme.divider)
-                guestsColumn
-                    .frame(width: 300)
-                    .padding(20)
+                Group {
+                    if draft.type == .event { guestsColumn } else { aboutColumn }
+                }
+                .frame(width: 300)
+                .padding(20)
             }
         }
         .frame(width: 920, height: 640)
@@ -65,22 +71,64 @@ struct EventEditor: View {
         }
     }
 
+    // MARK: Kind
+
+    /// Event, task, out of office or focus time, where the item can be more than one.
+    @ViewBuilder
+    private var typeRow: some View {
+        let types = model.types(for: draft)
+        if types.count > 1 {
+            HStack(spacing: 8) {
+                ForEach(types, id: \.self) { type in
+                    EventTypeChoice(type: type, isSelected: draft.type == type) {
+                        model.retype(&draft, as: type)
+                        error = nil
+                    }
+                }
+                Spacer()
+            }
+        }
+    }
+
     // MARK: When
 
+    @ViewBuilder
     private var whenRow: some View {
-        HStack(spacing: 10) {
-            DatePicker("Starts", selection: startBinding, displayedComponents: draft.isAllDay ? [.date] : [.date, .hourAndMinute])
-                .labelsHidden()
-            Text("to").foregroundStyle(Theme.textSecondary)
-            DatePicker("Ends", selection: endBinding, in: draft.start..., displayedComponents: draft.isAllDay ? [.date] : [.date, .hourAndMinute])
-                .labelsHidden()
-            Toggle("All day", isOn: allDayBinding).toggleStyle(.checkbox).padding(.leading, 12)
-            Spacer()
-            Text(TimeZone.current.localizedName(for: .shortGeneric, locale: .current) ?? TimeZone.current.identifier)
-                .font(.pm(12))
-                .foregroundStyle(Theme.textTertiary)
+        if draft.isTask {
+            // A task is due on a day.
+            HStack(spacing: 10) {
+                Text("Due").foregroundStyle(Theme.textSecondary)
+                DatePicker("Due", selection: taskDayBinding, displayedComponents: [.date])
+                    .labelsHidden()
+                Spacer()
+            }
+            .font(.pm(13))
+        } else {
+            HStack(spacing: 10) {
+                DatePicker("Starts", selection: startBinding, displayedComponents: draft.isAllDay ? [.date] : [.date, .hourAndMinute])
+                    .labelsHidden()
+                Text("to").foregroundStyle(Theme.textSecondary)
+                DatePicker("Ends", selection: endBinding, in: draft.start..., displayedComponents: draft.isAllDay ? [.date] : [.date, .hourAndMinute])
+                    .labelsHidden()
+                // Focus time is a stretch of hours.
+                if draft.type != .focusTime {
+                    Toggle("All day", isOn: allDayBinding).toggleStyle(.checkbox).padding(.leading, 12)
+                }
+                Spacer()
+                Text(TimeZone.current.localizedName(for: .shortGeneric, locale: .current) ?? TimeZone.current.identifier)
+                    .font(.pm(12))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .font(.pm(13))
         }
-        .font(.pm(13))
+    }
+
+    /// A task's day: the whole day.
+    private var taskDayBinding: Binding<Date> {
+        Binding(get: { draft.start }, set: { value in
+            draft.start = model.calendar.startOfDay(for: value)
+            draft.end = model.calendar.date(byAdding: .day, value: 1, to: draft.start) ?? draft.start.addingTimeInterval(86_400)
+        })
     }
 
     /// For all-day events the end shown is the last day (iCalendar keeps the day after).
@@ -120,55 +168,11 @@ struct EventEditor: View {
 
     private var details: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Event details").font(.pm(14, .medium)).foregroundStyle(Theme.accent)
-            conferenceRow
-            field(icon: "mappin.and.ellipse") {
-                TextField("Add location", text: $draft.location).textFieldStyle(.roundedBorder)
-            }
-            field(icon: "bell") {
-                Picker("Notification", selection: $draft.reminderMinutes) {
-                    Text("No notification").tag(Int?.none)
-                    ForEach([0, 5, 10, 15, 30, 60, 1440], id: \.self) { minutes in
-                        Text(EventDetailsView.reminderText(minutes)).tag(Int?.some(minutes))
-                    }
-                }
-                .labelsHidden()
-                .fixedSize()
-            }
-            field(icon: "calendar") {
-                HStack(spacing: 12) {
-                    Picker("Calendar", selection: $draft.calendarID) {
-                        ForEach(model.writableCalendars) { calendar in
-                            Text(calendar.name).tag(calendar.id)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                    .disabled(draft.original != nil)
-                    Menu {
-                        Button("Calendar color") { draft.colorHex = nil }
-                        Divider()
-                        ForEach(Theme.eventColors, id: \.hex) { color in
-                            Button(color.name) { draft.colorHex = color.hex }
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Circle().fill(Theme.color(hexString: draft.colorHex) ?? model.color(for: model.calendarInfo(draft.calendarID)
-                                ?? CalendarInfo(id: "", name: ""))).frame(width: 16, height: 16)
-                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-                        }
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("Event color")
-                    Picker("Show as", selection: $draft.availability) {
-                        Text("Busy").tag(EventAvailability.busy)
-                        Text("Free").tag(EventAvailability.free)
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
+            Text(draft.isTask ? "Task details" : "Event details").font(.pm(14, .medium)).foregroundStyle(Theme.accent)
+            if draft.isTask {
+                taskRows
+            } else {
+                eventRows
             }
             field(icon: "text.alignleft") {
                 TextEditor(text: $draft.notes)
@@ -182,6 +186,116 @@ struct EventEditor: View {
                                 .allowsHitTesting(false)
                         }
                     }
+            }
+        }
+    }
+
+    /// A task's list, and whether it's done.
+    @ViewBuilder
+    private var taskRows: some View {
+        field(icon: "checklist") {
+            Picker("List", selection: $draft.calendarID) {
+                ForEach(model.taskLists) { list in
+                    Text(list.name).tag(list.id)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+            .disabled(!draft.isNew)
+        }
+        if !draft.isNew {
+            field(icon: "checkmark.circle") {
+                Toggle("Done", isOn: $draft.isCompleted).toggleStyle(.checkbox).padding(.top, 5)
+            }
+        }
+    }
+
+    /// An event's video meeting and place (out of office and focus time have neither), reminder, calendar, color and
+    /// whether it shows as busy, and for out of office and focus time, whether meetings then are declined.
+    @ViewBuilder
+    private var eventRows: some View {
+        if draft.type == .event {
+            conferenceRow
+            field(icon: "mappin.and.ellipse") {
+                TextField("Add location", text: $draft.location).textFieldStyle(.roundedBorder)
+            }
+        }
+        field(icon: "bell") {
+            Picker("Notification", selection: $draft.reminderMinutes) {
+                Text("No notification").tag(Int?.none)
+                ForEach([0, 5, 10, 15, 30, 60, 1440], id: \.self) { minutes in
+                    Text(EventDetailsView.reminderText(minutes)).tag(Int?.some(minutes))
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+        field(icon: "calendar") {
+            HStack(spacing: 12) {
+                Picker("Calendar", selection: $draft.calendarID) {
+                    ForEach(model.eventCalendars) { calendar in
+                        Text(calendar.name).tag(calendar.id)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .disabled(draft.original != nil)
+                Button { showColorMenu() } label: {
+                    HStack(spacing: 6) {
+                        Circle().fill(Theme.color(hexString: draft.colorHex) ?? calendarColor).frame(width: 16, height: 16)
+                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                    }
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 6)
+                    .frame(height: 28)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(MenuAnchor(menu: colorMenu))
+                .fixedSize()
+                .help("Event color")
+                // Out of office and focus time are always busy.
+                if draft.type == .event {
+                    Picker("Show as", selection: $draft.availability) {
+                        Text("Busy").tag(EventAvailability.busy)
+                        Text("Free").tag(EventAvailability.free)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+        }
+        if model.canDecline(draft) { declineRow }
+    }
+
+    private var calendarColor: Color { model.color(for: model.calendarInfo(draft.calendarID) ?? CalendarInfo(id: "", name: "")) }
+
+    /// The event's own color, or its calendar's.
+    private func showColorMenu() {
+        colorMenu.show([PopUpMenu.Item(title: "Calendar color", swatch: calendarColor, isChecked: draft.colorHex == nil) { draft.colorHex = nil },
+                        .separator]
+            + Theme.eventColors.map { color in
+                PopUpMenu.Item(title: color.name, swatch: Theme.color(hexString: color.hex), isChecked: draft.colorHex == color.hex) {
+                    draft.colorHex = color.hex
+                }
+            })
+    }
+
+    /// Declining meetings during out of office or focus time, with a message for the people whose meetings are declined.
+    private var declineRow: some View {
+        field(icon: "person.crop.circle.badge.xmark") {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Decline meetings during this time", isOn: $draft.declinesInvitations)
+                    .toggleStyle(.checkbox)
+                    .padding(.top, 5)
+                if draft.declinesInvitations {
+                    TextField("Message for declined meetings (optional)", text: $draft.declineMessage)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 420)
+                }
+                Text("Where the calendar can: the main calendar of a work or school account.")
+                    .font(.pm(11.5))
+                    .foregroundStyle(Theme.textTertiary)
             }
         }
     }
@@ -249,6 +363,39 @@ struct EventEditor: View {
         }
     }
 
+    // MARK: About the kind
+
+    /// What a task, out of office or focus time is, and where it's kept.
+    private var aboutColumn: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(draft.type.name, systemImage: draft.type.symbol)
+                .font(.pm(14, .medium))
+                .foregroundStyle(Theme.accent)
+            Text(about)
+                .font(.pm(12.5))
+                .foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var about: String {
+        switch draft.type {
+        case .task:
+            let place = TaskLists.listID(from: draft.calendarID) == LocalTaskService.listID
+                ? "This account’s tasks are kept on this Mac."
+                : "It’s saved in \(model.calendarInfo(draft.calendarID)?.name ?? "the task list"), with the account’s other tasks."
+            return "A task is due on a day rather than at a time, and shows at the top of that day. Click its circle when it’s done. " + place
+        case .outOfOffice:
+            return "Shows you’re away. Where the calendar can’t keep out of office, it’s saved as an event and shown as out of office on this Mac."
+        case .focusTime:
+            return "Time set aside to work without interruptions. Where the calendar can’t keep focus time, it’s saved as an event and shown as focus time on this Mac."
+        case .event:
+            return ""
+        }
+    }
+
     // MARK: Guests
 
     private var guestsColumn: some View {
@@ -296,7 +443,7 @@ struct EventEditor: View {
     // MARK: Saving
 
     private func save() {
-        guard draft.end > draft.start else {
+        guard draft.isTask || draft.end > draft.start else {
             error = "The event has to end after it starts."
             return
         }
@@ -311,7 +458,7 @@ struct EventEditor: View {
         Task {
             do {
                 try await model.save(saving)
-                app.show(saving.isNew ? "Event saved." : "Changes saved.")
+                app.show(saving.isNew ? (saving.isTask ? "Task saved." : "Event saved.") : "Changes saved.")
                 dismiss()
             } catch {
                 isSaving = false

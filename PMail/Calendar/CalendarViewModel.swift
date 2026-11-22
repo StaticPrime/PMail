@@ -25,8 +25,16 @@ struct EventDraft: Identifiable, Hashable {
     var colorHex: String?
     var availability: EventAvailability = .busy
     var scope: RecurrenceScope = .thisEvent
+    /// An event, a task, out of office or focus time.
+    var type: EventType = .event
+    /// Out of office and focus time: whether invitations for that time are declined (where the calendar can), and how.
+    var declinesInvitations = false
+    var declineMessage = ""
+    /// A task: whether it's done.
+    var isCompleted = false
 
     var isNew: Bool { original == nil }
+    var isTask: Bool { type == .task }
 }
 
 /// One account's calendars as the window shows them: which calendars are on, the view and the days showing, and the
@@ -64,9 +72,13 @@ final class CalendarViewModel {
     private(set) var events: [CalendarEvent] = []
     @ObservationIgnored private var loadedInterval: DateInterval?
     @ObservationIgnored private var loadGeneration = 0
+    /// Counts changes made here (and the server's answers to them), so a load that may have missed one is done again.
+    @ObservationIgnored private var changeCount = 0
     private(set) var isLoading = false
     private(set) var error: String?
     private(set) var needsSignIn = false
+    /// Why the account's tasks couldn't be shown (it may need signing in again, to allow them), if they couldn't.
+    private(set) var tasksProblem: String?
     /// The event whose details are showing in a popover.
     var selectedEventID: String?
 
@@ -103,6 +115,7 @@ final class CalendarViewModel {
             do {
                 let loaded = try await service.loadCalendars()
                 calendars = loaded
+                tasksProblem = (service as? CalendarWithTasks)?.tasksProblem
                 needsSignIn = false
                 isOffline = false
                 error = nil
@@ -138,11 +151,15 @@ final class CalendarViewModel {
         let generation = loadGeneration
         isLoading = true
         let ids = calendars.map(\.id)
+        let changes = changeCount
         Task {
             do {
                 let loaded = try await service.loadEvents(in: ids, from: interval.start, to: interval.end)
                 guard generation == loadGeneration else { return }
+                // Something was saved, changed or deleted while this loaded, which it may not include: load again.
+                guard changes == changeCount else { return reload() }
                 events = loaded
+                tasksProblem = (service as? CalendarWithTasks)?.tasksProblem
                 loadedInterval = interval
                 isLoading = false
                 isOffline = false
@@ -236,10 +253,15 @@ final class CalendarViewModel {
 
     // MARK: Calendars
 
-    var myCalendars: [CalendarInfo] { calendars.filter { !$0.isOther } }
+    var myCalendars: [CalendarInfo] { calendars.filter { !$0.isOther && !$0.isTaskList } }
     var otherCalendars: [CalendarInfo] { calendars.filter(\.isOther) }
-    var writableCalendars: [CalendarInfo] { calendars.filter { !$0.isReadOnly } }
-    var defaultCalendar: CalendarInfo? { writableCalendars.first(where: \.isPrimary) ?? writableCalendars.first }
+    /// The calendars events can be added to.
+    var eventCalendars: [CalendarInfo] { calendars.filter { !$0.isReadOnly && !$0.isTaskList } }
+    /// The account's task lists (each shown as a calendar of tasks).
+    var taskLists: [CalendarInfo] { calendars.filter(\.isTaskList) }
+    var defaultCalendar: CalendarInfo? { eventCalendars.first(where: \.isPrimary) ?? eventCalendars.first }
+    /// Where new tasks go: the list the provider makes the default.
+    var defaultTaskList: CalendarInfo? { taskLists.first(where: \.isPrimary) ?? taskLists.first }
 
     func isVisible(_ calendar: CalendarInfo) -> Bool { !hiddenCalendarIDs.contains(calendar.id) }
 
@@ -283,9 +305,10 @@ final class CalendarViewModel {
 
     // MARK: Making and changing events
 
-    /// A new event starting at `start` (an hour long), or the next half hour.
-    func newDraft(start: Date? = nil, end: Date? = nil, allDay: Bool = false, guests: [MailAddress] = []) -> EventDraft? {
-        guard let calendarInfo = defaultCalendar else { return nil }
+    /// A new event starting at `start` (an hour long), or the next half hour; or a new item of another kind there (a
+    /// task, out of office, focus time).
+    func newDraft(start: Date? = nil, end: Date? = nil, allDay: Bool = false, guests: [MailAddress] = [], type: EventType = .event) -> EventDraft? {
+        guard let calendarInfo = defaultCalendar ?? (type == .task ? defaultTaskList : nil) else { return nil }
         let begin: Date
         if let start {
             begin = start
@@ -301,7 +324,73 @@ final class CalendarViewModel {
         var draft = EventDraft(calendarID: calendarInfo.id, start: allDay ? calendar.startOfDay(for: begin) : begin, end: finish,
                                isAllDay: allDay, guests: guests)
         draft.reminderMinutes = allDay ? nil : 10
+        if type != .event {
+            guard type != .task || defaultTaskList != nil else { return nil }
+            retype(&draft, as: type)
+        }
         return draft
+    }
+
+    /// The kinds a draft can be. Something new can be any (a task where the account has task lists, the rest where it
+    /// has a calendar to put them in). An event can become out of office or focus time and back, unless it's a
+    /// meeting; a task stays a task, since it lives in a task list rather than a calendar.
+    func types(for draft: EventDraft) -> [EventType] {
+        guard let original = draft.original else { return newTypes }
+        if original.isTask { return [.task] }
+        let isMeeting = original.attendees.contains { !$0.address.isSameMailbox(as: account.email) }
+        return isMeeting ? [draft.type] : [.event, .outOfOffice, .focusTime]
+    }
+
+    /// The kinds of thing that can be made: a task where the account has task lists, the rest where it has a calendar
+    /// to put them in.
+    var newTypes: [EventType] {
+        var types: [EventType] = defaultCalendar == nil ? [] : [.event]
+        if defaultTaskList != nil { types.append(.task) }
+        if defaultCalendar != nil { types += [.outOfOffice, .focusTime] }
+        return types
+    }
+
+    /// Whether the calendar can decline invitations for out of office or focus time itself: a Google account's main
+    /// calendar can, where the account is a work or school one (not for an event whose kind it couldn't keep).
+    func canDecline(_ draft: EventDraft) -> Bool {
+        account.kind == .google && (draft.type == .outOfOffice || draft.type == .focusTime) && calendarInfo(draft.calendarID)?.isPrimary == true
+            && draft.original?.isTypeLocal != true
+    }
+
+    /// Makes a draft another kind. Something new gets what suits the kind: a task is all day on its day in the default
+    /// task list, out of office takes the whole day, focus time a couple of hours, and none of them has guests or a
+    /// video meeting. An event that's already saved keeps its time and calendar.
+    func retype(_ draft: inout EventDraft, as type: EventType) {
+        let previous = draft.type
+        guard previous != type else { return }
+        draft.type = type
+        if draft.title.trimmingCharacters(in: .whitespaces).isEmpty || draft.title == previous.defaultTitle { draft.title = type.defaultTitle }
+        guard draft.isNew else { return }
+        let day = calendar.startOfDay(for: draft.start)
+        let nextDay = calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
+        if type != .task, previous == .task, let calendarInfo = defaultCalendar { draft.calendarID = calendarInfo.id }
+        if type != .event {
+            draft.guests = []
+            draft.addsNativeConference = false
+            draft.availability = .busy
+        }
+        switch type {
+        case .task:
+            if let list = defaultTaskList { draft.calendarID = list.id }
+            (draft.isAllDay, draft.start, draft.end, draft.reminderMinutes) = (true, day, nextDay, nil)
+        case .outOfOffice:
+            (draft.isAllDay, draft.start, draft.end, draft.reminderMinutes) = (true, day, nextDay, nil)
+        case .focusTime:
+            if draft.isAllDay {
+                draft.start = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day) ?? day
+            }
+            (draft.isAllDay, draft.end, draft.reminderMinutes) = (false, draft.start.addingTimeInterval(2 * 3_600), 10)
+        case .event:
+            if draft.isAllDay {
+                draft.start = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day) ?? day
+                (draft.isAllDay, draft.end, draft.reminderMinutes) = (false, draft.start.addingTimeInterval(3_600), 10)
+            }
+        }
     }
 
     func draft(for event: CalendarEvent) -> EventDraft {
@@ -309,13 +398,16 @@ final class CalendarViewModel {
                                isAllDay: event.isAllDay, location: event.location ?? "", notes: event.notes ?? "",
                                guests: event.attendees.filter { !$0.address.isSameMailbox(as: account.email) }.map(\.address),
                                conference: event.conference, reminderMinutes: event.reminderMinutes.first,
-                               colorHex: event.colorHex, availability: event.availability)
+                               colorHex: event.colorHex, availability: event.availability, type: event.type,
+                               declinesInvitations: event.declinesInvitations, declineMessage: event.declineMessage ?? "",
+                               isCompleted: event.isCompleted)
         if event.conference?.kind == .faceTime { draft.faceTimeLink = event.conference?.joinURL.absoluteString ?? "" }
         return draft
     }
 
-    /// Saves a draft: makes the event, or changes it, creating its video meeting if asked.
+    /// Saves a draft: makes the event (or task), or changes it, creating its video meeting if asked.
     func save(_ draft: EventDraft) async throws {
+        if draft.isTask { return try await saveTask(draft) }
         var event = draft.original ?? CalendarEvent(calendarID: draft.calendarID, start: draft.start, end: draft.end)
         event.calendarID = draft.calendarID
         event.title = draft.title.trimmingCharacters(in: .whitespaces)
@@ -338,17 +430,61 @@ final class CalendarViewModel {
         event.reminderMinutes = draft.reminderMinutes.map { [$0] } ?? []
         event.colorHex = draft.colorHex
         event.availability = draft.availability
+        event.type = draft.type
+        event.declinesInvitations = draft.type != .event && draft.declinesInvitations
+        let message = draft.declineMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        event.declineMessage = event.declinesInvitations && !message.isEmpty ? message : nil
         let saved: CalendarEvent
         if draft.original == nil {
             saved = try await service.create(event, addingConference: draft.addsNativeConference)
         } else {
             saved = try await service.update(event, scope: draft.scope, addingConference: draft.addsNativeConference)
         }
+        changeCount += 1
         if draft.original != nil, draft.scope == .allEvents || draft.original?.calendarID != saved.calendarID {
             reload()
         } else {
             events.removeAll { $0.id == saved.id || $0.id == draft.original?.id }
             events.append(saved)
+        }
+    }
+
+    /// Saves a task: on its day in its list, with its notes and whether it's done.
+    private func saveTask(_ draft: EventDraft) async throws {
+        let day = calendar.startOfDay(for: draft.start)
+        var task = draft.original ?? CalendarEvent(calendarID: draft.calendarID, start: day, end: day, type: .task)
+        task.calendarID = draft.calendarID
+        task.title = draft.title.trimmingCharacters(in: .whitespaces)
+        task.start = day
+        task.end = calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
+        task.isAllDay = true
+        task.notes = draft.notes.isEmpty ? nil : draft.notes
+        task.isCompleted = draft.isCompleted
+        task.type = .task
+        let saved = draft.original == nil ? try await service.create(task, addingConference: false)
+            : try await service.update(task, scope: .thisEvent, addingConference: false)
+        changeCount += 1
+        events.removeAll { $0.id == saved.id || $0.id == draft.original?.id }
+        events.append(saved)
+    }
+
+    /// Ticks a task off (or back on): here at once, then in its list.
+    func setCompleted(_ task: CalendarEvent, _ done: Bool) {
+        guard let index = events.firstIndex(where: { $0.id == task.id }) else { return }
+        events[index].isCompleted = done
+        changeCount += 1
+        var changed = task
+        changed.isCompleted = done
+        let service = self.service
+        Task {
+            do {
+                let saved = try await service.update(changed, scope: .thisEvent, addingConference: false)
+                changeCount += 1
+                if let index = events.firstIndex(where: { $0.id == task.id }) { events[index] = saved }
+            } catch {
+                if let index = events.firstIndex(where: { $0.id == task.id }) { events[index].isCompleted = !done }
+                app?.report(error, doing: done ? "Marking the task done" : "Marking the task not done")
+            }
         }
     }
 
@@ -359,12 +495,14 @@ final class CalendarViewModel {
         } else {
             events.removeAll { $0.id == event.id }
         }
+        changeCount += 1
         selectedEventID = nil
         let service = self.service
         Task {
             do {
                 try await service.delete(event, scope: scope)
-                app?.show("Event deleted.")
+                changeCount += 1
+                app?.show(event.isTask ? "Task deleted." : "Event deleted.")
             } catch {
                 events = snapshot
                 app?.report(error, doing: "Deleting the event")
@@ -374,10 +512,12 @@ final class CalendarViewModel {
 
     func respond(to event: CalendarEvent, with response: AttendeeResponse) {
         if let index = events.firstIndex(where: { $0.id == event.id }) { events[index].myResponse = response }
+        changeCount += 1
         let service = self.service
         Task {
             do {
                 try await service.respond(to: event, with: response)
+                changeCount += 1
             } catch {
                 app?.report(error, doing: "Answering the invitation")
                 reload()

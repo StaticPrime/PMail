@@ -2,8 +2,9 @@ import AppKit
 import PMailKit
 import SwiftUI
 
-/// An event's details, in a popover from the event: when, the video meeting to join, guests and their answers,
-/// where, the description, the reminder and the calendar, with edit, delete and email buttons at the top.
+/// An event's details, in a popover from the event: when, its kind, the video meeting to join, guests and their
+/// answers, where, the description, the reminder and the calendar, with edit, delete and email buttons at the top (and
+/// for a task, one to tick it off).
 struct EventDetailsView: View {
     let app: AppModel
     let model: CalendarViewModel
@@ -17,11 +18,17 @@ struct EventDetailsView: View {
             HStack(spacing: 2) {
                 Spacer()
                 if canEdit {
-                    IconButton(symbol: "pencil", help: "Edit event", size: 32, iconSize: 14) {
+                    if event.isTask {
+                        IconButton(symbol: event.isCompleted ? "checkmark.circle.fill" : "checkmark.circle",
+                                   help: event.isCompleted ? "Mark as not done" : "Mark as done", size: 32, iconSize: 15) {
+                            model.setCompleted(event, !event.isCompleted)
+                        }
+                    }
+                    IconButton(symbol: "pencil", help: event.isTask ? "Edit task" : "Edit event", size: 32, iconSize: 14) {
                         model.selectedEventID = nil
                         app.sheet = .eventEditor(model.draft(for: event))
                     }
-                    IconButton(symbol: "trash", help: "Delete event", size: 32, iconSize: 14) { confirmsDelete = true }
+                    IconButton(symbol: "trash", help: event.isTask ? "Delete task" : "Delete event", size: 32, iconSize: 14) { confirmsDelete = true }
                 }
                 if !guests.isEmpty {
                     IconButton(symbol: "envelope", help: "Email guests", size: 32, iconSize: 14) {
@@ -34,16 +41,38 @@ struct EventDetailsView: View {
             .padding(.bottom, 2)
             row(icon: nil, color: model.color(for: event)) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(event.title.isEmpty ? "(No title)" : event.title)
+                    Text(event.shownTitle)
                         .font(.pm(21))
+                        .strikethrough(event.isTask && event.isCompleted)
                         .foregroundStyle(Theme.textPrimary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(model.formatting.eventTime(start: event.start, end: event.end, isAllDay: event.isAllDay, includeDate: true))
+                    Text((event.isTask ? "Due " : "") + model.formatting.eventTime(start: event.start, end: event.end, isAllDay: event.isAllDay, includeDate: true))
                         .font(.pm(13))
                         .foregroundStyle(Theme.textSecondary)
                     if event.isRecurring {
                         Text(recurrenceText).font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
+                    }
+                }
+            }
+            if event.type != .event {
+                row(icon: event.type.symbol) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(event.isTask ? (event.isCompleted ? "Task, done" : "Task") : event.type.name)
+                            .font(.pm(13))
+                            .foregroundStyle(Theme.textPrimary)
+                        if event.declinesInvitations {
+                            Text("Declining meetings during this time" + (event.declineMessage.map { ": “\($0)”" } ?? ""))
+                                .font(.pm(12))
+                                .foregroundStyle(Theme.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if event.isTypeLocal {
+                            Text("Shown as \(event.type.name.lowercased()) on this Mac. The calendar keeps it as an event.")
+                                .font(.pm(12))
+                                .foregroundStyle(Theme.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }
@@ -112,7 +141,7 @@ struct EventDetailsView: View {
                 row(icon: "bell") { Text(EventDetailsView.reminderText(minutes)).font(.pm(13)).foregroundStyle(Theme.textPrimary) }
             }
             if let calendarInfo {
-                row(icon: "calendar") { Text(calendarInfo.name).font(.pm(13)).foregroundStyle(Theme.textPrimary) }
+                row(icon: calendarInfo.isTaskList ? "checklist" : "calendar") { Text(calendarInfo.name).font(.pm(13)).foregroundStyle(Theme.textPrimary) }
             }
             if let response = event.myResponse, !(event.organizer?.isSameMailbox(as: model.account.email) ?? false) {
                 Divider().overlay(Theme.divider).padding(.vertical, 8)
@@ -135,12 +164,12 @@ struct EventDetailsView: View {
         .onAppear { if UserDefaults.standard.bool(forKey: "PMConfirmDelete") { confirmsDelete = true } }
         #endif
         // Deleting asks first (there's no Undo): a repeating event, whether it's this one or all of them.
-        .confirmationDialog("Delete “\(event.title.isEmpty ? "(No title)" : event.title)”?", isPresented: $confirmsDelete, titleVisibility: .visible) {
+        .confirmationDialog("Delete “\(event.shownTitle)”?", isPresented: $confirmsDelete, titleVisibility: .visible) {
             if event.isRecurring {
                 Button("Delete This Event", role: .destructive) { model.delete(event, scope: .thisEvent) }
                 Button("Delete All Events", role: .destructive) { model.delete(event, scope: .allEvents) }
             } else {
-                Button("Delete Event", role: .destructive) { model.delete(event, scope: .thisEvent) }
+                Button(event.isTask ? "Delete Task" : "Delete Event", role: .destructive) { model.delete(event, scope: .thisEvent) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {

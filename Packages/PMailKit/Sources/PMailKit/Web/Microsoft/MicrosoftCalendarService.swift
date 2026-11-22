@@ -124,7 +124,8 @@ public actor MicrosoftCalendarService: CalendarService {
                              myResponse: myResponse(json["responseStatus"]["response"].string),
                              availability: json["showAs"].string == "free" ? .free : .busy, reminderMinutes: reminders,
                              webLink: WebURL.webLink(json["webLink"].string), uid: json["iCalUId"].nonEmpty,
-                             etag: json["changeKey"].nonEmpty ?? json["@odata.etag"].nonEmpty)
+                             etag: json["changeKey"].nonEmpty ?? json["@odata.etag"].nonEmpty,
+                             type: json["showAs"].string == "oof" ? .outOfOffice : .event)
     }
 
     /// A start or end. All-day events become local midnight of their date; others are read in their own zone (UTC).
@@ -297,7 +298,12 @@ public actor MicrosoftCalendarService: CalendarService {
                  "type": attendee.isOptional ? "optional" : "required"]
             })
         }
-        if changed(\.availability) { body["showAs"] = edited.availability == .free ? "free" : "busy" }
+        // Out of office is how an event shows (showAs "oof"); focus time has no such thing, and is kept on this Mac.
+        if edited.type == .outOfOffice {
+            if original?.type != .outOfOffice { body["showAs"] = "oof" }
+        } else if changed(\.availability) || original?.type == .outOfOffice {
+            body["showAs"] = edited.availability == .free ? "free" : "busy"
+        }
         if changed(\.reminderMinutes) {
             body["isReminderOn"] = .bool(!edited.reminderMinutes.isEmpty)
             // Graph keeps one reminder per event: the first.

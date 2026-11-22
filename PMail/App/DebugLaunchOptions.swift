@@ -48,7 +48,9 @@ enum DebugLaunchOptions {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { setUp(delegate) }
         let delay = defaults.double(forKey: "PMSnapshotDelay") > 0 ? defaults.double(forKey: "PMSnapshotDelay") : 2.4
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { snapshot(name, delegate: delegate) }
+        // A timer in the common modes fires while a menu is open, too.
+        let timer = Timer(timeInterval: delay, repeats: false) { _ in MainActor.assumeIsolated { snapshot(name, delegate: delegate) } }
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     /// `-PMAccount 2` picks an account; `-PMModule calendar` (or `contacts`) a part of the app; `-PMFolder sent`
@@ -165,9 +167,18 @@ enum DebugLaunchOptions {
             let weekEvents = calendar.shownEvents().filter { calendar.visibleInterval.contains($0.start) && !$0.isAllDay }
                 .sorted { $0.start < $1.start }
             if let event = weekEvents[safe: defaults.integer(forKey: "PMEvent") - 1] { calendar.selectedEventID = event.id }
+            // `-PMTask 2` shows the details of the week's second task.
+            let weekTasks = calendar.shownEvents().filter { calendar.visibleInterval.contains($0.start) && $0.isTask }.sorted { $0.start < $1.start }
+            if let task = weekTasks[safe: defaults.integer(forKey: "PMTask") - 1] { calendar.selectedEventID = task.id }
             if let editor = defaults.string(forKey: "PMEventEditor") {
                 if let number = Int(editor), let event = weekEvents[safe: number - 1] {
                     app.sheet = .eventEditor(calendar.draft(for: event))
+                } else if let number = Int(editor.dropFirst(4)), editor.hasPrefix("task"), let task = weekTasks[safe: number - 1] {
+                    // `-PMEventEditor task2` edits the week's second task.
+                    app.sheet = .eventEditor(calendar.draft(for: task))
+                } else if let type = EventType(rawValue: editor), type != .event, let draft = calendar.newDraft(type: type) {
+                    // `-PMEventEditor task` (or outOfOffice, focusTime) starts one of those.
+                    app.sheet = .eventEditor(draft)
                 } else if var draft = calendar.newDraft() {
                     draft.title = "Planning lunch"
                     draft.guests = [SampleData.person("Alex Kim")]

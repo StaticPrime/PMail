@@ -30,6 +30,13 @@ struct LiveServiceFactory: ServiceFactory {
         AppDelegate.accountsFolder(in: folder).appendingPathComponent(account.id.uuidString, isDirectory: true)
     }
 
+    /// An account's calendars with its tasks beside them, and the kinds of events its calendars can't hold kept on
+    /// this Mac.
+    private func calendar(_ calendars: any CalendarService, tasks: any TaskService, for account: Account) -> CalendarWithTasks {
+        CalendarWithTasks(calendars: calendars, tasks: tasks,
+                          types: EventTypeBook(file: storage(for: account).appendingPathComponent(EventTypeBook.fileName)))
+    }
+
     private func unavailable(_ reason: PMailError) -> AccountServices {
         let service = UnavailableService(reason)
         return AccountServices(mail: service, calendar: service, contacts: service)
@@ -47,11 +54,13 @@ struct LiveServiceFactory: ServiceFactory {
         }
         if account.kind == .google {
             return AccountServices(mail: GoogleMailService(email: account.email, tokens: tokenProvider),
-                                   calendar: GoogleCalendarService(tokens: tokenProvider),
+                                   calendar: calendar(GoogleCalendarService(tokens: tokenProvider),
+                                                      tasks: GoogleTasksService(tokens: tokenProvider), for: account),
                                    contacts: GoogleContactsService(tokens: tokenProvider))
         }
         return AccountServices(mail: MicrosoftMailService(email: account.email, tokens: tokenProvider),
-                               calendar: MicrosoftCalendarService(tokens: tokenProvider),
+                               calendar: calendar(MicrosoftCalendarService(tokens: tokenProvider),
+                                                  tasks: MicrosoftTasksService(tokens: tokenProvider), for: account),
                                contacts: MicrosoftContactsService(tokens: tokenProvider))
     }
 
@@ -75,9 +84,11 @@ struct LiveServiceFactory: ServiceFactory {
                               labelBook: labelBook, sorter: sorter)
         // Calendars and contacts sign in with the Apple Account (iCloud) or the account's own user name.
         let serverCredential = Credential.password(username: account.serverLoginName ?? incoming.username, password: password)
-        let calendar: any CalendarService = account.calendarServer.map {
+        let calendars: any CalendarService = account.calendarServer.map {
             CalDAVCalendarService(serverURL: $0, credential: serverCredential, ownerEmail: account.email)
         } ?? LocalCalendarService(folder: place.appendingPathComponent("Calendar", isDirectory: true), ownerEmail: account.email)
+        // Tasks are kept on this Mac: these servers keep none PMail can reach.
+        let calendar = calendar(calendars, tasks: LocalTaskService(file: place.appendingPathComponent(LocalTaskService.fileName)), for: account)
         let contacts: any ContactsService = account.contactsServer.map {
             CardDAVContactsService(serverURL: $0, credential: serverCredential)
         } ?? LocalContactsService(folder: place.appendingPathComponent("Contacts", isDirectory: true))

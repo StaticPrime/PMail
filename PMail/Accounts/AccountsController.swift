@@ -240,10 +240,10 @@ final class AccountsController {
             Task { await mail.close() }
         }
         try? secrets.setSecret(nil, for: id)
-        // The copies and waiting messages go; calendars, contacts and mail kept only on this Mac stay in its folder.
+        // The copies and waiting messages go; calendars, contacts, tasks and mail kept only on this Mac stay in its folder.
         let folder = storageFolder(for: id)
         for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json", "Remote Content", "JunkMarks.json",
-                     "Recipients.json"] { try? FileManager.default.removeItem(at: folder.appendingPathComponent(name)) }
+                     "Recipients.json", EventTypeBook.fileName] { try? FileManager.default.removeItem(at: folder.appendingPathComponent(name)) }
         accounts.removeAll { $0.id == id }
         sessions[id] = nil
         save()

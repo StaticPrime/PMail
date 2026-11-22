@@ -323,7 +323,7 @@ enum SelfTest {
         }
         step {
             let calendar = session.calendar
-            check(calendar.calendars.count == 4, "the account's calendars load", "\(calendar.calendars.count)")
+            check(calendar.calendars.count == 6, "the account's calendars and task lists load", "\(calendar.calendars.count)")
             check(calendar.defaultCalendar?.nativeConference == .meet, "its main calendar makes Meet meetings")
             check(calendar.visibleDays.count == 7, "the week shows seven days")
             let standups = calendar.shownEvents().filter { $0.title == "Team standup" }
@@ -356,7 +356,104 @@ enum SelfTest {
             if let created { calendar.delete(created, scope: .thisEvent) }
             wait("the event to go") { !calendar.events.contains { $0.title == "Self-test sync" } }
         }
+
+        // Kinds of events, and tasks
+        var keptFocus: CalendarEvent?
         step {
+            let calendar = session.calendar
+            check(calendar.taskLists.map(\.name) == ["My Tasks", "Waffles"] && calendar.myCalendars.count == 3,
+                  "the task lists show apart from the calendars", "\(calendar.taskLists.map(\.name))")
+            check(calendar.defaultTaskList?.id == "tasks:my-tasks", "new tasks go in the first list")
+            let shown = calendar.shownEvents()
+            let focus = shown.first { $0.title == "Focus time" }
+            check(focus?.type == .focusTime && focus?.isTypeLocal == false && focus?.declinesInvitations == true, "focus time comes from the calendar")
+            check(shown.first { $0.title == "Out of office" }?.type == .outOfOffice, "and out of office")
+            let tasks = shown.filter(\.isTask)
+            check(tasks.contains { $0.title == "Renew passport" && $0.isAllDay && $0.type == .task }
+                  && tasks.contains { $0.title == "Send slides to Priya" && $0.isCompleted }, "this week's tasks show on their days", "\(tasks.map(\.title))")
+            if let new = calendar.newDraft() {
+                check(calendar.types(for: new) == [.event, .task, .outOfOffice, .focusTime], "something new can be any kind")
+            }
+            if let meeting = shown.first(where: { $0.title == "Design review" }) {
+                check(calendar.types(for: calendar.draft(for: meeting)) == [.event], "a meeting stays a meeting")
+            }
+            guard var draft = calendar.newDraft(type: .task) else { return check(false, "a new task can be started") }
+            check(draft.calendarID == "tasks:my-tasks" && draft.isAllDay && draft.guests.isEmpty, "a new task is all day, in the default list")
+            draft.title = "Self-test task"
+            draft.notes = "Made by the self-test"
+            Task {
+                do { try await calendar.save(draft) } catch { check(false, "saving a task", "\(error)") }
+            }
+            wait("the new task") { calendar.events.contains { $0.title == "Self-test task" } }
+        }
+        step {
+            let calendar = session.calendar
+            guard let task = calendar.events.first(where: { $0.title == "Self-test task" }) else { return check(false, "making a task") }
+            check(task.isTask && task.type == .task && task.notes == "Made by the self-test", "making a task saves it in the task list")
+            calendar.setCompleted(task, true)
+            check(calendar.event(task.id)?.isCompleted == true, "ticking a task off shows at once")
+            let tasks = (session.services.calendar as? CalendarWithTasks)?.tasks as? SampleTaskService
+            wait("the task list to hear it's done") { read { await tasks?.allTasks.first { $0.id == task.id }?.isCompleted } == true }
+        }
+        step {
+            let calendar = session.calendar
+            if let task = calendar.events.first(where: { $0.title == "Self-test task" }) { calendar.delete(task, scope: .thisEvent) }
+            // Out of office on the main calendar, which holds it itself.
+            guard var away = calendar.newDraft(type: .outOfOffice) else { return check(false, "out of office can be started") }
+            check(away.isAllDay && away.title == "Out of office" && away.calendarID == "primary", "out of office starts as the whole day, on the main calendar")
+            check(calendar.canDecline(away), "where meetings can be declined")
+            away.title = "Self-test away"
+            away.declinesInvitations = true
+            away.declineMessage = "Back Monday"
+            // Focus time on a calendar that can't hold it.
+            guard var focus = calendar.newDraft(type: .focusTime) else { return check(false, "focus time can be started") }
+            check(!focus.isAllDay && focus.end.timeIntervalSince(focus.start) == 7_200, "focus time starts as two hours")
+            focus.calendarID = "family"
+            check(!calendar.canDecline(focus), "other calendars can't decline meetings")
+            focus.title = "Self-test focus"
+            Task {
+                do {
+                    try await calendar.save(away)
+                    try await calendar.save(focus)
+                } catch { check(false, "saving out of office and focus time", "\(error)") }
+            }
+            wait("out of office and focus time") {
+                calendar.events.contains { $0.title == "Self-test focus" } && !calendar.events.contains { $0.title == "Self-test task" }
+            }
+        }
+        step {
+            let calendar = session.calendar
+            check(!calendar.events.contains { $0.title == "Self-test task" }, "deleting a task")
+            let away = calendar.events.first { $0.title == "Self-test away" }
+            check(away?.type == .outOfOffice && away?.isTypeLocal == false && away?.declinesInvitations == true && away?.declineMessage == "Back Monday",
+                  "out of office is saved as out of office, declining meetings")
+            guard let focus = calendar.events.first(where: { $0.title == "Self-test focus" }) else { return check(false, "saving focus time") }
+            check(focus.type == .focusTime && focus.isTypeLocal, "focus time a calendar can't hold is kept as focus time on this Mac")
+            let services = session.services.calendar as? CalendarWithTasks
+            let saved = read { await (services?.calendars as? SampleCalendarService)?.allEvents.first { $0.id == focus.id } }
+            check(saved??.type == .event, "and saved in the calendar as an event")
+            let interval = calendar.visibleInterval
+            let again = read { try? await services?.loadEvents(in: ["family"], from: interval.start, to: interval.end) }
+            check(again??.first { $0.id == focus.id }?.type == .focusTime, "loading the calendar again still shows it as focus time",
+                  "\(again.map { $0?.map { "\($0.id) \($0.title) \($0.type) \($0.start)" } ?? ["threw"] } ?? ["timed out"]); \(focus.id) \(focus.start) in \(interval)")
+            let book = DebugLaunchOptions.sampleStorage.appendingPathComponent(SampleData.googleID.uuidString).appendingPathComponent(EventTypeBook.fileName)
+            check(FileManager.default.fileExists(atPath: book.path), "kept in the account's folder")
+            keptFocus = focus
+            calendar.delete(focus, scope: .thisEvent)
+            if let away { calendar.delete(away, scope: .thisEvent) }
+            // The window drops them at once; the calendar (and the kinds kept here) a moment later.
+            wait("out of office and focus time to go") {
+                read { await (services?.calendars as? SampleCalendarService)?.allEvents.contains { $0.title.hasPrefix("Self-test") } } == false
+            }
+        }
+        step {
+            let services = session.services.calendar as? CalendarWithTasks
+            let focus = keptFocus
+            let kept = read { () async -> EventType? in
+                guard let focus else { return .event }
+                return await services?.types.type(for: focus)
+            }
+            check(focus != nil && kept == .some(nil), "deleting focus time forgets it here", "\(String(describing: kept))")
             check(!session.calendar.events.contains { $0.title == "Self-test sync" }, "deleting an event")
             // Microsoft: the same account switch changes mail, calendar and contacts together.
             app.switchAccount(to: SampleData.microsoftID)
@@ -376,12 +473,23 @@ enum SelfTest {
             draft.addsNativeConference = true
             let calendar = session.calendar
             Task { try? await calendar.save(draft) }
-            wait("the Teams event") { calendar.events.contains { $0.title == "Self-test Teams call" } }
+            wait("the Teams event") { calendar.events.contains { $0.title == "Self-test Teams call" } && calendar.events.contains(where: \.isTask) }
         }
         step {
             let created = session.calendar.events.first { $0.title == "Self-test Teams call" }
             check(created?.conference?.kind == .teams && created?.conference?.joinURL.host == "teams.microsoft.com", "a new event gets its Teams meeting",
                   created?.conference?.joinURL.absoluteString ?? "none")
+            let calendar = session.calendar
+            check(calendar.taskLists.map(\.name) == ["Tasks"] && calendar.shownEvents().contains { $0.title == "Submit expense report" && $0.isTask },
+                  "a Microsoft account's To Do tasks show",
+                  "\(calendar.taskLists.map(\.name)) \(calendar.shownEvents().filter(\.isTask).map(\.title)) \(calendar.visibleInterval) \(calendar.mode) \(calendar.tasksProblem ?? "")")
+            calendar.step(1)
+            wait("next week") { calendar.events.contains { $0.title == "Vacation" } }
+        }
+        step {
+            let calendar = session.calendar
+            check(calendar.events.first { $0.title == "Vacation" }?.type == .outOfOffice, "and its calendar's out of office")
+            calendar.goToday()
             app.switchAccount(to: SampleData.iCloudID)
             wait("the third account", upTo: 8) { app.current?.account.kind == .icloud && app.current?.calendar.events.isEmpty == false }
         }
@@ -399,6 +507,34 @@ enum SelfTest {
             let created = session.calendar.events.first { $0.title == "Self-test FaceTime" }
             check(created?.conference?.kind == .faceTime && created?.conference?.joinURL.host == "facetime.apple.com", "a pasted FaceTime link joins the event")
             check(mail.capabilities.usesLabels == false && mail.sortsInboxOnMac, "iCloud mail has folders, with its inbox sorted on the Mac")
+            // Tasks kept on this Mac, and a kind the calendar can't hold.
+            let calendar = session.calendar
+            check(calendar.taskLists.map(\.id) == ["tasks:local"] && calendar.taskLists.first?.name == "Tasks", "an iCloud account's tasks are kept on this Mac")
+            guard var task = calendar.newDraft(type: .task) else { return check(false, "an iCloud task can be started") }
+            task.title = "Self-test Mac task"
+            guard let yoga = calendar.shownEvents().first(where: { $0.title == "Yoga" }) else { return check(false, "the sample yoga class") }
+            var focus = calendar.draft(for: yoga)
+            check(calendar.types(for: focus) == [.event, .outOfOffice, .focusTime], "an event without guests can change kind")
+            calendar.retype(&focus, as: .focusTime)
+            check(focus.start == yoga.start && focus.end == yoga.end && focus.title == "Yoga", "keeping its time and title")
+            Task {
+                do {
+                    try await calendar.save(task)
+                    try await calendar.save(focus)
+                } catch { check(false, "saving an iCloud task and focus time", "\(error)") }
+            }
+            wait("the iCloud task and focus time") {
+                calendar.events.contains { $0.title == "Self-test Mac task" } && calendar.event(yoga.id)?.type == .focusTime
+            }
+        }
+        step {
+            let calendar = session.calendar
+            let folder = DebugLaunchOptions.sampleStorage.appendingPathComponent(SampleData.iCloudID.uuidString)
+            let saved = (try? String(contentsOf: folder.appendingPathComponent(LocalTaskService.fileName), encoding: .utf8)) ?? ""
+            check(saved.contains("Self-test Mac task"), "an iCloud task is saved on this Mac")
+            check(calendar.events.first { $0.title == "Yoga" && $0.type == .focusTime }?.isTypeLocal == true,
+                  "an iCloud event changed to focus time is kept as focus time on this Mac")
+            check(FileManager.default.fileExists(atPath: folder.appendingPathComponent(EventTypeBook.fileName).path), "in the account's folder")
             app.switchAccount(to: SampleData.googleID)
             app.show(.contacts)
             wait("the first account's contacts") { app.current?.account.kind == .google && app.current?.contacts.loaded == true }
@@ -446,16 +582,22 @@ enum SelfTest {
             try? secrets.setSecret(.password("x"), for: iCloud.id)
             try? secrets.setSecret(.password("x"), for: pop.id)
             let g = factory.services(for: google, secrets: secrets)
-            check(g.mail is GoogleMailService && g.calendar is GoogleCalendarService && g.contacts is GoogleContactsService,
-                  "a Google account uses Google's mail, calendar and contacts services")
+            let gCalendar = g.calendar as? CalendarWithTasks
+            check(g.mail is GoogleMailService && gCalendar?.calendars is GoogleCalendarService && gCalendar?.tasks is GoogleTasksService
+                  && g.contacts is GoogleContactsService, "a Google account uses Google's mail, calendar, tasks and contacts services")
+            check(gCalendar?.types.file == factory.storage(for: google).appendingPathComponent(EventTypeBook.fileName),
+                  "and keeps the kinds of events its calendars can't hold in its folder")
             let m = factory.services(for: microsoft, secrets: secrets)
-            check(m.mail is MicrosoftMailService && m.calendar is MicrosoftCalendarService && m.contacts is MicrosoftContactsService,
-                  "a Microsoft account uses Microsoft's")
+            let mCalendar = m.calendar as? CalendarWithTasks
+            check(m.mail is MicrosoftMailService && mCalendar?.calendars is MicrosoftCalendarService && mCalendar?.tasks is MicrosoftTasksService
+                  && m.contacts is MicrosoftContactsService, "a Microsoft account uses Microsoft's")
             let i = factory.services(for: iCloud, secrets: secrets)
-            check(i.mail is IMAPMailService && i.calendar is CalDAVCalendarService && i.contacts is CardDAVContactsService,
+            let iCalendar = i.calendar as? CalendarWithTasks
+            check(i.mail is IMAPMailService && iCalendar?.calendars is CalDAVCalendarService && i.contacts is CardDAVContactsService,
                   "an iCloud account uses IMAP, CalDAV and CardDAV")
+            check(iCalendar?.tasks is LocalTaskService, "with its tasks kept on the Mac")
             let p = factory.services(for: pop, secrets: secrets)
-            check(p.mail is POPMailService && p.calendar is LocalCalendarService && p.contacts is LocalContactsService,
+            check(p.mail is POPMailService && (p.calendar as? CalendarWithTasks)?.calendars is LocalCalendarService && p.contacts is LocalContactsService,
                   "a POP account without servers keeps its calendar and contacts on the Mac")
             let unsigned = factory.services(for: Account(kind: .icloud, name: "", email: "x@icloud.com", incoming: presets.incoming), secrets: secrets)
             check(unsigned.mail is UnavailableService, "an account without its password can't connect")

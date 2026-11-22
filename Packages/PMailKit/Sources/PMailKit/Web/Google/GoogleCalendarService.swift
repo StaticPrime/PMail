@@ -1,6 +1,8 @@
 import Foundation
 
 /// A Google account's calendars, through Google's calendar API. New events can get a Google Meet meeting of their own.
+/// Out of office and focus time are Google's own kinds of event where the calendar takes them (a Workspace account's
+/// primary calendar); elsewhere they're saved as ordinary events.
 public actor GoogleCalendarService: CalendarService {
     let client: WebClient
     /// Each calendar's default pop-up reminders, from the calendar list, for events that use them.
@@ -11,6 +13,8 @@ public actor GoogleCalendarService: CalendarService {
     private var seriesRecurrence: [EventKey: [String]] = [:]
     /// The events as last loaded or saved, so an update sends only what the person changed.
     private var loaded: [EventKey: CalendarEvent] = [:]
+    /// Calendars that turned down out of office or focus time, which aren't asked again.
+    private var refusesStatusEvents: Set<String> = []
 
     static let base = "https://www.googleapis.com/calendar/v3/"
     /// Seconds between looks at a new event while Google is still making its meeting.
@@ -163,6 +167,9 @@ public actor GoogleCalendarService: CalendarService {
         let organizer = item["organizer"]["email"].nonEmpty.map {
             MailAddress(name: item["organizer"]["displayName"].string, email: $0)
         }
+        let type = eventType(item["eventType"].string)
+        let kindDetails = type == .outOfOffice ? item["outOfOfficeProperties"] : item["focusTimeProperties"]
+        let declineMode = type == .event ? nil : kindDetails["autoDeclineMode"].string
         return CalendarEvent(id: id, calendarID: calendarID, title: item["summary"].string ?? "", start: start.date, end: end,
                              isAllDay: start.isAllDay, timeZone: item["start"]["timeZone"].nonEmpty, location: location,
                              notes: notes,
@@ -174,7 +181,18 @@ public actor GoogleCalendarService: CalendarService {
                              availability: item["transparency"].string == "transparent" ? .free : .busy,
                              reminderMinutes: reminders,
                              webLink: WebURL.webLink(item["htmlLink"].string), uid: item["iCalUID"].nonEmpty,
-                             etag: item["etag"].nonEmpty)
+                             etag: item["etag"].nonEmpty, type: type,
+                             declinesInvitations: declineMode.map { $0 != "declineNone" } ?? false,
+                             declineMessage: type == .event ? nil : kindDetails["declineMessage"].nonEmpty)
+    }
+
+    /// The kinds of event PMail knows among Google's; the rest (working locations, birthdays) are ordinary events.
+    static func eventType(_ text: String?) -> EventType {
+        switch text {
+        case "outOfOffice": .outOfOffice
+        case "focusTime": .focusTime
+        default: .event
+        }
     }
 
     /// A start or end: `dateTime` for a timed event, `date` (local midnight) for an all-day one.
@@ -262,6 +280,31 @@ public actor GoogleCalendarService: CalendarService {
     // MARK: Changes
 
     public func create(_ event: CalendarEvent, addingConference: Bool) async throws -> CalendarEvent {
+        guard Self.isStatusEvent(event.type), takesStatusEvents(event) else {
+            var plain = event
+            if Self.isStatusEvent(event.type) { plain.type = .event }
+            return try await insert(plain, addingConference: addingConference)
+        }
+        do {
+            return try await insert(event, addingConference: false)
+        } catch let PMailError.http(status, _) where status == 400 || status == 403 {
+            // Only the primary calendars of some Google accounts take them: an ordinary event then.
+            refusesStatusEvents.insert(event.calendarID)
+            var plain = event
+            plain.type = .event
+            return try await insert(plain, addingConference: addingConference)
+        }
+    }
+
+    static func isStatusEvent(_ type: EventType) -> Bool { type == .outOfOffice || type == .focusTime }
+
+    /// Whether to ask Google for out of office or focus time on this calendar: not where it said no before, and never
+    /// focus time all day, which Google doesn't have.
+    private func takesStatusEvents(_ event: CalendarEvent) -> Bool {
+        !refusesStatusEvents.contains(event.calendarID) && !(event.type == .focusTime && event.isAllDay)
+    }
+
+    private func insert(_ event: CalendarEvent, addingConference: Bool) async throws -> CalendarEvent {
         let colors = event.colorHex == nil ? [:] : await eventColorTable()
         var body = Self.body(for: event, original: nil, isNew: true, includeTimes: true, addingConference: addingConference,
                              colors: colors)
@@ -278,6 +321,20 @@ public actor GoogleCalendarService: CalendarService {
 
     public func update(_ event: CalendarEvent, scope: RecurrenceScope, addingConference: Bool) async throws -> CalendarEvent {
         let original = loaded[EventKey(calendarID: event.calendarID, eventID: event.id)]
+        // Google keeps an event's kind for good, so a one-off event changing kind is made again as the new kind and the
+        // old one goes. Where Google won't take the new kind, the change is saved as it is (the kind kept on this Mac).
+        let kind = event.type == .task ? EventType.event : event.type
+        if let original, original.type != kind, !event.isRecurring, kind == .event || takesStatusEvents(event) {
+            var replacement = event
+            replacement.type = kind
+            do {
+                let made = try await insert(replacement, addingConference: addingConference && kind == .event)
+                try? await delete(original, scope: .thisEvent)
+                return made
+            } catch let PMailError.http(status, _) where status == 400 || status == 403 {
+                if Self.isStatusEvent(kind) { refusesStatusEvents.insert(event.calendarID) }
+            }
+        }
         // Changing every occurrence changes the series, keeping its own start and end.
         let wholeSeries = scope == .allEvents && event.seriesID != nil
         let targetID = wholeSeries ? (event.seriesID ?? event.id) : event.id
@@ -393,7 +450,28 @@ public actor GoogleCalendarService: CalendarService {
         if original?.conference?.kind == .meet, edited.conference == nil, !addingConference {
             body["conferenceData"] = .null  // The person took the meeting off.
         }
+        // Out of office and focus time: Google's own kinds, with whether invitations for that time are declined. An
+        // event's kind is set when it's made; after that only the declining can change.
+        if isStatusEvent(edited.type), isNew {
+            body["eventType"] = .string(edited.type == .outOfOffice ? "outOfOffice" : "focusTime")
+            body[edited.type == .outOfOffice ? "outOfOfficeProperties" : "focusTimeProperties"] = statusProperties(edited)
+            if edited.type == .outOfOffice { body["transparency"] = "opaque" }
+        } else if isStatusEvent(edited.type), let original, original.type == edited.type,
+                  original.declinesInvitations != edited.declinesInvitations || original.declineMessage != edited.declineMessage {
+            body[edited.type == .outOfOffice ? "outOfOfficeProperties" : "focusTimeProperties"] = statusProperties(edited)
+        }
         return body
+    }
+
+    /// What out of office or focus time does with invitations for its time: declines them (all of them, with the
+    /// message) or none; focus time also asks chat not to disturb while declining.
+    static func statusProperties(_ event: CalendarEvent) -> JSONValue {
+        var value: [String: JSONValue] = ["autoDeclineMode": .string(event.declinesInvitations ? "declineAllConflictingInvitations" : "declineNone")]
+        if event.declinesInvitations, let message = event.declineMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
+            value["declineMessage"] = .string(message)
+        }
+        if event.type == .focusTime { value["chatStatus"] = .string(event.declinesInvitations ? "doNotDisturb" : "available") }
+        return .object(value)
     }
 
     /// A start or end for Google: a `date` for an all-day event, else a UTC `dateTime` with the event's time zone. A

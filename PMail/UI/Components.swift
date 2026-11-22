@@ -36,6 +36,8 @@ struct BigActionButton: View {
     let title: String
     let symbol: String
     var collapsed = false
+    /// Whether it opens a menu (and shows a chevron to say so).
+    var isMenu = false
     let action: () -> Void
     @State private var hovering = false
 
@@ -43,7 +45,10 @@ struct BigActionButton: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: symbol).font(.system(size: 18, weight: .medium))
-                if !collapsed { Text(title).font(.pm(14, .medium)) }
+                if !collapsed {
+                    Text(title).font(.pm(14, .medium))
+                    if isMenu { Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).padding(.leading, -2) }
+                }
             }
             .foregroundStyle(Theme.onCompose)
             .padding(.horizontal, collapsed ? 0 : 20)
@@ -55,6 +60,88 @@ struct BigActionButton: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .accessibilityLabel(title)
+    }
+}
+
+/// A menu that opens under a button, for buttons drawn as more than a SwiftUI menu draws on the Mac (it keeps only a
+/// menu label's text and symbol). Give the button `.background(MenuAnchor(menu:))` and call `show` when it's clicked.
+@MainActor
+final class PopUpMenu: NSObject {
+    struct Item {
+        var title: String
+        var symbol: String?
+        /// A color swatch shown before the title.
+        var swatch: Color?
+        var isChecked = false
+        /// A key shown at the right that picks the item while the menu is open.
+        var key: String?
+        var isSeparator = false
+        var action: () -> Void = {}
+
+        static var separator: Item { Item(title: "", isSeparator: true) }
+    }
+
+    enum Alignment { case leading, trailing }
+
+    fileprivate weak var anchor: NSView?
+    private var items: [Item] = []
+
+    func show(_ items: [Item], alignment: Alignment = .leading) {
+        guard let anchor else { return }
+        self.items = items
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for (index, item) in items.enumerated() {
+            if item.isSeparator {
+                menu.addItem(.separator())
+                continue
+            }
+            let menuItem = NSMenuItem(title: item.title, action: #selector(choose(_:)), keyEquivalent: item.key?.lowercased() ?? "")
+            menuItem.keyEquivalentModifierMask = []
+            menuItem.target = self
+            menuItem.tag = index
+            menuItem.state = item.isChecked ? .on : .off
+            if let symbol = item.symbol {
+                menuItem.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            } else if let swatch = item.swatch {
+                menuItem.image = Self.swatch(NSColor(swatch))
+            }
+            menu.addItem(menuItem)
+        }
+        let x = alignment == .leading ? 0 : anchor.bounds.width - menu.size.width
+        menu.popUp(positioning: nil, at: NSPoint(x: x, y: anchor.bounds.height + 4), in: anchor)
+    }
+
+    @objc private func choose(_ sender: NSMenuItem) {
+        guard items.indices.contains(sender.tag) else { return }
+        items[sender.tag].action()
+    }
+
+    private static func swatch(_ color: NSColor) -> NSImage {
+        NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5)).fill()
+            return true
+        }
+    }
+}
+
+/// Where a `PopUpMenu` opens: under the view this is the background of.
+struct MenuAnchor: NSViewRepresentable {
+    let menu: PopUpMenu
+
+    func makeNSView(context: Context) -> NSView {
+        let view = AnchorView()
+        menu.anchor = view
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) { menu.anchor = view }
+
+    private final class AnchorView: NSView {
+        override var isFlipped: Bool { true }
+        /// Clicks go to the button over it.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
 

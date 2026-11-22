@@ -105,6 +105,36 @@ public enum EventAvailability: String, Codable, Sendable, Hashable {
     case free
 }
 
+/// What kind of item is on the calendar.
+public enum EventType: String, Codable, Sendable, Hashable, CaseIterable {
+    case event
+    /// Something to do by a day, ticked off when done (in the account's task list).
+    case task
+    /// Time away: new invitations can be declined.
+    case outOfOffice
+    /// Time kept for work without meetings.
+    case focusTime
+
+    public var name: String {
+        switch self {
+        case .event: "Event"
+        case .task: "Task"
+        case .outOfOffice: "Out of office"
+        case .focusTime: "Focus time"
+        }
+    }
+
+    /// The title a new one starts with, if it isn't given one.
+    public var defaultTitle: String {
+        switch self {
+        case .event: ""
+        case .task: ""
+        case .outOfOffice: "Out of office"
+        case .focusTime: "Focus time"
+        }
+    }
+}
+
 /// An event, or one occurrence of a repeating event.
 public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
     public enum Status: String, Codable, Sendable, Hashable {
@@ -152,13 +182,24 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
     public var resourceHref: String?
     /// For checking nobody else changed it first (an ETag or change key).
     public var etag: String?
+    /// What kind of item it is.
+    public var type: EventType
+    /// For a task: whether it's done.
+    public var isCompleted: Bool
+    /// Whether `type` is PMail's own, kept on this Mac because the calendar can't hold it.
+    public var isTypeLocal: Bool
+    /// For out of office and focus time where the calendar can (a Google Workspace calendar): whether invitations for
+    /// that time are declined, and the message they're declined with.
+    public var declinesInvitations: Bool
+    public var declineMessage: String?
 
     public init(id: String = UUID().uuidString, calendarID: String, title: String = "", start: Date, end: Date,
                 isAllDay: Bool = false, timeZone: String? = nil, location: String? = nil, notes: String? = nil,
                 attendees: [Attendee] = [], organizer: MailAddress? = nil, conference: Conference? = nil, colorHex: String? = nil,
                 recurrence: [String] = [], seriesID: String? = nil, occurrenceDate: Date? = nil, status: Status = .confirmed,
                 myResponse: AttendeeResponse? = nil, availability: EventAvailability = .busy, reminderMinutes: [Int] = [],
-                webLink: URL? = nil, uid: String? = nil, resourceHref: String? = nil, etag: String? = nil) {
+                webLink: URL? = nil, uid: String? = nil, resourceHref: String? = nil, etag: String? = nil, type: EventType = .event,
+                isCompleted: Bool = false, isTypeLocal: Bool = false, declinesInvitations: Bool = false, declineMessage: String? = nil) {
         self.id = id
         self.calendarID = calendarID
         self.title = title
@@ -183,10 +224,91 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
         self.uid = uid
         self.resourceHref = resourceHref
         self.etag = etag
+        self.type = type
+        self.isCompleted = isCompleted
+        self.isTypeLocal = isTypeLocal
+        self.declinesInvitations = declinesInvitations
+        self.declineMessage = declineMessage
     }
 
     /// Whether this is one occurrence of a repeating event.
     public var isRecurring: Bool { seriesID != nil || !recurrence.isEmpty }
+
+    /// Whether it's a task (in one of the account's task lists) rather than an event.
+    public var isTask: Bool { TaskLists.listID(from: calendarID) != nil }
+}
+
+extension CalendarEvent {
+    /// Events saved before there were kinds of event read as events.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try c.decode(String.self, forKey: .id), calendarID: try c.decode(String.self, forKey: .calendarID),
+                  title: try c.decode(String.self, forKey: .title), start: try c.decode(Date.self, forKey: .start),
+                  end: try c.decode(Date.self, forKey: .end), isAllDay: try c.decode(Bool.self, forKey: .isAllDay),
+                  timeZone: try c.decodeIfPresent(String.self, forKey: .timeZone), location: try c.decodeIfPresent(String.self, forKey: .location),
+                  notes: try c.decodeIfPresent(String.self, forKey: .notes), attendees: try c.decode([Attendee].self, forKey: .attendees),
+                  organizer: try c.decodeIfPresent(MailAddress.self, forKey: .organizer),
+                  conference: try c.decodeIfPresent(Conference.self, forKey: .conference),
+                  colorHex: try c.decodeIfPresent(String.self, forKey: .colorHex), recurrence: try c.decode([String].self, forKey: .recurrence),
+                  seriesID: try c.decodeIfPresent(String.self, forKey: .seriesID),
+                  occurrenceDate: try c.decodeIfPresent(Date.self, forKey: .occurrenceDate), status: try c.decode(Status.self, forKey: .status),
+                  myResponse: try c.decodeIfPresent(AttendeeResponse.self, forKey: .myResponse),
+                  availability: try c.decode(EventAvailability.self, forKey: .availability),
+                  reminderMinutes: try c.decode([Int].self, forKey: .reminderMinutes), webLink: try c.decodeIfPresent(URL.self, forKey: .webLink),
+                  uid: try c.decodeIfPresent(String.self, forKey: .uid), resourceHref: try c.decodeIfPresent(String.self, forKey: .resourceHref),
+                  etag: try c.decodeIfPresent(String.self, forKey: .etag),
+                  type: try c.decodeIfPresent(EventType.self, forKey: .type) ?? .event,
+                  isCompleted: try c.decodeIfPresent(Bool.self, forKey: .isCompleted) ?? false,
+                  isTypeLocal: try c.decodeIfPresent(Bool.self, forKey: .isTypeLocal) ?? false,
+                  declinesInvitations: try c.decodeIfPresent(Bool.self, forKey: .declinesInvitations) ?? false,
+                  declineMessage: try c.decodeIfPresent(String.self, forKey: .declineMessage))
+    }
+}
+
+/// Task lists shown as calendars of tasks beside an account's calendars: a list's calendar ID is "tasks:" and its own ID.
+public enum TaskLists {
+    public static let prefix = "tasks:"
+    /// The color tasks show in.
+    public static let colorHex = "#3F51B5"
+
+    public static func calendarID(for listID: String) -> String { prefix + listID }
+
+    public static func listID(from calendarID: String) -> String? {
+        calendarID.hasPrefix(prefix) ? String(calendarID.dropFirst(prefix.count)) : nil
+    }
+}
+
+extension CalendarInfo {
+    /// Whether it's one of the account's task lists rather than a calendar.
+    public var isTaskList: Bool { TaskLists.listID(from: id) != nil }
+}
+
+/// One of an account's task lists.
+public struct TaskList: Codable, Sendable, Hashable, Identifiable {
+    public var id: String
+    public var name: String
+    /// Where new tasks go.
+    public var isDefault: Bool
+
+    public init(id: String, name: String, isDefault: Bool = false) {
+        self.id = id
+        self.name = name
+        self.isDefault = isDefault
+    }
+}
+
+/// One account's tasks, however they're kept (Google Tasks, Microsoft To Do, or on this Mac). Tasks come and go as
+/// `CalendarEvent`s of type `.task`, in their list's calendar (`TaskLists.calendarID(for:)`), all day on the day
+/// they're due.
+public protocol TaskService: AnyObject, Sendable {
+    func loadTaskLists() async throws -> [TaskList]
+
+    /// The tasks in some lists (by the lists' own IDs) due on a day in `start..<end`, done or not.
+    func loadTasks(in listIDs: [String], from start: Date, to end: Date) async throws -> [CalendarEvent]
+
+    func create(_ task: CalendarEvent) async throws -> CalendarEvent
+    func update(_ task: CalendarEvent) async throws -> CalendarEvent
+    func delete(_ task: CalendarEvent) async throws
 }
 
 /// One account's calendars, however they're reached.
