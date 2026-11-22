@@ -94,19 +94,13 @@ final class MailViewModel {
         self.defaults = defaults
     }
 
-    /// What the account can do. An account with folders rather than labels can only archive into an Archive folder,
-    /// so without one (an iCloud account that only has an inbox) Archive and Snooze aren't offered.
-    var capabilities: MailCapabilities {
-        var capabilities = service.capabilities
-        if !capabilities.usesLabels, foldersLoaded, !serviceFolders.contains(where: { $0.role == .archive }) {
-            capabilities.canArchive = false
-        }
-        return capabilities
-    }
+    /// What the account can do. An account with folders rather than labels archives into its server's Archive folder,
+    /// which the server makes when it has none (an iCloud account that only has an inbox).
+    var capabilities: MailCapabilities { service.capabilities }
 
-    /// Whether Report spam has somewhere to put mail: labels, or a spam folder.
+    /// Whether Report spam has somewhere to put mail: labels, a spam folder, or one the server makes when it has none.
     var canReportSpam: Bool {
-        service.capabilities.usesLabels || !foldersLoaded || serviceFolders.contains { $0.role == .spam }
+        service.capabilities.usesLabels || service.capabilities.canMove || !foldersLoaded || serviceFolders.contains { $0.role == .spam }
     }
     /// The inbox's tabs: the server's own (Primary, Promotions… or Focused and Other), or the categories PMail sorts
     /// it into. Turned off (Settings ▸ Mail, or the list's ⋯ menu), every account shows its whole inbox in one list.

@@ -75,6 +75,10 @@ public protocol MailService: AnyObject, Sendable {
     func loadSignature() async throws -> String?
     /// Saves the signature on the server (HTML; an empty one clears it).
     func saveSignature(html: String) async throws
+
+    /// Puts mail kept on this Mac for the server back on it, where it has (or can make) a folder for it, and returns how
+    /// many messages went back. Services that keep nothing that way return 0.
+    func putKeptMailBack() async throws -> Int
 }
 
 /// Where a service is up to in an account's inbox, for asking what's new since then. Only the service that made it
@@ -137,6 +141,8 @@ extension MailService {
     public func saveSignature(html: String) async throws {
         throw PMailError.notSupported("This account keeps no signature on its server.")
     }
+
+    public func putKeptMailBack() async throws -> Int { 0 }
 }
 
 /// Hands a finished message to an outgoing (SMTP) server.

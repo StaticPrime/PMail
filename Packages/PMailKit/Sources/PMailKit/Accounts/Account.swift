@@ -61,6 +61,37 @@ public enum ServerAuthentication: String, Codable, Sendable, Hashable {
     case oauth2
 }
 
+/// When a POP account's messages are removed from the server once PMail has downloaded them. Never, unless the person
+/// picks otherwise.
+public enum RemoveFromServer: String, Codable, Sendable, Hashable, CaseIterable {
+    case never
+    /// Once the message is deleted for good in PMail (Delete forever, or deleted from the Trash).
+    case whenDeleted
+    case afterADay
+    case afterAWeek
+    case afterAMonth
+
+    public var displayName: String {
+        switch self {
+        case .never: "Never"
+        case .whenDeleted: "When deleted from PMail"
+        case .afterADay: "After a day"
+        case .afterAWeek: "After a week"
+        case .afterAMonth: "After a month"
+        }
+    }
+
+    /// How long after downloading a message it's removed, for the timed choices.
+    public var age: TimeInterval? {
+        switch self {
+        case .afterADay: 86_400
+        case .afterAWeek: 7 * 86_400
+        case .afterAMonth: 30 * 86_400
+        case .never, .whenDeleted: nil
+        }
+    }
+}
+
 /// Where a mail server is and how to sign in to it.
 public struct ServerSettings: Codable, Sendable, Hashable {
     public var mailProtocol: MailProtocol
@@ -69,15 +100,18 @@ public struct ServerSettings: Codable, Sendable, Hashable {
     public var security: ConnectionSecurity
     public var username: String
     public var authentication: ServerAuthentication
+    /// For a POP server: when downloaded messages are removed from it. Nil leaves them there, like `.never`.
+    public var removeFromServer: RemoveFromServer?
 
     public init(mailProtocol: MailProtocol, host: String, port: Int? = nil, security: ConnectionSecurity = .tls,
-                username: String, authentication: ServerAuthentication = .password) {
+                username: String, authentication: ServerAuthentication = .password, removeFromServer: RemoveFromServer? = nil) {
         self.mailProtocol = mailProtocol
         self.host = host
         self.port = port ?? Self.defaultPort(for: mailProtocol, security: security)
         self.security = security
         self.username = username
         self.authentication = authentication
+        self.removeFromServer = removeFromServer
     }
 
     /// The usual port for a protocol and kind of security.

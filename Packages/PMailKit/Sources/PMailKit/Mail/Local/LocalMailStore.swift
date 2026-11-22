@@ -19,12 +19,19 @@ public actor LocalMailStore {
         var messages: [Entry] = []
         /// Messages deleted for good, so a sync doesn't download them again.
         var deletedIDs: [String] = []
+        /// When messages downloaded from a server arrived here, by ID, so the server's copies can go after a while.
+        var arrivals: [String: Date]?
+        /// Of the deleted IDs, the messages that had arrived from a server and were deleted here (rather than ones a
+        /// first sync left behind), so the server's copies can go once they're deleted.
+        var deletedAfterArriving: [String]?
         /// Small settings for whoever uses the store (a POP account's sync state).
         var values: [String: String] = [:]
     }
 
     private var entries: [String: Entry] = [:]
     private var deletedIDs: Set<String> = []
+    private var arrivals: [String: Date] = [:]
+    private var deletedAfterArriving: Set<String> = []
     private var values: [String: String] = [:]
     private var isLoaded = false
 
@@ -112,10 +119,11 @@ public actor LocalMailStore {
     // MARK: Changing
 
     /// Stores a message, reading its summary from the raw source, and returns the summary. A message with the same
-    /// ID is replaced. Without an `id`, the message gets a new "local:" one.
+    /// ID is replaced. Without an `id`, the message gets a new "local:" one. `arrived` notes when a message downloaded
+    /// from a server got here.
     @discardableResult
     public func add(raw: Data, folderID: String, id: String? = nil, isUnread: Bool = true,
-                    isStarred: Bool = false) throws -> MessageSummary {
+                    isStarred: Bool = false, arrived: Date? = nil) throws -> MessageSummary {
         loadIfNeeded()
         let id = id ?? "local:\(UUID().uuidString.lowercased())"
         var summary = MIMEParser.parse(raw).summary(id: id, folderID: folderID, isUnread: isUnread, isStarred: isStarred,
@@ -130,6 +138,8 @@ public actor LocalMailStore {
         }
         entries[id] = Entry(summary: summary, file: file)
         deletedIDs.remove(id)
+        deletedAfterArriving.remove(id)
+        if let arrived, arrivals[id] == nil { arrivals[id] = arrived }
         try save()
         return summary
     }
@@ -189,6 +199,7 @@ public actor LocalMailStore {
                 changed = true
             }
             if deletedIDs.insert(id).inserted { changed = true }
+            if arrivals[id] != nil, deletedAfterArriving.insert(id).inserted { changed = true }
         }
         if changed { try save() }
     }
@@ -209,14 +220,42 @@ public actor LocalMailStore {
         if deletedIDs.count != before { try save() }
     }
 
-    /// Forgets deleted IDs with this prefix that aren't in `ids` (messages gone from the server), so the list of
-    /// deleted IDs doesn't grow forever.
+    /// Forgets deleted IDs and arrivals with this prefix that aren't in `ids` (messages gone from the server), so the
+    /// lists don't grow forever.
     public func forgetDeletedIDs(withPrefix prefix: String, notIn ids: Set<String>) throws {
         loadIfNeeded()
         let stale = deletedIDs.filter { $0.hasPrefix(prefix) && !ids.contains($0) }
-        guard !stale.isEmpty else { return }
+        let staleArrivals = arrivals.keys.filter { $0.hasPrefix(prefix) && !ids.contains($0) }
+        guard !stale.isEmpty || !staleArrivals.isEmpty else { return }
         deletedIDs.subtract(stale)
+        deletedAfterArriving.subtract(stale)
+        for id in staleArrivals { arrivals[id] = nil }
         try save()
+    }
+
+    /// When each of these messages arrived from the server. A message kept here from before arrivals were noted counts
+    /// as arriving `now`, so its time starts then; one never downloaded (a first sync left it behind) has none.
+    public func arrivals(among ids: [String], now: Date) throws -> [String: Date] {
+        loadIfNeeded()
+        var found: [String: Date] = [:]
+        var noted = false
+        for id in ids {
+            if let arrived = arrivals[id] {
+                found[id] = arrived
+            } else if entries[id] != nil {
+                arrivals[id] = now
+                found[id] = now
+                noted = true
+            }
+        }
+        if noted { try save() }
+        return found
+    }
+
+    /// Of these IDs, the messages that arrived from the server and were then deleted for good here.
+    public func deletedAfterArriving(among ids: [String]) -> Set<String> {
+        loadIfNeeded()
+        return Set(ids.filter { deletedAfterArriving.contains($0) })
     }
 
     public func value(forKey key: String) -> String? {
@@ -255,12 +294,15 @@ public actor LocalMailStore {
               let index = try? JSONDecoder().decode(Index.self, from: data) else { return }
         entries = Dictionary(index.messages.map { ($0.summary.id, $0) }, uniquingKeysWith: { _, last in last })
         deletedIDs = Set(index.deletedIDs)
+        arrivals = index.arrivals ?? [:]
+        deletedAfterArriving = Set(index.deletedAfterArriving ?? [])
         values = index.values
     }
 
     private func save() throws {
         let index = Index(messages: entries.values.sorted { $0.summary.id < $1.summary.id }, deletedIDs: deletedIDs.sorted(),
-                          values: values)
+                          arrivals: arrivals.isEmpty ? nil : arrivals,
+                          deletedAfterArriving: deletedAfterArriving.isEmpty ? nil : deletedAfterArriving.sorted(), values: values)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let encoder = JSONEncoder()

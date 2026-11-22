@@ -253,20 +253,31 @@ import Testing
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 
-    @Test func archivingNeedsAnArchiveFolder() async throws {
+    /// A server without an Archive or a Trash gets one made the first time each is needed, and the messages move there.
+    @Test func archivingAndDeletingMakeTheFoldersTheyNeed() async throws {
         let stream = ScriptedByteStream(greeting: Script.greeting(), script: [
             Script.signIn("A1"),
             .expect(#"A2 LIST "" "*""#, reply: Script.lines(#"* LIST () "/" "INBOX""#, "A2 OK Done")),
             // The server offers special-use folders but marked none, so it's asked for them.
             .expect(#"A3 LIST "" "*" RETURN (SPECIAL-USE)"#, reply: Script.lines(#"* LIST () "/" "INBOX""#, "A3 OK Done")),
+            // Read again, in case another mail program made one since, then made.
+            .expect(#"A4 LIST "" "*""#, reply: Script.lines(#"* LIST () "/" "INBOX""#, "A4 OK Done")),
+            .expect(#"A5 LIST "" "*" RETURN (SPECIAL-USE)"#, reply: Script.lines(#"* LIST () "/" "INBOX""#, "A5 OK Done")),
+            Script.ok("A6", #"CREATE "Archive""#),
+            Script.ok("A7", #"SUBSCRIBE "Archive""#),
+            .expect(#"A8 LIST "" "*""#, reply: Script.lines(#"* LIST () "/" "INBOX""#, #"* LIST (\Archive) "/" "Archive""#, "A8 OK Done")),
+            Script.select("A9"),
+            Script.ok("A10", #"UID MOVE 11 "Archive""#),
+            .expect(#"A11 LIST "" "*""#, reply: Script.lines(#"* LIST () "/" "INBOX""#, #"* LIST (\Archive) "/" "Archive""#, "A11 OK Done")),
+            Script.ok("A12", #"CREATE "Trash""#),
+            Script.ok("A13", #"SUBSCRIBE "Trash""#),
+            .expect(#"A14 LIST "" "*""#, reply: Script.lines(#"* LIST () "/" "INBOX""#, #"* LIST (\Archive) "/" "Archive""#,
+                                                            #"* LIST (\Trash) "/" "Trash""#, "A14 OK Done")),
+            Script.ok("A15", #"UID MOVE 12 "Trash""#),
         ])
         let harness = IMAPHarness([stream])
-        await #expect(throws: PMailError.notSupported("This account has no Archive folder.")) {
-            try await harness.service.perform(.archive, on: [MessageSummary(id: IMAPMessageID.inbox(11))])
-        }
-        await #expect(throws: PMailError.notSupported("This account has no Trash folder.")) {
-            try await harness.service.perform(.trash, on: [MessageSummary(id: IMAPMessageID.inbox(11))])
-        }
+        try await harness.service.perform(.archive, on: [MessageSummary(id: IMAPMessageID.inbox(11))])
+        try await harness.service.perform(.trash, on: [MessageSummary(id: IMAPMessageID.inbox(12))])
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 

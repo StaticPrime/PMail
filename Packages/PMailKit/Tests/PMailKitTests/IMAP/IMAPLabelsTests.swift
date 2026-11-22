@@ -344,8 +344,8 @@ import Testing
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 
-    /// Archiving on a server without an Archive keeps the message on this Mac with its labels (its keywords and those
-    /// the book keeps), and moving it back to the inbox leaves its labels in the book.
+    /// Mail an earlier PMail kept on this Mac keeps its labels (its keywords and those the book keeps), lists under
+    /// them without asking the server, and moving it back to the inbox leaves its labels in the book.
     @Test func labelsStayWithMessagesKeptOnThisMacAndBack() async throws {
         let folder = temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -354,23 +354,16 @@ import Testing
         let hike = Self.hike
         let stream = ScriptedByteStream(greeting: Script.greeting(Self.inboxOnlyCapabilities), script: [
             Script.signIn("A1", capabilities: Self.inboxOnlyCapabilities),
-            .expect(#"A2 LIST "" "*""#, reply: Script.lines(#"* LIST (\Noinferiors) "/" "INBOX""#, "A2 OK LIST completed")),
-            Self.select("A3", keywords: false),
-            .expect("A4 UID FETCH 12 (UID FLAGS BODY.PEEK[])", reply: Script.lines(
-                #"* 1 FETCH (UID 12 FLAGS (\Seen PMail_Trip) BODY[] "# + Script.literal(hike) + ")", "A4 OK Done")),
-            Script.ok("A5", #"UID STORE 12 +FLAGS.SILENT (\Deleted)"#),
-            Script.ok("A6", "UID EXPUNGE 12", untagged: ["* 1 EXPUNGE"]),
-            .expect("A7 APPEND \"INBOX\" (\\Seen) {\(hike.utf8.count)+}", reply: ""),
+            .expect("A2 APPEND \"INBOX\" (\\Seen) {\(hike.utf8.count)+}", reply: ""),
             .expectBytes(hike.utf8.count, reply: ""),
-            .expect("", reply: "A7 OK [APPENDUID 7 101] APPEND completed\r\n"),
+            .expect("", reply: "A2 OK [APPENDUID 7 101] APPEND completed\r\n"),
         ])
         let imap = service([stream], book: book, store: store)
         let work = try await imap.createLabel(named: "Work", colorHex: nil)
         try await book.noteKeywords(allowed: false)
-        try await book.assign(work.id, to: [MessageSummary(id: IMAPMessageID.inbox(12), messageIDHeader: "<hike@example.com>")])
-
-        try await imap.perform(.archive, on: [MessageSummary(id: IMAPMessageID.inbox(12), folderID: "INBOX")])
-        let archived = try #require(await store.summaries(in: LocalFolders.archiveID).first)
+        let kept = try await store.add(raw: Data(hike.utf8), folderID: LocalFolders.archiveID, isUnread: false)
+        try await store.setLabelIDs(["PMail_Trip", work.id], for: [kept.id])
+        let archived = try #require(await store.summary(for: kept.id))
         #expect(archived.labelIDs == ["PMail_Trip", "PMail_Work"])
 
         // The label lists it from this Mac, without asking the server.
@@ -415,23 +408,18 @@ import Testing
         let hike = Self.hike
         let stream = ScriptedByteStream(greeting: Script.greeting(Self.inboxOnlyCapabilities), script: [
             Script.signIn("A1", capabilities: Self.inboxOnlyCapabilities),
-            .expect(#"A2 LIST "" "*""#, reply: Script.lines(#"* LIST (\Noinferiors) "/" "INBOX""#, "A2 OK LIST completed")),
-            Self.select("A3", keywords: true),
-            .expect("A4 UID FETCH 12 (UID FLAGS BODY.PEEK[])", reply: Script.lines(
-                #"* 1 FETCH (UID 12 FLAGS (\Seen PMail_Work) BODY[] "# + Script.literal(hike) + ")", "A4 OK Done")),
-            Script.ok("A5", #"UID STORE 12 +FLAGS.SILENT (\Deleted)"#),
-            Script.ok("A6", "UID EXPUNGE 12", untagged: ["* 1 EXPUNGE"]),
-            .expect("A7 APPEND \"INBOX\" (\\Seen PMail_Work) {\(hike.utf8.count)+}", reply: ""),
+            .expect("A2 APPEND \"INBOX\" (\\Seen PMail_Work) {\(hike.utf8.count)+}", reply: ""),
             .expectBytes(hike.utf8.count, reply: ""),
-            .expect("", reply: "A7 OK [APPENDUID 7 101] APPEND completed\r\n"),
+            .expect("", reply: "A2 OK [APPENDUID 7 101] APPEND completed\r\n"),
         ])
         let imap = service([stream], book: book, store: store)
         _ = try await imap.createLabel(named: "Work", colorHex: nil)
         try await book.noteKeywords(allowed: true)
-        try await imap.perform(.archive, on: [MessageSummary(id: IMAPMessageID.inbox(12), folderID: "INBOX")])
-        let archived = try #require(await store.summaries(in: LocalFolders.archiveID).first)
-        #expect(archived.labelIDs == ["PMail_Work"])
+        let kept = try await store.add(raw: Data(hike.utf8), folderID: LocalFolders.archiveID, isUnread: false)
+        try await store.setLabelIDs(["PMail_Work"], for: [kept.id])
+        let archived = try #require(await store.summary(for: kept.id))
         try await imap.perform(.moveToInbox, on: [archived])
+        #expect(await store.summaries(in: LocalFolders.archiveID).isEmpty)
         #expect(await book.messages(withLabel: "PMail_Work").isEmpty, "the server keeps it")
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }

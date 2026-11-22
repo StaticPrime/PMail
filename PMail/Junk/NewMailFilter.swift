@@ -70,8 +70,18 @@ final class NewMailFilter {
                 await perform(actions, on: summary, in: session, result: &result)
             }
         }
+        for (action, summaries) in moves {
+            do {
+                try await service.perform(action, on: summaries)
+            } catch {
+                // Nowhere to move them (offline, or a server that wouldn't make a Junk folder): they stay in the inbox,
+                // marked instead. Nothing leaves the server for this Mac.
+                for summary in summaries { marks[blocked.contains(summary.id) ? .blocked : .junk, default: []].append(summary) }
+                result.movedOut.subtract(summaries.map(\.id))
+                result.quiet.formUnion(summaries.map(\.id))
+            }
+        }
         for (mark, summaries) in marks { await storage.junkMarks.mark(summaries, as: mark) }
-        for (action, summaries) in moves { try? await service.perform(action, on: summaries) }
         result.quiet.formUnion(result.movedOut)
         return result
     }

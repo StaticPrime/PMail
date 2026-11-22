@@ -431,7 +431,7 @@ public actor IMAPClient {
     }
 
     /// Moves messages to another mailbox: with MOVE when the server offers it, else by copying, marking the
-    /// originals deleted and expunging them.
+    /// originals deleted and expunging just them.
     public func uidMove(_ uids: [UInt32], to mailbox: String) async throws {
         guard !uids.isEmpty else { return }
         try await exclusively {
@@ -446,8 +446,7 @@ public actor IMAPClient {
         }
     }
 
-    /// Deletes messages for good: marks them \Deleted and expunges them (just them with UIDPLUS; without it,
-    /// EXPUNGE removes every message marked deleted).
+    /// Deletes messages for good: marks them \Deleted and expunges just them.
     public func deleteMessages(_ uids: [UInt32]) async throws {
         guard !uids.isEmpty else { return }
         try await exclusively {
@@ -462,17 +461,32 @@ public actor IMAPClient {
         try check(try await run([.text(command)]))
     }
 
+    /// Expunges just these messages. Without UIDPLUS, EXPUNGE would also remove whatever another program marked
+    /// \Deleted and left (a mail program that deletes that way, waiting to expunge later), so those messages lose
+    /// the mark while it runs and get it back after.
     private func expungeNow(_ uids: [UInt32]) async throws {
         if capabilities.contains("UIDPLUS") {
             try check(try await run([.text("UID EXPUNGE \(IMAPSequenceSet.string(uids))")]))
-        } else {
-            try check(try await run([.text("EXPUNGE")]))
+            return
         }
+        let search = try await run([.text("UID SEARCH DELETED")])
+        try check(search)
+        var marked: [UInt32] = []
+        for case let .search(found) in search.untagged { marked += found }
+        let mine = Set(uids)
+        let others = marked.filter { !mine.contains($0) }
+        if !others.isEmpty { try await store(others, adding: false, flags: ["\\Deleted"]) }
+        let expunged = try await run([.text("EXPUNGE")])
+        if !others.isEmpty { try await store(others, adding: true, flags: ["\\Deleted"]) }
+        try check(expunged)
     }
 
-    /// Removes every message marked \Deleted from the selected mailbox.
-    public func expunge() async throws {
-        try await exclusively { try self.check(try await self.run([.text("EXPUNGE")])) }
+    /// Makes a mailbox, and subscribes to it so programs that only show subscribed mailboxes show it too.
+    public func createMailbox(_ name: String) async throws {
+        try await exclusively {
+            try self.check(try await self.run([.text("CREATE "), self.mailboxArgument(name)]))
+            _ = try? await self.run([.text("SUBSCRIBE "), self.mailboxArgument(name)])
+        }
     }
 
     /// Adds a message to a mailbox, with flags ("\Seen", "\Draft"). Returns where it went when the server says
@@ -492,14 +506,6 @@ public actor IMAPClient {
                 return IMAPAppendResult(uidValidity: uidValidity, uid: uid)
             }
             return nil
-        }
-    }
-
-    /// Closes the selected mailbox (expunging messages marked deleted).
-    public func closeMailbox() async throws {
-        try await exclusively {
-            try self.check(try await self.run([.text("CLOSE")]))
-            self.selectedMailbox = nil
         }
     }
 

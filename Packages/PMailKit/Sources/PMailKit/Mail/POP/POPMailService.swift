@@ -1,8 +1,11 @@
 import Foundation
 
 /// A POP account's mail. The server only holds the inbox, so PMail downloads new messages into a `LocalMailStore`
-/// (leaving them on the server) and keeps everything else there too: flags, Sent, Drafts, Archive, Junk and Trash. A
-/// Starred folder shows starred messages from every folder.
+/// and keeps everything else there too: flags, Sent, Drafts, Archive, Junk and Trash. A Starred folder shows starred
+/// messages from every folder.
+///
+/// Downloaded messages stay on the server unless the account says otherwise (`ServerSettings.removeFromServer`):
+/// removed once deleted from PMail, or a day, a week or a month after they arrived.
 ///
 /// Message IDs are "pop:" plus the server's unique ID (UIDL) for downloaded mail, and "local:" or "draft:" IDs for
 /// mail written on this Mac.
@@ -33,6 +36,8 @@ public actor POPMailService: MailService {
     var syncTask: Task<[String], Error>?
     /// How many of the newest messages the first sync downloads; older ones stay on the server only.
     var firstSyncLimit = 300
+    /// The time, for telling how long ago a message arrived.
+    var now: @Sendable () -> Date = { Date() }
 
     public init(account: Account, incoming: ServerSettings, credential: Credential, store: LocalMailStore,
                 sender: any MailSending, connector: any ByteStreamConnector = URLSessionConnector(),
@@ -156,8 +161,13 @@ public actor POPMailService: MailService {
                 } catch PMailError.server {
                     continue  // gone since UIDL (another program deleted it)
                 }
-                try await store.add(raw: raw, folderID: Self.inboxID, id: "pop:\(message.uid)", isUnread: true)
+                try await store.add(raw: raw, folderID: Self.inboxID, id: "pop:\(message.uid)", isUnread: true, arrived: now())
                 downloaded.append("pop:\(message.uid)")
+            }
+            // Only what the account says to remove leaves the server, and only when the session ends with QUIT.
+            let leaving = try await copiesLeavingServer(among: serverIDs)
+            for message in ids where leaving.contains("pop:\(message.uid)") {
+                try? await client.delete(message.number)
             }
             await client.quit()
             return downloaded
@@ -289,5 +299,30 @@ public actor POPMailService: MailService {
     /// Sets how many messages the first sync downloads, for tests.
     func setFirstSyncLimit(_ limit: Int) {
         firstSyncLimit = limit
+    }
+
+    /// Sets the time, for tests.
+    func setNow(_ now: @escaping @Sendable () -> Date) {
+        self.now = now
+    }
+
+    // MARK: Removing from the server
+
+    /// Of the messages on the server, the ones the account says to remove now: none unless the person chose to,
+    /// those deleted from PMail, or those that arrived long enough ago. A message PMail never downloaded (one an
+    /// account's first sync left behind) is never removed. Arrival times are noted on every sync, whatever the choice,
+    /// so a change of mind later counts from when messages really arrived.
+    func copiesLeavingServer(among serverIDs: [String]) async throws -> Set<String> {
+        let arrivals = try await store.arrivals(among: serverIDs, now: now())
+        switch incoming.removeFromServer ?? .never {
+        case .never:
+            return []
+        case .whenDeleted:
+            return await store.deletedAfterArriving(among: serverIDs)
+        case let timed:
+            guard let age = timed.age else { return [] }
+            let current = now()
+            return Set(arrivals.filter { current.timeIntervalSince($0.value) >= age }.keys)
+        }
     }
 }

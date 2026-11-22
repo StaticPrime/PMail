@@ -2,7 +2,8 @@ import Foundation
 import Testing
 @testable import PMailKit
 
-/// Sent, Drafts and Trash kept on this Mac for an IMAP server that has no folders for them.
+/// Mail on an IMAP server that has only an inbox: Sent and Drafts kept on this Mac, Archive, Junk and Trash made on the
+/// server (nothing leaves the server for the Mac), and mail an earlier PMail kept on the Mac put back on the server.
 struct IMAPLocalFoldersTests {
     private typealias Script = IMAPScript
 
@@ -21,35 +22,42 @@ struct IMAPLocalFoldersTests {
                   untagged: [#"* STATUS "\#(mailbox)" (MESSAGES \#(messages) UNSEEN \#(unseen) UIDNEXT 100 UIDVALIDITY 7)"#])
     }
 
-    @Test func aServerWithOnlyAnInboxKeepsSentDraftsAndTrashOnTheMac() async throws {
+    /// A LIST answered with these mailboxes, without special-use marks.
+    private static func list(_ tag: String, _ names: [String]) -> ScriptedByteStream.Step {
+        .expect(#"\#(tag) LIST "" "*""#, reply: (names.map { #"* LIST (\HasNoChildren) "/" "\#($0)""# } + ["\(tag) OK LIST completed"])
+            .map { $0 + "\r\n" }.joined())
+    }
+
+    /// An APPEND of `text` with these flags, answered with where it went.
+    private static func append(_ tag: String, _ mailbox: String, flags: String?, _ text: String) -> [ScriptedByteStream.Step] {
+        let count = text.utf8.count
+        return [
+            .expect("\(tag) APPEND \"\(mailbox)\"\(flags.map { " (\($0))" } ?? "") {\(count)+}", reply: ""),
+            .expectBytes(count, reply: ""),
+            .expect("", reply: "\(tag) OK [APPENDUID 9 1] APPEND completed\r\n"),
+        ]
+    }
+
+    private static func message(_ subject: String, id: String, date: String = "Sat, 21 Nov 2026 09:00:00 +0000") -> String {
+        "From: Alex Rivera <alex@example.com>\r\nTo: pug@example.com\r\nSubject: \(subject)\r\nMessage-ID: \(id)\r\nDate: \(date)\r\n\r\nHello\r\n"
+    }
+
+    @Test func aServerWithOnlyAnInboxKeepsSentAndDraftsOnTheMac() async throws {
         let store = temporaryStore()
         defer { try? FileManager.default.removeItem(at: store.folder) }
-        let parkDay = "From: Alex Rivera <alex@example.com>\r\nTo: pug@example.com\r\nSubject: Park day\r\n"
-            + "Message-ID: <park@example.com>\r\nDate: Sat, 21 Nov 2026 09:00:00 +0000\r\n\r\nSee you at the park!\r\n"
-        let restored = Data(parkDay.utf8)
         let stream = ScriptedByteStream(greeting: Script.greeting(Self.capabilities), script: [
             Script.signIn("A1", capabilities: Self.capabilities),
-            .expect(#"A2 LIST "" "*""#, reply: Script.lines(#"* LIST (\Noinferiors) "/" "INBOX""#, "A2 OK LIST completed")),
+            Self.list("A2", ["INBOX"]),
             Self.status("A3", "INBOX", messages: 3, unseen: 1),
-            // Deleting from the inbox: the message is read, kept on the Mac, then deleted from the server.
-            Script.select("A4"),
-            .expect("A5 UID FETCH 11 (UID FLAGS BODY.PEEK[])", reply: Script.lines(
-                "* 1 FETCH (UID 11 FLAGS () BODY[] " + Script.literal(parkDay) + ")", "A5 OK Done")),
-            Script.ok("A6", #"UID STORE 11 +FLAGS.SILENT (\Deleted)"#),
-            Script.ok("A7", "UID EXPUNGE 11", untagged: ["* 1 EXPUNGE"]),
-            // Moving it back to the inbox uploads it, still unread.
-            .expect("A8 APPEND \"INBOX\" {\(restored.count)+}", reply: ""),
-            .expectBytes(restored.count, reply: ""),
-            .expect("", reply: "A8 OK [APPENDUID 7 101] APPEND completed\r\n"),
         ])
         let harness = IMAPHarness([stream], localStore: store)
         let service = harness.service
 
+        // Sent and Drafts are kept here; there's no Archive, Junk or Trash until one's needed.
         let folders = try await service.loadFolders()
-        #expect(folders.map(\.id) == ["INBOX", "pmail:starred", LocalFolders.sentID, LocalFolders.draftsID, LocalFolders.archiveID,
-                                      LocalFolders.spamID, LocalFolders.trashID])
-        #expect(folders.map(\.role) == [.inbox, .starred, .sent, .drafts, .archive, .spam, .trash])
-        #expect(folders.map(\.name) == ["Inbox", "Starred", "Sent", "Drafts", "Archive", "Junk", "Trash"])
+        #expect(folders.map(\.id) == ["INBOX", "pmail:starred", LocalFolders.sentID, LocalFolders.draftsID])
+        #expect(folders.map(\.role) == [.inbox, .starred, .sent, .drafts])
+        #expect(folders.map(\.name) == ["Inbox", "Starred", "Sent", "Drafts"])
 
         // Sending keeps the copy, Bcc and all, in the Sent kept here.
         let message = OutgoingMessage(from: Self.pug, to: [Self.alex], bcc: [MailAddress(email: "secret@example.net")],
@@ -64,27 +72,6 @@ struct IMAPLocalFoldersTests {
         let sentPage = try await service.listConversations(ListRequest(folderID: LocalFolders.sentID, pageSize: 50))
         #expect(sentPage.conversations.count == 1 && sentPage.totalCount == 1)
 
-        // Deleting from the inbox puts the message in the Trash kept here, unread as it was.
-        try await service.perform(.trash, on: [MessageSummary(id: IMAPMessageID.inbox(11), folderID: "INBOX")])
-        let trashPage = try await service.listConversations(ListRequest(folderID: LocalFolders.trashID, pageSize: 50))
-        let trashed = try #require(trashPage.conversations.first)
-        #expect(trashPage.totalCount == 1 && trashed.subject == "Park day" && trashed.messages.first?.isUnread == true)
-        let opened = try await service.loadConversation(id: trashed.id, hint: trashed)
-        #expect(opened.count == 1 && opened.first?.textBody?.contains("See you at the park!") == true)
-        let searched = try await service.listConversations(ListRequest(folderID: LocalFolders.trashID, query: "park", pageSize: 50))
-        #expect(searched.conversations.count == 1)
-
-        // Move to Inbox puts it back on the server and lets the Mac's copy go.
-        try await service.perform(.moveToInbox, on: trashed.messages)
-        #expect(await store.summaries(in: LocalFolders.trashID).isEmpty)
-
-        // Deleting a sent copy moves it to the Trash kept here; deleting it there removes it for good.
-        try await service.perform(.trash, on: [sentSummary])
-        #expect(await store.summaries(in: LocalFolders.sentID).isEmpty)
-        #expect(await store.summaries(in: LocalFolders.trashID).map(\.id) == [sentSummary.id])
-        try await service.perform(.trash, on: [sentSummary])
-        #expect(await store.summaries(in: LocalFolders.trashID).isEmpty)
-
         // Drafts are kept here too, each save replacing the last.
         let first = try #require(try await service.saveDraft(message, replacing: nil))
         #expect(first.folderID == LocalFolders.draftsID && first.isDraft)
@@ -98,60 +85,78 @@ struct IMAPLocalFoldersTests {
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 
-    /// Archiving and reporting spam on a server without those folders keeps the mail here; a snoozed conversation
-    /// waiting in the Archive kept here is found again without the server, and Not spam puts it back on it.
-    @Test func archiveAndSpamAreKeptOnTheMac() async throws {
+    /// Archiving, reporting spam and deleting on an iCloud server with only an inbox make its Archive, Junk and
+    /// Deleted Messages, and move the messages there. Nothing is copied to this Mac or deleted from the server.
+    @Test func archiveJunkAndDeleteMakeFoldersOnTheServer() async throws {
         let store = temporaryStore()
         defer { try? FileManager.default.removeItem(at: store.folder) }
-        let offer = "From: Deals <deals@spam.example>\r\nTo: pug@example.com\r\nSubject: You won!\r\n"
-            + "Message-ID: <prize@spam.example>\r\n\r\nClaim now.\r\n"
-        let hike = "From: Alex Rivera <alex@example.com>\r\nTo: pug@example.com\r\nSubject: Hike\r\n"
-            + "Message-ID: <hike@example.com>\r\n\r\nSaturday?\r\n"
         let stream = ScriptedByteStream(greeting: Script.greeting(Self.capabilities), script: [
             Script.signIn("A1", capabilities: Self.capabilities),
-            .expect(#"A2 LIST "" "*""#, reply: Script.lines(#"* LIST (\Noinferiors) "/" "INBOX""#, "A2 OK LIST completed")),
-            Self.status("A3", "INBOX", messages: 2, unseen: 2),
-            // Archiving message 12 keeps it here, then deletes it from the server.
-            Script.select("A4"),
-            .expect("A5 UID FETCH 12 (UID FLAGS BODY.PEEK[])", reply: Script.lines(
-                #"* 1 FETCH (UID 12 FLAGS (\Seen) BODY[] "# + Script.literal(hike) + ")", "A5 OK Done")),
-            Script.ok("A6", #"UID STORE 12 +FLAGS.SILENT (\Deleted)"#),
-            Script.ok("A7", "UID EXPUNGE 12", untagged: ["* 1 EXPUNGE"]),
-            // Reporting message 13 as spam keeps it in the Junk here.
-            .expect("A8 UID FETCH 13 (UID FLAGS BODY.PEEK[])", reply: Script.lines(
-                "* 1 FETCH (UID 13 FLAGS () BODY[] " + Script.literal(offer) + ")", "A8 OK Done")),
-            Script.ok("A9", #"UID STORE 13 +FLAGS.SILENT (\Deleted)"#),
-            Script.ok("A10", "UID EXPUNGE 13", untagged: ["* 1 EXPUNGE"]),
-            // Not spam uploads it to the inbox, still unread.
-            .expect("A11 APPEND \"INBOX\" {\(offer.utf8.count)+}", reply: ""),
-            .expectBytes(offer.utf8.count, reply: ""),
-            .expect("", reply: "A11 OK [APPENDUID 7 102] APPEND completed\r\n"),
+            Self.list("A2", ["INBOX"]),
+            Self.status("A3", "INBOX", messages: 3, unseen: 3),
+            // Archive: the list is read again in case another program made one, then the server makes it.
+            Self.list("A4", ["INBOX"]),
+            Script.ok("A5", #"CREATE "Archive""#),
+            Script.ok("A6", #"SUBSCRIBE "Archive""#),
+            Self.list("A7", ["INBOX", "Archive"]),
+            Script.select("A8"),
+            Script.ok("A9", #"UID COPY 12 "Archive""#),
+            Script.ok("A10", #"UID STORE 12 +FLAGS.SILENT (\Deleted)"#),
+            Script.ok("A11", "UID EXPUNGE 12", untagged: ["* 1 EXPUNGE"]),
+            // Junk.
+            Self.list("A12", ["INBOX", "Archive"]),
+            Script.ok("A13", #"CREATE "Junk""#),
+            Script.ok("A14", #"SUBSCRIBE "Junk""#),
+            Self.list("A15", ["INBOX", "Archive", "Junk"]),
+            Script.ok("A16", #"UID COPY 13 "Junk""#),
+            Script.ok("A17", #"UID STORE 13 +FLAGS.SILENT (\Deleted)"#),
+            Script.ok("A18", "UID EXPUNGE 13", untagged: ["* 1 EXPUNGE"]),
+            // Delete: iCloud's name for the Trash.
+            Self.list("A19", ["INBOX", "Archive", "Junk"]),
+            Script.ok("A20", #"CREATE "Deleted Messages""#),
+            Script.ok("A21", #"SUBSCRIBE "Deleted Messages""#),
+            Self.list("A22", ["INBOX", "Archive", "Junk", "Deleted Messages"]),
+            Script.ok("A23", #"UID COPY 14 "Deleted Messages""#),
+            Script.ok("A24", #"UID STORE 14 +FLAGS.SILENT (\Deleted)"#),
+            Script.ok("A25", "UID EXPUNGE 14", untagged: ["* 1 EXPUNGE"]),
         ])
-        let harness = IMAPHarness([stream], localStore: store)
-        let service = harness.service
+        let service = IMAPHarness([stream], kind: .icloud, localStore: store).service
         _ = try await service.loadFolders()
-
         try await service.perform(.archive, on: [MessageSummary(id: IMAPMessageID.inbox(12), folderID: "INBOX")])
-        let archived = await store.summaries(in: LocalFolders.archiveID)
-        #expect(archived.map(\.subject) == ["Hike"] && archived.first?.isUnread == false)
-        // Found by its Message-ID with no server command, the way a snooze finds its conversation.
-        let found = try await service.findMessages(withMessageIDs: ["<hike@example.com>"])
-        #expect(found.map(\.id) == archived.map(\.id))
-
         try await service.perform(.markSpam, on: [MessageSummary(id: IMAPMessageID.inbox(13), folderID: "INBOX")])
-        let junk = await store.summaries(in: LocalFolders.spamID)
-        #expect(junk.map(\.subject) == ["You won!"])
-        try await service.perform(.notSpam, on: junk)
-        #expect(await store.summaries(in: LocalFolders.spamID).isEmpty)
+        try await service.perform(.trash, on: [MessageSummary(id: IMAPMessageID.inbox(14), folderID: "INBOX")])
+        #expect(await store.allSummaries().isEmpty, "nothing kept on this Mac")
         #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
+
+    /// A server that won't make an Archive leaves the message where it was, and says why.
+    @Test func aServerThatWontMakeAFolderKeepsTheMessage() async throws {
+        let store = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: store.folder) }
+        let stream = ScriptedByteStream(greeting: Script.greeting(Self.capabilities), script: [
+            Script.signIn("A1", capabilities: Self.capabilities),
+            Self.list("A2", ["INBOX"]),
+            Self.list("A3", ["INBOX"]),
+            .expect(#"A4 CREATE "Archive""#, reply: "A4 NO [CANNOT] Folders can't be made here\r\n"),
+        ])
+        let service = IMAPHarness([stream], localStore: store).service
+        await #expect {
+            try await service.perform(.archive, on: [MessageSummary(id: IMAPMessageID.inbox(12), folderID: "INBOX")])
+        } throws: { error in
+            guard case let PMailError.notSupported(reason) = error else { return false }
+            return reason.contains("Archive") && reason.contains("nothing was moved")
+        }
+        #expect(await store.allSummaries().isEmpty)
+        #expect(stream.mismatches.isEmpty && stream.isFinished, "no STORE or EXPUNGE")
     }
 
     @Test func keptFoldersStepAsideWhenTheServerHasItsOwn() async throws {
         let store = temporaryStore()
         defer { try? FileManager.default.removeItem(at: store.folder) }
-        // Kept from before the server had a Sent folder.
+        // Kept from before the server had a Sent folder, and archived by an earlier PMail.
         try await store.add(raw: Data("From: pug@example.com\r\nSubject: Old news\r\n\r\nHi\r\n".utf8),
                             folderID: LocalFolders.sentID, isUnread: false)
+        try await store.add(raw: Data(Self.message("Hike", id: "<hike@example.com>").utf8), folderID: LocalFolders.archiveID)
         let stream = ScriptedByteStream(greeting: Script.greeting(), script: [
             Script.signIn("A1"),
             Script.list("A2"),
@@ -168,7 +173,53 @@ struct IMAPLocalFoldersTests {
         #expect(folders.filter { $0.role == .trash }.map(\.id) == ["Deleted Messages"])
         let kept = try #require(folders.first { $0.id == LocalFolders.sentID })
         #expect(kept.name == "Sent on this Mac" && kept.role == nil && kept.totalCount == 1)
-        #expect(!folders.contains { [LocalFolders.trashID, LocalFolders.draftsID, LocalFolders.archiveID, LocalFolders.spamID].contains($0.id) })
+        let archived = try #require(folders.first { $0.id == LocalFolders.archiveID })
+        #expect(archived.name == "Archive on this Mac" && archived.role == nil && archived.totalCount == 1)
+        #expect(!folders.contains { [LocalFolders.trashID, LocalFolders.draftsID, LocalFolders.spamID].contains($0.id) })
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
+
+    /// Mail an earlier PMail kept on this Mac goes back: archived mail to the server's Archive (one already there just
+    /// lets the copy here go), deleted mail to a Deleted Messages made for it, and sent copies to the server's Sent.
+    /// Drafts stay.
+    @Test func mailKeptOnTheMacGoesBackToTheServer() async throws {
+        let store = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: store.folder) }
+        let hike = Self.message("Hike", id: "<hike@example.com>")
+        let park = Self.message("Park day", id: "<park@example.com>", date: "Fri, 20 Nov 2026 09:00:00 +0000")
+        let offer = Self.message("You won!", id: "<prize@spam.example>")
+        let old = Self.message("Old news", id: "<old@example.com>")
+        try await store.add(raw: Data(hike.utf8), folderID: LocalFolders.archiveID, isUnread: false)
+        try await store.add(raw: Data(park.utf8), folderID: LocalFolders.archiveID, isUnread: false)
+        try await store.add(raw: Data(offer.utf8), folderID: LocalFolders.trashID, isUnread: true)
+        try await store.add(raw: Data(old.utf8), folderID: LocalFolders.sentID, isUnread: false)
+        try await store.add(raw: Data(Self.message("Draft", id: "<draft@example.com>").utf8), folderID: LocalFolders.draftsID, isUnread: false)
+        let server = ["INBOX", "Sent Messages", "Drafts", "Junk", "Archive"]
+        let stream = ScriptedByteStream(greeting: Script.greeting(Self.capabilities), script: [
+            Script.signIn("A1", capabilities: Self.capabilities),
+            Self.list("A2", server),
+            Script.select("A3", "Archive", readOnly: true),
+            .expect(#"A4 UID SEARCH HEADER Message-ID "<hike@example.com>""#, reply: "* SEARCH\r\nA4 OK Done\r\n"),
+        ] + Self.append("A5", "Archive", flags: #"\Seen"#, hike) + [
+            .expect(#"A6 UID SEARCH HEADER Message-ID "<park@example.com>""#, reply: "* SEARCH 31\r\nA6 OK Done\r\n"),
+            Self.list("A7", server),
+            Script.ok("A8", #"CREATE "Deleted Messages""#),
+            Script.ok("A9", #"SUBSCRIBE "Deleted Messages""#),
+            Self.list("A10", server + ["Deleted Messages"]),
+            Script.select("A11", "Deleted Messages", readOnly: true),
+            .expect(#"A12 UID SEARCH HEADER Message-ID "<prize@spam.example>""#, reply: "* SEARCH\r\nA12 OK Done\r\n"),
+        ] + Self.append("A13", "Deleted Messages", flags: nil, offer) + [
+            Self.list("A14", server + ["Deleted Messages"]),
+            Script.select("A15", "Sent Messages", readOnly: true),
+            .expect(#"A16 UID SEARCH HEADER Message-ID "<old@example.com>""#, reply: "* SEARCH\r\nA16 OK Done\r\n"),
+        ] + Self.append("A17", "Sent Messages", flags: #"\Seen"#, old))
+        let service = IMAPHarness([stream], kind: .icloud, localStore: store).service
+        #expect(try await service.putKeptMailBack() == 3)
+        for folder in [LocalFolders.archiveID, LocalFolders.trashID, LocalFolders.sentID] {
+            #expect(await store.summaries(in: folder).isEmpty, "\(folder) is back on the server")
+        }
+        #expect(await store.summaries(in: LocalFolders.draftsID).count == 1, "drafts stay")
+        #expect(try await service.putKeptMailBack() == 0, "nothing left, and nothing asked")
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 }

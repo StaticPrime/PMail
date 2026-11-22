@@ -1,8 +1,9 @@
 import Foundation
 
-/// Sent, Drafts, Archive, Junk and Trash kept on this Mac, for an IMAP account whose server has no folder for them (an
-/// iCloud account that has only ever had an inbox, say). The messages live in a `LocalMailStore`. The account's service lists, opens
-/// and changes them like its own, and uploads one to the server when it's moved to a server folder.
+/// Sent and Drafts kept on this Mac, for an IMAP account whose server has no folder for them (an iCloud account that
+/// has only ever had an inbox, say), and the Archive, Junk and Trash an earlier PMail kept here for such a server, until
+/// their mail is back on the server. The messages live in a `LocalMailStore`. The account's service lists, opens and
+/// changes them like its own, and uploads one to the server when it's moved to a server folder.
 public struct LocalFolders: Sendable {
     public static let sentID = "pmail:sent"
     public static let draftsID = "pmail:drafts"
@@ -27,14 +28,19 @@ public struct LocalFolders: Sendable {
         all.contains { $0.id == folderID }
     }
 
-    /// The folders to show beside the server's: one for each of Sent, Drafts and Trash the server has no folder for.
-    /// Where the server has its own, the one kept here still shows while it holds messages, as "Sent on this Mac" and
-    /// so on, so nothing kept here is hidden.
+    /// The role a folder kept on this Mac stands in for, or nil for any other folder.
+    public static func role(of folderID: String?) -> FolderRole? {
+        all.first { $0.id == folderID }?.role
+    }
+
+    /// The folders to show beside the server's: Sent and Drafts where the server has no folder for them. Any other
+    /// folder kept here shows while it holds messages, as "Sent on this Mac", "Archive on this Mac" and so on, so
+    /// nothing kept here is hidden.
     func folders(besides serverRoles: Set<FolderRole>) async -> [MailFolder] {
         var folders: [MailFolder] = []
         for kept in Self.all {
             let counts = await store.counts(in: kept.id)
-            if !serverRoles.contains(kept.role) {
+            if [.sent, .drafts].contains(kept.role), !serverRoles.contains(kept.role) {
                 folders.append(MailFolder(id: kept.id, name: kept.name, role: kept.role, unreadCount: counts.unread,
                                           totalCount: counts.total))
             } else if counts.total > 0 {

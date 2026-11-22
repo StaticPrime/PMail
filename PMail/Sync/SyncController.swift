@@ -154,11 +154,20 @@ final class SyncController {
                 notifier.notify(newMail: fresh, in: session.account)
             }
             if !sorted.announce.isEmpty { notifier.notify(newMail: sorted.announce, in: session.account) }
+            // Mail an earlier PMail kept on this Mac goes back to the server, on its own.
+            Task { await putKeptMailBack(of: session) }
         } catch PMailError.notSupported {
             unsupported.insert(id)
         } catch {
             // A failed check is tried again next time; the window reports its own errors.
         }
+    }
+
+    /// Puts mail an earlier PMail kept on this Mac (rather than on the server) back on the account's server, and shows
+    /// the folders as they are then. A failure is tried again on a later check.
+    func putKeptMailBack(of session: AccountSession) async {
+        guard let count = try? await session.services.mail.putKeptMailBack(), count > 0 else { return }
+        if session.isActivated { session.mail.serverChanged() }
     }
 
     /// Sends an account's calendar and contact changes made offline and gets its latest calendars and contacts, beside

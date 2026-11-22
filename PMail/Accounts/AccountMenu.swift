@@ -166,6 +166,19 @@ struct AccountSettingsSections: View {
                 if let calendar = account.calendarServer { LabeledContent("Calendar", value: calendar.host ?? calendar.absoluteString) }
                 if let contacts = account.contactsServer { LabeledContent("Contacts", value: contacts.host ?? contacts.absoluteString) }
             }
+            if incoming.mailProtocol == .pop3 {
+                Section {
+                    // Never is kept as no choice at all, so picking it back doesn't count as a change of server.
+                    Picker("Remove messages from the server", selection: Binding(
+                        get: { account.incoming?.removeFromServer ?? .never },
+                        set: { account.incoming?.removeFromServer = $0 == .never ? nil : $0 })) {
+                        ForEach(RemoveFromServer.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                    }
+                } footer: {
+                    Text("PMail keeps everything it downloads. A message removed from the server stays in PMail, but other devices can’t download it anymore.")
+                        .font(.pm(11.5)).foregroundStyle(.secondary)
+                }
+            }
         }
         Section {
             Button("Sign In Again…") {

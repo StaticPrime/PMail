@@ -285,13 +285,35 @@ import Testing
             IMAPScript.select("A2"),
             IMAPScript.ok("A3", #"UID COPY 4:5 "Archive""#),
             IMAPScript.ok("A4", #"UID STORE 4:5 +FLAGS.SILENT (\Deleted)"#),
-            IMAPScript.ok("A5", "EXPUNGE", untagged: ["* 2 EXPUNGE", "* 2 EXPUNGE"]),
+            .expect("A5 UID SEARCH DELETED", reply: "* SEARCH 4 5\r\nA5 OK Done\r\n"),
+            IMAPScript.ok("A6", "EXPUNGE", untagged: ["* 2 EXPUNGE", "* 2 EXPUNGE"]),
         ])
         let client = try await connectedClient(stream)
         try await client.signIn(.password(username: "pug@example.com", password: "secret"))
         try await client.select("INBOX")
         try await client.uidMove([5, 4], to: "Archive")
         #expect(await client.selectedMailbox?.exists == 1)
+        #expect(stream.mismatches.isEmpty && stream.isFinished)
+    }
+
+    /// Without UIDPLUS, EXPUNGE removes every message marked \Deleted, so ones another program marked and left keep
+    /// their mark through it: they lose it first and get it back after.
+    @Test func expungingWithoutUIDPLUSSparesOtherProgramsDeletedMail() async throws {
+        let capabilities = "IMAP4rev1 AUTH=PLAIN SASL-IR"
+        let stream = ScriptedByteStream(greeting: IMAPScript.greeting(capabilities), script: [
+            IMAPScript.signIn("A1", capabilities: capabilities),
+            IMAPScript.select("A2", exists: 4),
+            IMAPScript.ok("A3", #"UID STORE 5 +FLAGS.SILENT (\Deleted)"#),
+            .expect("A4 UID SEARCH DELETED", reply: "* SEARCH 2 5 9\r\nA4 OK Done\r\n"),
+            IMAPScript.ok("A5", #"UID STORE 2,9 -FLAGS.SILENT (\Deleted)"#),
+            IMAPScript.ok("A6", "EXPUNGE", untagged: ["* 3 EXPUNGE"]),
+            IMAPScript.ok("A7", #"UID STORE 2,9 +FLAGS.SILENT (\Deleted)"#),
+        ])
+        let client = try await connectedClient(stream)
+        try await client.signIn(.password(username: "pug@example.com", password: "secret"))
+        try await client.select("INBOX")
+        try await client.deleteMessages([5])
+        #expect(await client.selectedMailbox?.exists == 3)
         #expect(stream.mismatches.isEmpty && stream.isFinished)
     }
 

@@ -211,7 +211,10 @@ final class AccountsController {
             var existing = accounts[index]
             try secrets.setSecret(secret, for: existing.id)
             existing.name = account.name.isEmpty ? existing.name : account.name
-            existing.incoming = account.incoming ?? existing.incoming
+            var incoming = account.incoming ?? existing.incoming
+            // The choice about removing mail from a POP server stays too.
+            if incoming?.mailProtocol == .pop3, incoming?.removeFromServer == nil { incoming?.removeFromServer = existing.incoming?.removeFromServer }
+            existing.incoming = incoming
             existing.outgoing = account.outgoing ?? existing.outgoing
             existing.pictureURL = account.pictureURL ?? existing.pictureURL
             accounts[index] = existing

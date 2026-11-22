@@ -438,14 +438,6 @@ extension IMAPMailService {
 
     // MARK: Messages kept on this Mac
 
-    /// Gives a message just kept on this Mac the labels it had on the server: its label keywords and those the book
-    /// keeps for it.
-    func keepLabels(_ flags: [String]?, of summary: MessageSummary, in store: LocalMailStore) async throws {
-        guard let labelBook else { return }
-        let labels = await labelBook.labels(forKeywords: Self.keywordLabelIDs(flags), messageID: summary.messageIDHeader)
-        if !labels.isEmpty { try await store.setLabelIDs(labels, for: [summary.id]) }
-    }
-
     /// The label keywords to upload a message kept on this Mac with, when the server takes keywords; otherwise the book
     /// keeps its labels, by Message-ID, so they stay with it.
     func labelFlags(forUploading summary: MessageSummary) async throws -> [String] {
