@@ -59,7 +59,8 @@ struct LiveServiceFactory: ServiceFactory {
                                    contacts: GoogleContactsService(tokens: tokenProvider))
         }
         return AccountServices(mail: MicrosoftMailService(email: account.email, tokens: tokenProvider),
-                               calendar: calendar(MicrosoftCalendarService(tokens: tokenProvider),
+                               calendar: calendar(MicrosoftCalendarService(tokens: tokenProvider,
+                                                                           declinedFile: storage(for: account).appendingPathComponent(DeclinedMeetings.fileName)),
                                                   tasks: MicrosoftTasksService(tokens: tokenProvider), for: account),
                                contacts: MicrosoftContactsService(tokens: tokenProvider))
     }

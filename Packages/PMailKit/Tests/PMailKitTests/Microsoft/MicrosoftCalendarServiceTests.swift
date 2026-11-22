@@ -6,8 +6,8 @@ import Testing
     static let api = "/v1.0/me"
     static let utcPreference = "outlook.timezone=\"UTC\""
 
-    private func service(_ transport: StubTransport, pauses: WebTestPauses = WebTestPauses()) -> MicrosoftCalendarService {
-        MicrosoftCalendarService(client: .test(transport, pauses: pauses))
+    private func service(_ transport: StubTransport, pauses: WebTestPauses = WebTestPauses(), declinedFile: URL? = nil) -> MicrosoftCalendarService {
+        MicrosoftCalendarService(client: .test(transport, pauses: pauses), declinedFile: declinedFile)
     }
 
     // MARK: Calendars
@@ -280,6 +280,66 @@ import Testing
         }
     }
 
+    /// Deleting a meeting you organized calls it off, so everyone invited gets a cancellation; deleting one you were
+    /// invited to just takes it off your calendar.
+    @Test func deletingAMeetingYouOrganizedCallsItOff() async throws {
+        let transport = StubTransport()
+        transport.on("POST", "\(Self.api)/events/AAMkMine=/cancel") { _ in .status(202) }
+        transport.on("DELETE", "\(Self.api)/events/AAMkTheirs=") { _ in .status(204) }
+        let calendar = service(transport)
+        let guests = [Attendee(address: MailAddress(email: "alex@contoso.com"))]
+        try await calendar.delete(CalendarEvent(id: "AAMkMine=", calendarID: "AAMkCal1=", start: Date(), end: Date(), attendees: guests),
+                                  scope: .thisEvent)
+        try await calendar.delete(CalendarEvent(id: "AAMkTheirs=", calendarID: "AAMkCal1=", start: Date(), end: Date(), attendees: guests,
+                                                myResponse: .accepted), scope: .thisEvent)
+        #expect(transport.requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" }
+                == ["POST \(Self.api)/events/AAMkMine=/cancel", "DELETE \(Self.api)/events/AAMkTheirs="])
+        #expect(transport.requests.first?.bodyJSONValue == ["comment": ""])
+    }
+
+    /// Outlook takes a declined meeting off the calendar, so it's kept and still shown, declined, until the calendar has
+    /// it again. Once it's gone from there, the answer can't be changed.
+    @Test func declinedMeetingsStayOnTheCalendar() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("PMailKitTests-declined-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent(DeclinedMeetings.fileName)
+        let transport = StubTransport()
+        transport.on("POST", "\(Self.api)/events/AAMkInvite=/decline") { _ in .status(202) }
+        transport.on("POST", "\(Self.api)/events/AAMkInvite=/accept") { _ in
+            .json(#"{"error": {"code": "ErrorItemNotFound", "message": "The specified object was not found in the store."}}"#, status: 404)
+        }
+        let listsItAgain = Switch()
+        transport.on("GET", "\(Self.api)/calendars/AAMkCal1=/calendarView") { _ in
+            guard listsItAgain.isOn else { return .json(#"{"value": []}"#) }
+            return .json(#"""
+            {"value": [{"id": "AAMkResent=", "subject": "Budget review", "iCalUId": "uid-budget",
+                        "start": {"dateTime": "2026-11-25T15:00:00.0000000", "timeZone": "UTC"},
+                        "end": {"dateTime": "2026-11-25T16:00:00.0000000", "timeZone": "UTC"},
+                        "responseStatus": {"response": "notResponded"}}]}
+            """#)
+        }
+        let start = WebFixtures.date("2026-11-25T15:00:00Z")
+        let invite = CalendarEvent(id: "AAMkInvite=", calendarID: "AAMkCal1=", title: "Budget review", start: start,
+                                   end: start.addingTimeInterval(3_600), myResponse: .needsAction, uid: "uid-budget")
+        try await service(transport, declinedFile: file).respond(to: invite, with: .declined)
+
+        // After relaunching: Outlook has taken it off the calendar, and PMail still shows it, declined.
+        let calendar = service(transport, declinedFile: file)
+        let week = (WebFixtures.date("2026-11-22T00:00:00Z"), WebFixtures.date("2026-11-29T00:00:00Z"))
+        let shown = try await calendar.loadEvents(in: ["AAMkCal1="], from: week.0, to: week.1)
+        #expect(shown.map(\.id) == ["AAMkInvite="] && shown.first?.myResponse == .declined && shown.first?.title == "Budget review")
+        #expect(try await calendar.loadEvents(in: ["AAMkCal2="], from: week.0, to: week.1).isEmpty, "only on its own calendar")
+        await #expect(throws: PMailError.self) { try await calendar.respond(to: invite, with: .accepted) }
+        #expect(try await calendar.loadEvents(in: ["AAMkCal1="], from: week.0, to: week.1).first?.myResponse == .declined, "still declined")
+
+        // The organizer sends it again: the calendar's own copy shows, waiting for an answer, and the kept one goes.
+        listsItAgain.isOn = true
+        let resent = try await calendar.loadEvents(in: ["AAMkCal1="], from: week.0, to: week.1)
+        #expect(resent.map(\.id) == ["AAMkResent="] && resent.first?.myResponse == .needsAction)
+        listsItAgain.isOn = false
+        #expect(try await calendar.loadEvents(in: ["AAMkCal1="], from: week.0, to: week.1).isEmpty)
+    }
+
     @Test func throttledCalendarRequestsAreRetried() async throws {
         let transport = StubTransport()
         let pauses = WebTestPauses()
@@ -293,5 +353,15 @@ import Testing
         }
         let calendars = try await service(transport, pauses: pauses).loadCalendars()
         #expect(calendars.map(\.id) == ["AAMkCal1="] && pauses.waits == [4])
+    }
+}
+
+/// A switch a test flips while a stub reads it.
+private final class Switch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isOn: Bool {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
     }
 }

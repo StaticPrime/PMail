@@ -28,11 +28,84 @@ extension CalendarEvent {
     }
 }
 
-/// An event's title, after its kind's symbol (out of office, focus time) where it has one. Tasks draw their own
-/// check circle, which can be clicked.
+/// An event's title, after its kind's symbol (out of office, focus time) where it has one, and with "(Maybe)" after
+/// it when that's the answer to the invitation. Tasks draw their own check circle, which can be clicked.
 func eventTitle(_ event: CalendarEvent) -> Text {
-    guard event.type == .outOfOffice || event.type == .focusTime else { return Text(verbatim: event.shownTitle) }
-    return Text("\(Image(systemName: event.type.symbol)) \(event.shownTitle)")
+    let maybe = AnswerLook(event) == .maybe ? Text(verbatim: " (Maybe)") : Text(verbatim: "")
+    guard event.type == .outOfOffice || event.type == .focusTime else { return Text(verbatim: event.shownTitle) + maybe }
+    return Text("\(Image(systemName: event.type.symbol)) \(event.shownTitle)") + maybe
+}
+
+/// An event's title as `eventTitle` words it, as plain text (for checks and spoken labels).
+func eventTitleString(_ event: CalendarEvent) -> String {
+    event.shownTitle + (AnswerLook(event) == .maybe ? " (Maybe)" : "")
+}
+
+/// How an event shows on the calendar for the answer you gave its invitation: solid for Yes (and for your own
+/// events), outlined while it waits for an answer, see-through with "(Maybe)" after the title for Maybe, and
+/// see-through and struck through for No.
+enum AnswerLook: Equatable {
+    case solid
+    case pending
+    case maybe
+    case declined
+
+    init(_ event: CalendarEvent) {
+        switch event.myResponse {
+        case .needsAction?: self = .pending
+        case .tentative?: self = .maybe
+        case .declined?: self = .declined
+        case .accepted?, nil: self = .solid
+        }
+    }
+
+    /// Whether the event's color shows only faintly (Maybe and No).
+    var isFaint: Bool { self == .maybe || self == .declined }
+    /// How strongly the event's color fills it: none while it waits for an answer, faintly for Maybe and No.
+    var fillOpacity: Double {
+        switch self {
+        case .solid: 1
+        case .pending: 0
+        case .maybe, .declined: 0.32
+        }
+    }
+    var isStruckThrough: Bool { self == .declined }
+
+    /// The color for the event's words on its fill: white on a solid color, the event's color on an outline, and the
+    /// usual text colors on a faint one (dimmer for No).
+    func textColor(on color: Color) -> Color {
+        switch self {
+        case .solid: .white
+        case .pending: color
+        case .maybe: Theme.textPrimary
+        case .declined: Theme.textSecondary
+        }
+    }
+
+    /// What VoiceOver adds after the event's name.
+    var spoken: String {
+        switch self {
+        case .solid: ""
+        case .pending: ", not answered yet"
+        case .maybe: ", maybe"
+        case .declined: ", declined"
+        }
+    }
+}
+
+/// An event's color as a dot in lists: filled for Yes, a ring while it waits for an answer, faint for Maybe and No.
+struct AnswerDot: View {
+    let look: AnswerLook
+    let color: Color
+    let size: CGFloat
+
+    var body: some View {
+        if look == .pending {
+            Circle().strokeBorder(color, lineWidth: 1.5).frame(width: size, height: size)
+        } else {
+            Circle().fill(color.opacity(look.isFaint ? 0.4 : 1)).frame(width: size, height: size)
+        }
+    }
 }
 
 /// One of the kinds of item, as a pill to pick in the editor.

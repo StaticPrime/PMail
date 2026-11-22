@@ -165,6 +165,13 @@ struct EventDetailsView: View {
             }
             if let response = event.myResponse, !(event.organizer?.isSameMailbox(as: model.account.email) ?? false) {
                 Divider().overlay(Theme.divider).padding(.vertical, 8)
+                // The answer goes to whoever sent the invitation.
+                if response == .needsAction, let organizer = event.organizer {
+                    Text("\(organizer.name ?? organizer.email) invited you. Your answer goes to them.")
+                        .font(.pm(12)).foregroundStyle(Theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 6)
+                }
                 HStack(spacing: 8) {
                     Text("Going?").font(.pm(13, .medium)).foregroundStyle(Theme.textPrimary)
                     Spacer()

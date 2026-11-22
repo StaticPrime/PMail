@@ -332,6 +332,17 @@ enum SelfTest {
             calendar.toggle(calendar.calendars.first { $0.id == "family" }!)
             check(!calendar.shownEvents().contains { $0.calendarID == "family" }, "turning a calendar off hides its events")
             calendar.toggle(calendar.calendars.first { $0.id == "family" }!)
+            // Invitations show their answers: waiting, Maybe and No; your own events are solid.
+            let looks = ["Vendor demo", "Product sync", "Budget review", "Design review"].map { title in
+                calendar.shownEvents().first { $0.title == title }.map(AnswerLook.init)
+            }
+            check(looks == [.pending, .maybe, .declined, .solid], "invitations show as waiting, Maybe and No", "\(looks)")
+            check(calendar.shownEvents().first { $0.title == "Product sync" }.map { eventTitleString($0) } == "Product sync (Maybe)",
+                  "Maybe shows after the title")
+            if let demo = calendar.shownEvents().first(where: { $0.title == "Vendor demo" }) {
+                calendar.respond(to: demo, with: .accepted)
+                check(calendar.shownEvents().first { $0.title == "Vendor demo" }.map(AnswerLook.init) == .solid, "answering Yes makes it solid")
+            }
             guard var draft = calendar.newDraft() else { return check(false, "a new event can be started") }
             draft.title = "Self-test sync"
             draft.addsNativeConference = true

@@ -438,38 +438,41 @@ private struct EventBlock: View {
 
     var body: some View {
         let color = model.color(for: event)
-        let pending = event.myResponse == .needsAction
-        let declined = event.myResponse == .declined
+        let look = AnswerLook(event)
         Button { model.selectedEventID = event.id } label: {
             VStack(alignment: .leading, spacing: 1) {
                 if height < 34 {
                     (eventTitle(event).fontWeight(.semibold) + Text(", " + model.formatting.shortTime(event.start)))
                         .font(.pm(11))
+                        .strikethrough(look.isStruckThrough)
                         .lineLimit(1)
                 } else {
                     eventTitle(event).font(.pm(11.5, .semibold)).lineLimit(height < 60 ? 1 : 2)
-                        .strikethrough(declined)
+                        .strikethrough(look.isStruckThrough)
                     Text(model.formatting.eventTime(start: event.start, end: event.end, isAllDay: false))
                         .font(.pm(10.5))
+                        .strikethrough(look.isStruckThrough)
                         .lineLimit(1)
                     if height > 70, let location = event.location, !location.isEmpty {
-                        Text(location).font(.pm(10.5)).lineLimit(1)
+                        Text(location).font(.pm(10.5)).strikethrough(look.isStruckThrough).lineLimit(1)
                     }
                 }
             }
-            .foregroundStyle(pending ? color : .white)
+            .foregroundStyle(look.textColor(on: color))
             .padding(.horizontal, 6)
             .padding(.vertical, height < 34 ? 2 : 4)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(RoundedRectangle(cornerRadius: 6).fill(pending ? Theme.surface : color.opacity(declined ? 0.45 : 1)))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(pending ? color : Theme.surface, lineWidth: pending ? 1.5 : 0.75))
+            // A faint color sits on the page's own, so the hour lines don't run through the words.
+            .background(RoundedRectangle(cornerRadius: 6).fill(color.opacity(look.fillOpacity)))
+            .background(RoundedRectangle(cornerRadius: 6).fill(Theme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(look == .pending ? color : Theme.surface, lineWidth: look == .pending ? 1.5 : 0.75))
             .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
         .popover(isPresented: model.detailsBinding(for: event), arrowEdge: .trailing) {
             EventDetailsView(app: app, model: model, event: event)
         }
-        .accessibilityLabel("\(event.type == .event ? "" : event.type.name + ": ")\(event.title), \(model.formatting.eventTime(start: event.start, end: event.end, isAllDay: false))")
+        .accessibilityLabel("\(event.type == .event ? "" : event.type.name + ": ")\(event.title), \(model.formatting.eventTime(start: event.start, end: event.end, isAllDay: false))\(AnswerLook(event).spoken)")
     }
 }
 
@@ -547,6 +550,8 @@ struct AllDayBar: View {
     let event: CalendarEvent
 
     var body: some View {
+        let color = model.color(for: event)
+        let look = event.isTask ? AnswerLook.solid : AnswerLook(event)
         HStack(spacing: 0) {
             if event.isTask {
                 TaskCheck(model: model, task: event, size: 12)
@@ -555,8 +560,8 @@ struct AllDayBar: View {
             Button { model.selectedEventID = event.id } label: {
                 eventTitle(event)
                     .font(.pm(11.5, .medium))
-                    .strikethrough(event.isTask && event.isCompleted)
-                    .foregroundStyle(.white)
+                    .strikethrough((event.isTask && event.isCompleted) || look.isStruckThrough)
+                    .foregroundStyle(look.textColor(on: color))
                     .lineLimit(1)
                     .padding(.leading, event.isTask ? 5 : 8)
                     .padding(.trailing, 8)
@@ -565,7 +570,9 @@ struct AllDayBar: View {
             }
             .buttonStyle(.plain)
         }
-        .background(RoundedRectangle(cornerRadius: 4).fill(model.color(for: event).opacity(event.isTask && event.isCompleted ? 0.55 : 1)))
+        .background(RoundedRectangle(cornerRadius: 4).fill(color.opacity(event.isTask && event.isCompleted ? 0.55 : look.fillOpacity)))
+        .background(RoundedRectangle(cornerRadius: 4).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(look == .pending ? color : .clear, lineWidth: 1.5))
         .popover(isPresented: model.detailsBinding(for: event), arrowEdge: .bottom) {
             EventDetailsView(app: app, model: model, event: event)
         }
@@ -693,10 +700,15 @@ private struct MonthEventChip: View {
             AllDayBar(app: app, model: model, event: event).frame(height: 20)
         } else {
             Button { model.selectedEventID = event.id } label: {
+                let look = AnswerLook(event)
                 HStack(spacing: 5) {
-                    Circle().fill(model.color(for: event)).frame(width: 8, height: 8)
+                    AnswerDot(look: look, color: model.color(for: event), size: 8)
                     Text(model.formatting.shortTime(event.start)).font(.pm(11.5)).foregroundStyle(Theme.textSecondary)
-                    eventTitle(event).font(.pm(11.5, .medium)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                        .strikethrough(look.isStruckThrough)
+                    eventTitle(event).font(.pm(11.5, .medium))
+                        .foregroundStyle(look == .declined ? Theme.textSecondary : Theme.textPrimary)
+                        .strikethrough(look.isStruckThrough)
+                        .lineLimit(1)
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 6)
@@ -796,17 +808,19 @@ private struct ScheduleRow: View {
                     .padding(.leading, 10)
             }
             Button { model.selectedEventID = event.id } label: {
+                let look = event.isTask ? AnswerLook.solid : AnswerLook(event)
                 HStack(spacing: 14) {
                     if !event.isTask {
-                        Circle().fill(model.color(for: event)).frame(width: 11, height: 11)
+                        AnswerDot(look: look, color: model.color(for: event), size: 11)
                     }
                     Text(event.isTask ? "Task" : event.isAllDay ? "All day" : model.formatting.eventTime(start: event.start, end: event.end, isAllDay: false))
                         .font(.pm(13))
                         .foregroundStyle(Theme.textSecondary)
+                        .strikethrough(look.isStruckThrough)
                         .frame(width: 170, alignment: .leading)
                     eventTitle(event).font(.pm(13.5, .medium))
-                        .foregroundStyle(event.isTask && event.isCompleted ? Theme.textSecondary : Theme.textPrimary)
-                        .strikethrough(event.isTask && event.isCompleted)
+                        .foregroundStyle((event.isTask && event.isCompleted) || look == .declined ? Theme.textSecondary : Theme.textPrimary)
+                        .strikethrough((event.isTask && event.isCompleted) || look.isStruckThrough)
                         .lineLimit(1)
                     if let conference = event.conference {
                         Image(systemName: conference.kind == .faceTime ? "video.fill" : "video").font(.system(size: 11)).foregroundStyle(Theme.textTertiary)

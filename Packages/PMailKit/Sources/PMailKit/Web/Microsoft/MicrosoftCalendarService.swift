@@ -1,8 +1,13 @@
 import Foundation
 
 /// A Microsoft account's calendars, through Microsoft Graph. New events can get a Microsoft Teams meeting of their own.
+///
+/// Deleting a meeting you organized calls it off, which sends everyone invited a cancellation. Outlook takes a meeting
+/// you decline off your calendar, so PMail keeps declined meetings (`DeclinedMeetings`) and shows them as declined.
 public actor MicrosoftCalendarService: CalendarService {
     let client: WebClient
+    /// Meetings declined from PMail, which Outlook has taken off the calendar.
+    let declined: DeclinedMeetings
     /// The events as last loaded or saved, so an update sends only what the person changed.
     private var loaded: [EventKey: CalendarEvent] = [:]
     /// Each series' RRULE lines, from its series master (occurrences don't say how they repeat), by the master's ID.
@@ -24,12 +29,14 @@ public actor MicrosoftCalendarService: CalendarService {
         var eventID: String
     }
 
-    public init(tokens: any AccessTokenProvider, transport: any HTTPTransport = URLSessionTransport()) {
-        self.init(client: WebClient(tokens: tokens, transport: transport))
+    /// `declinedFile` keeps meetings declined from PMail between launches.
+    public init(tokens: any AccessTokenProvider, transport: any HTTPTransport = URLSessionTransport(), declinedFile: URL? = nil) {
+        self.init(client: WebClient(tokens: tokens, transport: transport), declinedFile: declinedFile)
     }
 
-    init(client: WebClient) {
+    init(client: WebClient, declinedFile: URL? = nil) {
         self.client = client
+        declined = DeclinedMeetings(file: declinedFile)
     }
 
     static func url(_ path: String, _ query: [(String, String)] = []) throws -> URL {
@@ -94,9 +101,11 @@ public actor MicrosoftCalendarService: CalendarService {
                 return []  // A calendar that's been removed.
             }
         }
-        let events = await withSeriesRecurrence(results.flatMap { $0 }).sorted { $0.start < $1.start }
+        let events = await withSeriesRecurrence(results.flatMap { $0 })
         remember(events)
-        return events
+        // Meetings declined from PMail, which Outlook took off the calendar.
+        let kept = await declined.shown(besides: events, in: Set(calendarIDs), from: start, to: end)
+        return (events + kept).sorted { $0.start < $1.start }
     }
 
     /// Fills in how repeating events repeat, from their series masters, fetching each master once.
@@ -381,16 +390,31 @@ public actor MicrosoftCalendarService: CalendarService {
         return result
     }
 
+    /// Deletes an event. A meeting you organized is called off instead, which deletes it and sends everyone invited a
+    /// cancellation.
     public func delete(_ event: CalendarEvent, scope: RecurrenceScope) async throws {
         let targetID = scope == .allEvents ? (event.seriesID ?? event.id) : event.id
+        if await declined.contains(id: event.id) {
+            // Declined, and already off the calendar.
+            await declined.forget(id: event.id)
+            loaded[EventKey(calendarID: event.calendarID, eventID: event.id)] = nil
+            return
+        }
+        let organizesMeeting = event.myResponse == nil && event.attendees.contains { !$0.isOrganizer }
         do {
-            try await client.delete(Self.eventURL(targetID), headers: Self.headers)
+            if organizesMeeting {
+                _ = try await client.post(Self.eventURL(targetID, "cancel"), ["comment": ""], headers: Self.headers)
+            } else {
+                try await client.delete(Self.eventURL(targetID), headers: Self.headers)
+            }
         } catch PMailError.notFound {
             // Already gone.
         }
         loaded[EventKey(calendarID: event.calendarID, eventID: event.id)] = nil
     }
 
+    /// Answers an invitation and sends the answer to the organizer. A declined meeting is kept on this Mac, since
+    /// Outlook takes it off the calendar; once it's gone from there, the answer can't be changed.
     public func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
         let action: String
         switch response {
@@ -399,7 +423,18 @@ public actor MicrosoftCalendarService: CalendarService {
         case .declined: action = "decline"
         case .needsAction: throw PMailError.notSupported("An answered invitation can’t be set back to unanswered.")
         }
-        _ = try await client.post(Self.eventURL(event.id, action), ["sendResponse": true], headers: Self.headers)
+        let wasDeclined = await declined.contains(id: event.id)
+        do {
+            _ = try await client.post(Self.eventURL(event.id, action), ["sendResponse": true], headers: Self.headers)
+        } catch PMailError.notFound where wasDeclined {
+            throw PMailError.notSupported("Outlook took this meeting off your calendar when you declined it, so the answer can’t be "
+                + "changed. The organizer can send you the invitation again.")
+        }
+        if response == .declined {
+            await declined.keep(event)
+        } else if wasDeclined {
+            await declined.forget(id: event.id)
+        }
         loaded[EventKey(calendarID: event.calendarID, eventID: event.id)]?.myResponse = response
     }
 

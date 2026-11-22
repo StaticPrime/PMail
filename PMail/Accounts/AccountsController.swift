@@ -271,7 +271,7 @@ final class AccountsController {
         // The copies and waiting messages go; calendars, contacts, tasks and mail kept only on this Mac stay in its folder.
         let folder = storageFolder(for: id)
         for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json", "Remote Content", "JunkMarks.json",
-                     "Recipients.json", EventTypeBook.fileName, AccountStorage.calendarChangesFile, AccountStorage.contactChangesFile,
+                     "Recipients.json", EventTypeBook.fileName, DeclinedMeetings.fileName, AccountStorage.calendarChangesFile, AccountStorage.contactChangesFile,
                      AccountStorage.waitingDraftsFile] {
             try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
         }

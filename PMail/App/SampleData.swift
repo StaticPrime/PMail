@@ -567,6 +567,13 @@ enum SampleData {
             add("primary", "Book club", at(12, 19), at(12, 20, 30), location: "City Library",
                 attendees: [Attendee(address: person("Hannah Brooks"), response: .accepted, isOrganizer: true), Attendee(address: account.address)],
                 myResponse: .needsAction)
+            // Invitations this week: one waiting for an answer, one answered Maybe and one No.
+            func invitation(from organizer: String, answer: AttendeeResponse) -> [Attendee] {
+                [Attendee(address: person(organizer), response: .accepted, isOrganizer: true), Attendee(address: account.address, response: answer)]
+            }
+            add("primary", "Vendor demo", at(4, 16), at(4, 17), attendees: invitation(from: "Ben Turner", answer: .needsAction), myResponse: .needsAction)
+            add("primary", "Product sync", at(2, 15), at(2, 16), attendees: invitation(from: "Priya Shah", answer: .tentative), myResponse: .tentative)
+            add("primary", "Budget review", at(3, 14), at(3, 15), attendees: invitation(from: "Marcus Lee", answer: .declined), myResponse: .declined)
         case .microsoft:
             let teams = Conference(kind: .teams, joinURL: URL(string: "https://teams.microsoft.com/l/meetup-join/19%3ameeting_sample%40thread.v2/0")!)
             add("calendar", "Northwind kickoff", at(1, 10), at(1, 11, 30), attendees: guests(["Marcus Lee", "Alex Kim"]), conference: teams)
