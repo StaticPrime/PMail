@@ -89,6 +89,8 @@ enum SelfTest {
     static var exportedCalendar: String?
     /// The day the automatic answers' events are on.
     static var autoAnswerDay: Date?
+    /// The ID of a message taken out of junk, arriving in the inbox again.
+    static var movedBackID: String?
 
     /// A time on a day.
     static func at(_ day: Date, _ hour: Int, _ minute: Int = 0) -> Date {
@@ -605,7 +607,7 @@ enum SelfTest {
             ((session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService)?.invitesNoOne.withLock { $0 = true }
             guard var draft = calendar.newDraft() else { return check(false, "a meeting can be started") }
             draft.title = "Self-test uninvited meeting"
-            draft.guests = [SampleData.person("Zoe Anderson")]
+            draft.guests = [SampleData.person("Alex Kim")]
             Task { try? await calendar.save(draft) }
             wait("the invitation the server didn't send") {
                 read { await mailService?.sentMessages.last?.subject }??.hasPrefix("Invitation: Self-test uninvited meeting") == true
@@ -615,12 +617,12 @@ enum SelfTest {
             let calendar = session.calendar
             let mailService = sampleMail
             let last = read { await mailService?.sentMessages.last } ?? nil
-            check(last?.calendar?.method == "REQUEST" && last?.to.map(\.name) == ["Zoe Anderson"],
+            check(last?.calendar?.method == "REQUEST" && last?.to.map(\.name) == ["Alex Kim"],
                   "guests a calendar server doesn't invite get PMail’s invitation by email", last?.subject ?? "nothing sent")
             guard let made = calendar.events.first(where: { $0.title == "Self-test uninvited meeting" }) else {
                 return check(false, "the meeting is on the calendar")
             }
-            check(made.attendees.contains { $0.invitedByEmail && $0.address.name == "Zoe Anderson" }, "and the meeting says PMail invites them")
+            check(made.attendees.contains { $0.invitedByEmail && $0.address.name == "Alex Kim" }, "and the meeting says PMail invites them")
             calendar.delete(made, scope: .thisEvent)
             wait("the cancellation the server didn't send") {
                 read { await mailService?.sentMessages.last?.subject }??.hasPrefix("Canceled: Self-test uninvited meeting") == true
@@ -629,7 +631,7 @@ enum SelfTest {
         step {
             let mailService = sampleMail
             let last = read { await mailService?.sentMessages.last } ?? nil
-            check(last?.calendar?.method == "CANCEL" && last?.to.map(\.name) == ["Zoe Anderson"], "and the cancellation when it's deleted")
+            check(last?.calendar?.method == "CANCEL" && last?.to.map(\.name) == ["Alex Kim"], "and the cancellation when it's deleted")
             ((session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService)?.invitesNoOne.withLock { $0 = false }
         }
         step {
@@ -2209,6 +2211,44 @@ enum SelfTest {
             junk.policy = JunkPolicy()
             deliver("Weekly digest", from: "digest@neutral.example", text: "This week's digest.", hints: SenderHints(serverMarkedJunk: true), minutes: 8)
             wait("the server's junk mark to count") { mail.conversations.contains { $0.subject == "Weekly digest" && mail.junkMark(for: $0) == .junk } }
+        }
+        step {
+            // Mail taken out of junk stays out, even with the server's own junk mark on it, arriving in the inbox again as
+            // new mail (as a moved message does on an IMAP server).
+            junk.policy.junkAction = .moveToJunk
+            deliver("Board meeting invitation", from: "board@neutral.example", text: "You're invited.", hints: SenderHints(serverMarkedJunk: true),
+                    minutes: 8.3)
+            wait("the server-marked mail moved to the spam folder") { serverLabels("Board meeting invitation").contains("SPAM") }
+        }
+        step {
+            check(serverLabels("Board meeting invitation").contains("SPAM"), "mail the server marks as junk goes to the spam folder")
+            guard let message = serverSummary("Board meeting invitation") else { return check(false, "the server-marked mail") }
+            mail.perform(.notSpam, onMessage: message)
+            let kept = session.storage.keptFromJunk
+            wait("it's taken out of junk, for good") {
+                !serverLabels("Board meeting invitation").contains("SPAM") && read({ await kept.kept(among: [message]) })?.isEmpty == false
+            }
+        }
+        step {
+            guard let message = serverSummary("Board meeting invitation"), let service = sampleMail else { return }
+            let session = session
+            // Before the mail the next steps deliver (from nine minutes on), so the checks still see theirs as new.
+            let arrival = AppClock.now().addingTimeInterval(8.6 * 60)
+            Task {
+                let again = await service.deliver(from: MailAddress(name: "Sender", email: "board@neutral.example"), to: [MailAddress(email: session.account.email)],
+                                                  subject: "Board meeting invitation", text: "You're invited.", hints: SenderHints(serverMarkedJunk: true),
+                                                  at: arrival, messageID: message.messageIDHeader)
+                await app.sync?.check(session)
+                movedBackID = again
+            }
+            wait("the check to see it arrive again") { movedBackID != nil }
+        }
+        step {
+            guard let id = movedBackID, let service = sampleMail else { return check(false, "the message arriving again") }
+            let labels = read { await service.summary(id: id)?.labelIDs } ?? nil
+            check(labels?.contains("INBOX") == true && labels?.contains("SPAM") == false,
+                  "mail taken out of junk stays out, whatever the server's own mark on it says", "\(labels ?? [])")
+            junk.policy.junkAction = .mark
         }
         step {
             check(mail.conversations.contains { $0.subject == "Weekly digest" && mail.junkMark(for: $0) == .junk },

@@ -360,14 +360,14 @@ actor SampleMailService: MailService {
     /// A new message arriving in the inbox, as if from outside (for the self-test).
     @discardableResult
     func deliver(from: MailAddress, to recipients: [MailAddress]? = nil, subject: String, text: String, html: String? = nil, hints: SenderHints? = nil,
-                 attachments: [Attachment] = [], at date: Date) -> String {
+                 attachments: [Attachment] = [], at date: Date, messageID: String? = nil) -> String {
         counter += 1
         let id = "arrived-\(counter)"
         let labels = capabilities.usesLabels ? ["INBOX", "CATEGORY_PERSONAL", "UNREAD"] : []
         let invitation = attachments.contains { Invitation.isCalendarFile(mimeType: $0.mimeType, filename: $0.filename) }
         let summary = MessageSummary(id: id, folderID: capabilities.usesLabels ? nil : role(.inbox), labelIDs: labels, from: from,
                                      to: recipients ?? [account.address], subject: subject, snippet: HTMLText.snippet(from: text), date: date,
-                                     isUnread: true, hasAttachments: !attachments.isEmpty, messageIDHeader: "<\(id)@example.com>",
+                                     isUnread: true, hasAttachments: !attachments.isEmpty, messageIDHeader: messageID ?? "<\(id)@example.com>",
                                      senderHints: hints, isInvitation: invitation ? true : nil)
         messages.append(SampleData.Message(summary: summary, html: html, text: text, attachments: attachments))
         return id

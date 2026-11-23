@@ -1375,9 +1375,11 @@ final class MailViewModel {
     func notJunk(_ message: MessageSummary) {
         junkMarks[message.id] = nil
         let marks = storage.junkMarks
+        let kept = storage.keptFromJunk
         let filter = JunkSettings.shared.filter
         Task {
             await marks.clear([message])
+            await kept.keep([message])
             await filter.learn([message], asJunk: false)
         }
         app?.show("Marked as not junk. PMail will learn from it.")
@@ -1402,6 +1404,7 @@ final class MailViewModel {
     private func learn(from item: PendingAction) {
         let filter = JunkSettings.shared.filter
         let marks = storage.junkMarks
+        let kept = storage.keptFromJunk
         let messages = item.messages
         switch item.action {
         case .markSpam:
@@ -1410,13 +1413,18 @@ final class MailViewModel {
                 await marks.clear(messages)
             }
         case .notSpam:
+            // Taken out of junk: never put back, whatever the server's own mark on it says.
             Task {
+                await kept.keep(messages)
                 await filter.learn(messages, asJunk: false)
                 await marks.clear(messages)
             }
         case .moveToInbox, .move:
             guard item.fromSpam else { return }
-            Task { await filter.learn(messages, asJunk: false) }
+            Task {
+                await kept.keep(messages)
+                await filter.learn(messages, asJunk: false)
+            }
         default:
             break
         }

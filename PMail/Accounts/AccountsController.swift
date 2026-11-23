@@ -37,6 +37,8 @@ struct AccountStorage {
     let remoteContent: RemoteContentCache
     /// Messages left in the inbox marked as junk or as from a blocked sender.
     let junkMarks: JunkMarks
+    /// Messages the person took out of junk, never taken for junk again.
+    let keptFromJunk: KeptFromJunk
     /// Everyone it has sent mail to, whose mail is never taken for junk.
     let recipients: PreviousRecipients
     /// Calendar and contact changes made while their servers couldn't be reached, waiting to be sent.
@@ -59,6 +61,7 @@ struct AccountStorage {
         sorter = InboxSorter(file: folder.appendingPathComponent("Categories.json"))
         remoteContent = RemoteContentCache(folder: folder.appendingPathComponent("Remote Content", isDirectory: true))
         junkMarks = JunkMarks(file: folder.appendingPathComponent("JunkMarks.json"))
+        keptFromJunk = KeptFromJunk(file: folder.appendingPathComponent(KeptFromJunk.fileName))
         recipients = PreviousRecipients(file: folder.appendingPathComponent("Recipients.json"))
         calendarChanges = PendingChanges(file: folder.appendingPathComponent(Self.calendarChangesFile))
         contactChanges = PendingChanges(file: folder.appendingPathComponent(Self.contactChangesFile))
@@ -278,6 +281,7 @@ final class AccountsController {
         // The copies and waiting messages go; calendars, contacts, tasks and mail kept only on this Mac stay in its folder.
         let folder = storageFolder(for: id)
         for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json", "Remote Content", "JunkMarks.json",
+                     KeptFromJunk.fileName,
                      "Recipients.json", EventTypeBook.fileName, DeclineBook.fileName, MicrosoftCalendarService.oldDeclinedFileName, DismissedEvents.fileName, FollowedCalendars.fileName, CalendarFeeds.folderName, AccountStorage.calendarChangesFile, AccountStorage.contactChangesFile,
                      AccountStorage.waitingDraftsFile] {
             try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))

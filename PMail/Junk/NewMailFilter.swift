@@ -34,6 +34,9 @@ final class NewMailFilter {
         guard !messages.isEmpty else { return result }
         let storage = session.storage
         let service = session.services.mail
+        // Messages the person took out of junk arrive in the inbox again as new mail: they stay, unannounced.
+        let kept = await storage.keptFromJunk.kept(among: messages)
+        result.quiet.formUnion(kept)
         let judging = judgesJunk && policy.filtersJunk
         if judging { Task { await startLearning(session) } }
         let blocked = policy.filtersBlocked ? Set(await storage.blockedSenders.blocked(among: messages).map(\.id)) : []
@@ -43,7 +46,7 @@ final class NewMailFilter {
         var moves: [MailAction: [MessageSummary]] = [:]
         for summary in messages {
             let fromBlocked = blocked.contains(summary.id)
-            guard fromBlocked || judging else { continue }
+            guard fromBlocked || judging, fromBlocked || !kept.contains(summary.id) else { continue }
             var facts = MessageFacts(summary: summary, account: session.account.email, fullName: session.account.name, now: AppClock.now())
             people.describe(summary.from?.email, in: &facts)
             if !fromBlocked {
