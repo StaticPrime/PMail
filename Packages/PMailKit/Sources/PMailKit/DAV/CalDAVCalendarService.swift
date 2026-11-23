@@ -599,6 +599,46 @@ public actor CalDAVCalendarService: CalendarService {
         return InvitationText.reply(to: only.serialized, from: MailAddress(email: ownerEmail), response: response)
     }
 
+    // MARK: Undo
+
+    /// The event's resource as the server has it now: as last read, while that's still the version the event came
+    /// from (a change made from it can only be to that version), else read again.
+    public func snapshot(of event: CalendarEvent) async -> CalendarSnapshot? {
+        guard let collection = try? await collection(event.calendarID), let url = try? resourceURL(of: event, in: collection) else { return nil }
+        let path = url.path(percentEncoded: true)
+        if let cached = resources[path], cached.etag != nil, cached.etag == event.etag {
+            return CalendarSnapshot(event: event, location: path, data: cached.text)
+        }
+        guard let (data, etag) = try? await client.get(url) else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+        resources[path] = Resource(etag: etag, text: text)
+        return CalendarSnapshot(event: event, location: path, data: text)
+    }
+
+    /// Writes the event's resource back as it was, over whatever is there now (making it again, if it was deleted). A
+    /// copy the change made in another calendar is deleted first.
+    public func restore(_ snapshot: CalendarSnapshot, removing made: CalendarEvent?) async throws {
+        let collection = try await collection(snapshot.event.calendarID)
+        guard let url = URL(string: snapshot.location, relativeTo: collection.url)?.absoluteURL else { throw PMailError.notFound }
+        if let made, let elsewhere = sourceCollection(of: made), let madeURL = try? resourceURL(of: made, in: elsewhere),
+           madeURL.path(percentEncoded: true) != snapshot.location {
+            do {
+                try await client.delete(madeURL, ifMatch: nil)
+            } catch PMailError.notFound {
+                // Already gone.
+            }
+            resources[madeURL.path(percentEncoded: true)] = nil
+        }
+        // Written as iCalendar wants it (CRLF lines, folded), keeping everything it held.
+        let stored = ICalendarComponent.parse(snapshot.data).first { $0.name == "VCALENDAR" }
+        let text = stored?.serialized ?? snapshot.data
+        var etag = try await client.put(url, data: Data(text.utf8), contentType: "text/calendar; charset=utf-8", ifMatch: nil,
+                                        ifNoneMatch: false, extraHeaders: [:])
+        if etag == nil { etag = (try? await client.etag(of: url)) ?? nil }
+        resources[snapshot.location] = Resource(etag: etag, text: text)
+        for uid in (stored?.components ?? []).compactMap({ $0.property("UID")?.value }) { pathsByUID[uid] = snapshot.location }
+    }
+
     // MARK: Settings
 
     /// The account's own calendars keep their name, description and color on the server.

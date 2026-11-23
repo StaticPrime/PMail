@@ -32,6 +32,19 @@ struct CalendarScreen: View {
                 }
             }
         }
+        // A repeating event dragged somewhere new: that time, or every time where the calendar can move them all.
+        .confirmationDialog(model.pendingMove.map { "Move “\($0.event.shownTitle)”?" } ?? "",
+                            isPresented: Binding(get: { model.pendingMove != nil }, set: { if !$0 { model.pendingMove = nil } }),
+                            titleVisibility: .visible, presenting: model.pendingMove) { pending in
+            Button("This Event") { model.move(pending.event, start: pending.start, end: pending.end, scope: .thisEvent) }
+            if model.features.movesWholeSeries {
+                Button("All Events") { model.move(pending.event, start: pending.start, end: pending.end, scope: .allEvents) }
+            }
+            Button("Cancel", role: .cancel) { model.pendingMove = nil }
+        } message: { _ in
+            Text(model.features.movesWholeSeries ? "It repeats: move just this one, or every time it happens?"
+                                                 : "It repeats: just this one moves, since this calendar keeps the others’ own times.")
+        }
     }
 }
 
@@ -339,7 +352,8 @@ private struct MiniDay: View {
 
 // MARK: Day and week
 
-/// The day or week view: a column per day, all-day events across the top, and timed events placed by the hour.
+/// The day or week view: a column per day, all-day events across the top, and timed events placed by the hour. An
+/// event can be dragged to another time and day in the view, landing on a quarter hour.
 struct TimeGridView: View {
     let app: AppModel
     let model: CalendarViewModel
@@ -347,6 +361,10 @@ struct TimeGridView: View {
     let events: [CalendarEvent]
     private let hourHeight: CGFloat = 48
     private let gutter: CGFloat = 64
+    /// The hours' own space, which dragging measures in.
+    static let space = "timeGrid"
+    @State private var drag: TimeDrag?
+    @State private var scroller = EdgeScroller()
 
     var body: some View {
         let allDay = events.filter { $0.isAllDay || $0.end.timeIntervalSince($0.start) >= 86_400 }
@@ -366,15 +384,21 @@ struct TimeGridView: View {
                                     Rectangle().fill(Theme.divider).frame(height: 1).offset(y: CGFloat(hour) * hourHeight)
                                 }
                                 ForEach(Array(days.enumerated()), id: \.offset) { index, day in
-                                    DayColumn(app: app, model: model, day: day, events: model.events(on: day, from: timed), hourHeight: hourHeight)
+                                    DayColumn(app: app, model: model, day: day, events: model.events(on: day, from: timed), hourHeight: hourHeight,
+                                              draggedID: drag?.event.id,
+                                              onDrag: { event, value in dragChanged(event, value, columnWidth: columnWidth) },
+                                              onDrop: dragEnded)
                                         .frame(width: columnWidth, height: hourHeight * 24)
                                         .offset(x: CGFloat(index) * columnWidth)
                                     Rectangle().fill(Theme.divider).frame(width: 1, height: hourHeight * 24).offset(x: CGFloat(index) * columnWidth)
                                 }
+                                if let drag { dropPreview(drag, columnWidth: columnWidth) }
                             }
+                            .coordinateSpace(.named(Self.space))
                         }
                         .frame(height: hourHeight * 24)
                     }
+                    .background(ScrollViewFinder { scroller.scrollView = $0 })
                     .overlay(alignment: .topLeading) {
                         // Invisible marks to scroll to.
                         VStack(spacing: 0) {
@@ -389,6 +413,75 @@ struct TimeGridView: View {
                 }
             }
         }
+        .onDisappear {
+            drag = nil
+            scroller.stop()
+            model.dragEnded()
+        }
+    }
+
+    // MARK: Dragging
+
+    /// Follows the pointer while an event is dragged. The first move notes where in the event it was grabbed, and
+    /// starts scrolling the hours when it nears their edge.
+    private func dragChanged(_ event: CalendarEvent, _ value: DragGesture.Value, columnWidth: CGFloat) {
+        if drag?.event.id != event.id {
+            let grabbed = time(at: value.startLocation, columnWidth: columnWidth)
+            drag = TimeDrag(event: event, grab: grabbed.timeIntervalSince(event.start), pointer: value.location, start: event.start)
+            model.dragStarted()
+            scroller.start { moved in
+                // The hours moved under a pointer that stayed put.
+                guard var current = drag else { return }
+                current.pointer.y += moved
+                drag = place(current, columnWidth: columnWidth)
+            }
+        }
+        guard var current = drag else { return }
+        current.pointer = value.location
+        drag = place(current, columnWidth: columnWidth)
+    }
+
+    /// Lets go of a dragged event: it moves where it was shown landing (a repeating one asks first).
+    private func dragEnded() {
+        guard let finished = drag else { return }
+        drag = nil
+        scroller.stop()
+        model.dragEnded()
+        model.drop(finished.event, start: finished.start, end: finished.end)
+    }
+
+    /// Where a dragged event would land: in the day under the pointer, starting on the quarter hour nearest to where the
+    /// pointer's place in it takes it, and starting within that day.
+    private func place(_ drag: TimeDrag, columnWidth: CGFloat) -> TimeDrag {
+        var drag = drag
+        drag.day = column(at: drag.pointer.x, width: columnWidth)
+        let dayStart = model.calendar.startOfDay(for: days[drag.day])
+        let quarter: TimeInterval = 15 * 60
+        let wanted = TimeInterval(drag.pointer.y / hourHeight * 3_600) - drag.grab
+        drag.start = dayStart.addingTimeInterval(min(max((wanted / quarter).rounded() * quarter, 0), 24 * 3_600 - quarter))
+        return drag
+    }
+
+    /// The time at a point in the hours.
+    private func time(at point: CGPoint, columnWidth: CGFloat) -> Date {
+        model.calendar.startOfDay(for: days[column(at: point.x, width: columnWidth)])
+            .addingTimeInterval(TimeInterval(point.y / hourHeight * 3_600))
+    }
+
+    /// The day column under a point, or the nearest: an event lands only on a day the view shows.
+    private func column(at x: CGFloat, width: CGFloat) -> Int {
+        min(max(Int(floor(x / max(width, 1))), 0), days.count - 1)
+    }
+
+    /// The dragged event where it would land, with its new time.
+    private func dropPreview(_ drag: TimeDrag, columnWidth: CGFloat) -> some View {
+        let top = CGFloat(drag.start.timeIntervalSince(model.calendar.startOfDay(for: days[drag.day])) / 3_600) * hourHeight
+        let height = max(CGFloat(drag.length / 3_600) * hourHeight, 20)
+        return EventBlockFace(model: model, event: drag.event, start: drag.start, end: drag.end, height: height)
+            .frame(width: max(columnWidth - 12, 20), height: max(height - 2, 18))
+            .shadow(color: .black.opacity(0.22), radius: 6, y: 2)
+            .offset(x: CGFloat(drag.day) * columnWidth + 1, y: top + 1)
+            .allowsHitTesting(false)
     }
 
     private var dayHeaders: some View {
@@ -451,13 +544,17 @@ struct TimeGridView: View {
 }
 
 /// One day's column of timed events, with the red line for now on today. Clicking an empty slot makes an event
-/// there.
+/// there; dragging an event is the view's to follow.
 private struct DayColumn: View {
     let app: AppModel
     let model: CalendarViewModel
     let day: Date
     let events: [CalendarEvent]
     let hourHeight: CGFloat
+    /// The event being dragged, shown faint where it was.
+    var draggedID: String?
+    var onDrag: (CalendarEvent, DragGesture.Value) -> Void = { _, _ in }
+    var onDrop: () -> Void = {}
 
     var body: some View {
         GeometryReader { geometry in
@@ -471,7 +568,9 @@ private struct DayColumn: View {
                     let top = y(for: max(event.start, startOfDay))
                     let bottom = y(for: min(event.end, endOfDay))
                     let width = (geometry.size.width - 10) / CGFloat(placement.columns)
-                    EventBlock(app: app, model: model, event: event, height: max(bottom - top, 20))
+                    EventBlock(app: app, model: model, event: event, height: max(bottom - top, 20),
+                               onDrag: model.canMove(event) ? { onDrag(event, $0) } : nil, onDrop: onDrop)
+                        .opacity(event.id == draggedID ? 0.35 : 1)
                         .frame(width: max(width * CGFloat(placement.span) - 2, 20), height: max(bottom - top - 2, 18))
                         .offset(x: width * CGFloat(placement.column) + 1, y: top + 1)
                 }
@@ -503,46 +602,24 @@ private struct DayColumn: View {
     }
 }
 
-/// A timed event in the day or week view: its color, title and time. Click for its details.
+/// A timed event in the day or week view: its color, title and time. Click for its details, or drag it somewhere else.
 private struct EventBlock: View {
     let app: AppModel
     let model: CalendarViewModel
     let event: CalendarEvent
     let height: CGFloat
+    /// Following a drag of it, for an event that can move.
+    var onDrag: ((DragGesture.Value) -> Void)?
+    var onDrop: () -> Void = {}
 
     var body: some View {
-        let color = model.color(for: event)
-        let look = AnswerLook(event)
-        Button { model.selectedEventID = event.id } label: {
-            VStack(alignment: .leading, spacing: 1) {
-                if height < 34 {
-                    (eventTitle(event).fontWeight(.semibold) + Text(", " + model.formatting.shortTime(event.start)))
-                        .font(.pm(11))
-                        .strikethrough(look.isStruckThrough)
-                        .lineLimit(1)
-                } else {
-                    eventTitle(event).font(.pm(11.5, .semibold)).lineLimit(height < 60 ? 1 : 2)
-                        .strikethrough(look.isStruckThrough)
-                    Text(model.formatting.eventTime(start: event.start, end: event.end, isAllDay: false))
-                        .font(.pm(10.5))
-                        .strikethrough(look.isStruckThrough)
-                        .lineLimit(1)
-                    if height > 70, let location = event.location, !location.isEmpty {
-                        Text(location).font(.pm(10.5)).strikethrough(look.isStruckThrough).lineLimit(1)
-                    }
-                }
-            }
-            .foregroundStyle(look.textColor(on: color))
-            .padding(.horizontal, 6)
-            .padding(.vertical, height < 34 ? 2 : 4)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            // A faint color sits on the page's own, so the hour lines don't run through the words.
-            .background(RoundedRectangle(cornerRadius: 6).fill(color.opacity(look.fillOpacity)))
-            .background(RoundedRectangle(cornerRadius: 6).fill(Theme.surface))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(look == .pending ? color : Theme.surface, lineWidth: look == .pending ? 1.5 : 0.75))
-            .contentShape(RoundedRectangle(cornerRadius: 6))
+        Button { model.select(event) } label: {
+            EventBlockFace(model: model, event: event, start: event.start, end: event.end, height: height)
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(DragGesture(minimumDistance: 4, coordinateSpace: .named(TimeGridView.space))
+            .onChanged { onDrag?($0) }
+            .onEnded { _ in onDrop() }, including: onDrag == nil ? .subviews : .all)
         .popover(isPresented: model.detailsBinding(for: event), arrowEdge: .trailing) {
             EventDetailsView(app: app, model: model, event: event)
         }
@@ -550,13 +627,58 @@ private struct EventBlock: View {
     }
 }
 
-/// All-day and multi-day events across the top of the day or week view, as bars over the days they cover.
+/// How a timed event looks in the day or week view, at a time (its own, or where it's being dragged): its color,
+/// title, time and place, as the height fits.
+private struct EventBlockFace: View {
+    let model: CalendarViewModel
+    let event: CalendarEvent
+    let start: Date
+    let end: Date
+    let height: CGFloat
+
+    var body: some View {
+        let color = model.color(for: event)
+        let look = AnswerLook(event)
+        VStack(alignment: .leading, spacing: 1) {
+            if height < 34 {
+                (eventTitle(event).fontWeight(.semibold) + Text(", " + model.formatting.shortTime(start)))
+                    .font(.pm(11))
+                    .strikethrough(look.isStruckThrough)
+                    .lineLimit(1)
+            } else {
+                eventTitle(event).font(.pm(11.5, .semibold)).lineLimit(height < 60 ? 1 : 2)
+                    .strikethrough(look.isStruckThrough)
+                Text(model.formatting.eventTime(start: start, end: end, isAllDay: false))
+                    .font(.pm(10.5))
+                    .strikethrough(look.isStruckThrough)
+                    .lineLimit(1)
+                if height > 70, let location = event.location, !location.isEmpty {
+                    Text(location).font(.pm(10.5)).strikethrough(look.isStruckThrough).lineLimit(1)
+                }
+            }
+        }
+        .foregroundStyle(look.textColor(on: color))
+        .padding(.horizontal, 6)
+        .padding(.vertical, height < 34 ? 2 : 4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // A faint color sits on the page's own, so the hour lines don't run through the words.
+        .background(RoundedRectangle(cornerRadius: 6).fill(color.opacity(look.fillOpacity)))
+        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(look == .pending ? color : Theme.surface, lineWidth: look == .pending ? 1.5 : 0.75))
+        .contentShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+/// All-day and multi-day events across the top of the day or week view, as bars over the days they cover. A bar can
+/// be dragged to other days in the view.
 private struct AllDayStrip: View {
     let app: AppModel
     let model: CalendarViewModel
     let days: [Date]
     let events: [CalendarEvent]
     let gutter: CGFloat
+    static let space = "allDayStrip"
+    @State private var drag: DayDrag?
 
     var body: some View {
         let rows = layoutRows()
@@ -576,11 +698,23 @@ private struct AllDayStrip: View {
                     }
                     ForEach(rows, id: \.event.id) { row in
                         AllDayBar(app: app, model: model, event: row.event)
+                            .opacity(drag?.event.id == row.event.id ? 0.35 : 1)
                             .frame(width: CGFloat(row.span) * width - 4, height: 22)
                             .offset(x: CGFloat(row.first) * width + 2, y: CGFloat(row.row) * 24 + 2)
+                            .simultaneousGesture(dayDrag(of: row.event, width: width), including: model.canMove(row.event) ? .all : .subviews)
+                    }
+                    // Where the dragged bar would land.
+                    if let drag, let row = rows.first(where: { $0.event.id == drag.event.id }) {
+                        AllDayBar(app: app, model: model, event: row.event, isPreview: true)
+                            .frame(width: CGFloat(row.span) * width - 4, height: 22)
+                            .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
+                            .offset(x: CGFloat(row.first + drag.shift(in: model.calendar)) * width + 2, y: CGFloat(row.row) * 24 + 2)
+                            .allowsHitTesting(false)
                     }
                 }
+                .coordinateSpace(.named(Self.space))
             }
+            .clipped()
         }
         .frame(height: max(CGFloat(rows.map(\.row).max().map { $0 + 1 } ?? 0) * 24 + 6, 12))
         .padding(.trailing, 14)
@@ -591,6 +725,32 @@ private struct AllDayStrip: View {
         let first: Int
         let span: Int
         let row: Int
+    }
+
+    /// Dragging a bar: it follows the day under the pointer, and moves by as many days when let go.
+    private func dayDrag(of event: CalendarEvent, width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.space))
+            .onChanged { value in
+                let over = day(at: value.location.x, width: width)
+                if drag?.event.id != event.id {
+                    drag = DayDrag(event: event, from: day(at: value.startLocation.x, width: width), to: over, pointer: value.location)
+                    model.dragStarted()
+                }
+                drag?.to = over
+                drag?.pointer = value.location
+            }
+            .onEnded { _ in
+                guard let finished = drag else { return }
+                drag = nil
+                model.dragEnded()
+                let moved = finished.moved(in: model.calendar)
+                model.drop(finished.event, start: moved.start, end: moved.end)
+            }
+    }
+
+    /// The day under a point, or the nearest the view shows.
+    private func day(at x: CGFloat, width: CGFloat) -> Date {
+        days[min(max(Int(floor(x / max(width, 1))), 0), days.count - 1)]
     }
 
     /// Which day each bar starts on, how many days it covers, and which row it takes so bars don't overlap.
@@ -622,6 +782,8 @@ struct AllDayBar: View {
     let app: AppModel
     let model: CalendarViewModel
     let event: CalendarEvent
+    /// A copy showing where a dragged bar would land, with nothing on it to click.
+    var isPreview = false
 
     var body: some View {
         let color = model.color(for: event)
@@ -631,7 +793,7 @@ struct AllDayBar: View {
                 TaskCheck(model: model, task: event, size: 12)
                     .padding(.leading, 6)
             }
-            Button { model.selectedEventID = event.id } label: {
+            Button { model.select(event) } label: {
                 eventTitle(event)
                     .font(.pm(11.5, .medium))
                     .strikethrough((event.isTask && event.isCompleted) || look.isStruckThrough)
@@ -647,7 +809,8 @@ struct AllDayBar: View {
         .background(RoundedRectangle(cornerRadius: 4).fill(color.opacity(event.isTask && event.isCompleted ? 0.55 : look.fillOpacity)))
         .background(RoundedRectangle(cornerRadius: 4).fill(Theme.surface))
         .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(look == .pending ? color : .clear, lineWidth: 1.5))
-        .popover(isPresented: model.detailsBinding(for: event), arrowEdge: .bottom) {
+        .allowsHitTesting(!isPreview)
+        .popover(isPresented: isPreview ? .constant(false) : model.detailsBinding(for: event), arrowEdge: .bottom) {
             EventDetailsView(app: app, model: model, event: event)
         }
         .accessibilityElement(children: .contain)
@@ -656,11 +819,14 @@ struct AllDayBar: View {
 
 // MARK: Month
 
-/// The month view: whole weeks, each day with as many events as fit and "N more" for the rest.
+/// The month view: whole weeks, each day with as many events as fit and "N more" for the rest. An event can be dragged
+/// to another day in the view, keeping its time.
 struct MonthGridView: View {
     let app: AppModel
     let model: CalendarViewModel
     let events: [CalendarEvent]
+    static let space = "monthGrid"
+    @State private var drag: DayDrag?
 
     var body: some View {
         let weeks = model.grid.monthWeeks(of: model.anchor)
@@ -678,21 +844,89 @@ struct MonthGridView: View {
             .frame(height: 28)
             GeometryReader { geometry in
                 let rowHeight = geometry.size.height / CGFloat(max(weeks.count, 1))
-                VStack(spacing: 0) {
-                    ForEach(weeks, id: \.first) { week in
-                        HStack(spacing: 0) {
-                            ForEach(week, id: \.self) { day in
-                                MonthDay(app: app, model: model, day: day, events: model.events(on: day, from: events), height: rowHeight)
-                                    .frame(maxWidth: .infinity)
-                                    .overlay(alignment: .leading) { Rectangle().fill(Theme.divider).frame(width: 1) }
+                let columnWidth = geometry.size.width / 7
+                let cells = Cells(weeks: weeks, rowHeight: rowHeight, columnWidth: columnWidth)
+                ZStack(alignment: .topLeading) {
+                    VStack(spacing: 0) {
+                        ForEach(weeks, id: \.first) { week in
+                            HStack(spacing: 0) {
+                                ForEach(week, id: \.self) { day in
+                                    MonthDay(app: app, model: model, day: day, events: model.events(on: day, from: events), height: rowHeight,
+                                             draggedID: drag?.event.id,
+                                             onDrag: { event, value in dragChanged(event, value, cells: cells) },
+                                             onDrop: dragEnded)
+                                        .frame(maxWidth: .infinity)
+                                        .overlay(alignment: .leading) { Rectangle().fill(Theme.divider).frame(width: 1) }
+                                }
                             }
+                            .frame(height: rowHeight)
+                            .overlay(alignment: .top) { Rectangle().fill(Theme.divider).frame(height: 1) }
                         }
-                        .frame(height: rowHeight)
-                        .overlay(alignment: .top) { Rectangle().fill(Theme.divider).frame(height: 1) }
                     }
+                    if let drag, let cell = cells.position(of: drag.to) { dropPreview(drag, cell: cell, cells: cells) }
                 }
+                .coordinateSpace(.named(Self.space))
             }
         }
+    }
+
+    /// The days' places in the grid.
+    private struct Cells {
+        let weeks: [[Date]]
+        let rowHeight: CGFloat
+        let columnWidth: CGFloat
+
+        /// The day under a point, or the nearest: an event lands only on a day the view shows.
+        func day(at point: CGPoint) -> Date? {
+            guard !weeks.isEmpty else { return nil }
+            let row = min(max(Int(floor(point.y / max(rowHeight, 1))), 0), weeks.count - 1)
+            let week = weeks[row]
+            guard !week.isEmpty else { return nil }
+            return week[min(max(Int(floor(point.x / max(columnWidth, 1))), 0), week.count - 1)]
+        }
+
+        func position(of day: Date) -> (row: Int, column: Int)? {
+            for (row, week) in weeks.enumerated() {
+                if let column = week.firstIndex(of: day) { return (row, column) }
+            }
+            return nil
+        }
+    }
+
+    private func dragChanged(_ event: CalendarEvent, _ value: DragGesture.Value, cells: Cells) {
+        guard let over = cells.day(at: value.location) else { return }
+        if drag?.event.id != event.id {
+            drag = DayDrag(event: event, from: cells.day(at: value.startLocation) ?? over, to: over, pointer: value.location)
+            model.dragStarted()
+        }
+        drag?.to = over
+        drag?.pointer = value.location
+    }
+
+    /// Lets go of a dragged event: it moves by as many days as it was dragged (a repeating one asks first).
+    private func dragEnded() {
+        guard let finished = drag else { return }
+        drag = nil
+        model.dragEnded()
+        let moved = finished.moved(in: model.calendar)
+        model.drop(finished.event, start: moved.start, end: moved.end)
+    }
+
+    /// The day a dragged event would land on, outlined, and the event under the pointer.
+    @ViewBuilder
+    private func dropPreview(_ drag: DayDrag, cell: (row: Int, column: Int), cells: Cells) -> some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(Theme.accent.opacity(0.08))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.accent, lineWidth: 2))
+            .frame(width: max(cells.columnWidth - 4, 0), height: max(cells.rowHeight - 4, 0))
+            .offset(x: CGFloat(cell.column) * cells.columnWidth + 2, y: CGFloat(cell.row) * cells.rowHeight + 2)
+            .allowsHitTesting(false)
+        MonthEventChip(app: app, model: model, event: drag.event, isPreview: true)
+            .frame(width: max(cells.columnWidth - 8, 40))
+            .background(RoundedRectangle(cornerRadius: 4).fill(Theme.surfaceRaised))
+            .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
+            .position(x: drag.pointer.x, y: drag.pointer.y)
+            .allowsHitTesting(false)
     }
 }
 
@@ -702,6 +936,10 @@ private struct MonthDay: View {
     let day: Date
     let events: [CalendarEvent]
     let height: CGFloat
+    /// The event being dragged, shown faint where it was.
+    var draggedID: String?
+    var onDrag: (CalendarEvent, DragGesture.Value) -> Void = { _, _ in }
+    var onDrop: () -> Void = {}
     @State private var showsAll = false
 
     var body: some View {
@@ -724,7 +962,8 @@ private struct MonthDay: View {
             .buttonStyle(.plain)
             .padding(.top, 4)
             ForEach(shown) { event in
-                MonthEventChip(app: app, model: model, event: event)
+                MonthEventChip(app: app, model: model, event: event, onDrag: model.canMove(event) ? { onDrag(event, $0) } : nil, onDrop: onDrop)
+                    .opacity(event.id == draggedID ? 0.35 : 1)
             }
             if events.count > shown.count {
                 Button("\(events.count - shown.count) more") { showsAll = true }
@@ -762,18 +1001,31 @@ private struct MonthDay: View {
     }
 }
 
-/// An event in the month view: a bar for all-day events, a dot, time and title for the rest.
+/// An event in the month view: a bar for all-day events, a dot, time and title for the rest. One that can move can be
+/// dragged to another day.
 private struct MonthEventChip: View {
     let app: AppModel
     let model: CalendarViewModel
     let event: CalendarEvent
+    /// Following a drag of it, for an event that can move.
+    var onDrag: ((DragGesture.Value) -> Void)?
+    var onDrop: () -> Void = {}
+    /// A copy following the pointer while it's dragged, with nothing on it to click.
+    var isPreview = false
     @State private var hovering = false
 
     var body: some View {
+        chip
+            .simultaneousGesture(DragGesture(minimumDistance: 4, coordinateSpace: .named(MonthGridView.space))
+                .onChanged { onDrag?($0) }
+                .onEnded { _ in onDrop() }, including: onDrag == nil ? .subviews : .all)
+    }
+
+    @ViewBuilder private var chip: some View {
         if event.isAllDay {
-            AllDayBar(app: app, model: model, event: event).frame(height: 20)
+            AllDayBar(app: app, model: model, event: event, isPreview: isPreview).frame(height: 20)
         } else {
-            Button { model.selectedEventID = event.id } label: {
+            Button { model.select(event) } label: {
                 let look = AnswerLook(event)
                 HStack(spacing: 5) {
                     AnswerDot(look: look, color: model.color(for: event), size: 8)
@@ -792,7 +1044,8 @@ private struct MonthEventChip: View {
             }
             .buttonStyle(.plain)
             .onHover { hovering = $0 }
-            .popover(isPresented: model.detailsBinding(for: event), arrowEdge: .trailing) {
+            .allowsHitTesting(!isPreview)
+            .popover(isPresented: isPreview ? .constant(false) : model.detailsBinding(for: event), arrowEdge: .trailing) {
                 EventDetailsView(app: app, model: model, event: event)
             }
         }

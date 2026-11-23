@@ -158,7 +158,7 @@ private struct GeneralSettings: View {
 /// Mail: Undo Send, adding the people written to to contacts, and sorting inboxes into categories.
 private struct MailSettings: View {
     let app: AppModel
-    @AppStorage("UndoSendSeconds") private var undoSeconds = 5
+    @AppStorage(UndoSend.key) private var undoSeconds = UndoSend.standard
     @AppStorage(ContactsViewModel.addsPeopleKey) private var addsPeople = true
     @AppStorage("SortInboxCategories") private var sortsCategories = true
 
@@ -166,9 +166,9 @@ private struct MailSettings: View {
         Form {
             Section("Sending") {
                 Picker("Undo Send", selection: $undoSeconds) {
-                    ForEach([5, 10, 20, 30], id: \.self) { Text("\($0) seconds").tag($0) }
+                    ForEach(UndoSend.choices, id: \.self) { Text($0 == 1 ? "1 second" : "\($0) seconds").tag($0) }
                 }
-                Text("Messages wait this long before they go, and events before they’re saved, so Undo can stop them.")
+                Text("Messages wait this long before they go, and events before they’re saved, moved or deleted, so Undo can stop them.")
                     .font(.pm(11.5)).foregroundStyle(.secondary)
                 Text("Whether pictures in messages load is set in Privacy.").font(.pm(11.5)).foregroundStyle(.secondary)
                 Toggle("Add people I write to to Contacts", isOn: $addsPeople)

@@ -155,6 +155,19 @@ public actor LocalCalendarService: CalendarService {
         }
     }
 
+    // MARK: Undo
+
+    /// The event's file as it is now.
+    public func snapshot(of event: CalendarEvent) async -> CalendarSnapshot? {
+        guard let name = try? file(of: event).name, let (data, _) = try? store.read(name) else { return nil }
+        return CalendarSnapshot(event: event, location: name, data: String(decoding: data, as: UTF8.self))
+    }
+
+    /// Writes the event's file back as it was (making it again, if it was deleted).
+    public func restore(_ snapshot: CalendarSnapshot, removing made: CalendarEvent?) async throws {
+        try store.write(Data(snapshot.data.utf8), to: snapshot.location)
+    }
+
     // MARK: Files
 
     private func reader(_ calendar: ICalendarComponent) -> ICalendarReader {

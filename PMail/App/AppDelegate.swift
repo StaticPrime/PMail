@@ -8,8 +8,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingLinks: [URL] = []
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        UserDefaults.standard.register(defaults: ["NSFullScreenMenuItemEverywhere": false, "SingleKeyShortcuts": true, "UndoSendSeconds": 5,
-                                                  "NotifyNewMail": true, "CheckMinutes": 2])
+        UserDefaults.standard.register(defaults: ["NSFullScreenMenuItemEverywhere": false, "SingleKeyShortcuts": true,
+                                                  UndoSend.key: UndoSend.standard, "NotifyNewMail": true, "CheckMinutes": 2])
+        UndoSend.settleChoice()
         #if DEBUG
         if DebugLaunchOptions.usesSampleAccounts {
             // Sample runs keep their own privacy settings and never load anything from the internet.

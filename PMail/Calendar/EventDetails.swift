@@ -30,7 +30,10 @@ struct EventDetailsView: View {
                         model.selectedEventID = nil
                         app.sheet = .eventEditor(model.draft(for: event))
                     }
-                    IconButton(symbol: "trash", help: event.isTask ? "Delete task" : "Delete event", size: 32, iconSize: 14) { confirmsDelete = true }
+                    IconButton(symbol: "trash", help: event.isTask ? "Delete task" : "Delete event", size: 32, iconSize: 14) {
+                        // Undo can bring it back; a repeating event asks which times go.
+                        if event.isRecurring { confirmsDelete = true } else { model.delete(event, scope: .thisEvent) }
+                    }
                 }
                 if !guests.isEmpty {
                     IconButton(symbol: "envelope", help: "Email guests", size: 32, iconSize: 14) {
@@ -201,7 +204,7 @@ struct EventDetailsView: View {
         // `-PMConfirmDelete YES` asks about deleting the event showing.
         .onAppear { if UserDefaults.standard.bool(forKey: "PMConfirmDelete") { confirmsDelete = true } }
         #endif
-        // Deleting asks first (there's no Undo): a repeating event, whether it's this one or all of them.
+        // Deleting a repeating event asks whether it's this one or all of them.
         .confirmationDialog("Delete “\(event.shownTitle)”?", isPresented: $confirmsDelete, titleVisibility: .visible) {
             if event.isRecurring {
                 Button("Delete This Event", role: .destructive) { model.delete(event, scope: .thisEvent) }
@@ -211,7 +214,7 @@ struct EventDetailsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(event.isRecurring ? "It repeats: delete just this one, or every time it happens? This can’t be undone." : "This can’t be undone.")
+            Text(event.isRecurring ? "It repeats: delete just this one, or every time it happens?" : "")
         }
         // Answering a repeating meeting: this time, or every time.
         .confirmationDialog(answerQuestion, isPresented: Binding(get: { pendingAnswer != nil }, set: { if !$0 { pendingAnswer = nil } }),

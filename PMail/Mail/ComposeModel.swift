@@ -60,7 +60,7 @@ final class ComposeModel: Identifiable {
     @ObservationIgnored private var lastSavedFingerprint = ""
     @ObservationIgnored private var sendTask: Task<Void, Never>?
     /// Seconds a sent message waits, so Undo can still stop it.
-    @ObservationIgnored var undoSendDelay: TimeInterval = max(1, UserDefaults.standard.double(forKey: "UndoSendSeconds"))
+    @ObservationIgnored var undoSendDelay: TimeInterval = UndoSend.seconds
 
     init(app: AppModel, session: AccountSession) {
         self.app = app

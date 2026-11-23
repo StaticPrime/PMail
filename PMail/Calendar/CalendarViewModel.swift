@@ -335,7 +335,7 @@ final class CalendarViewModel {
                     loadedInterval = nil
                     return loadIfNeeded(quietly: quietly)
                 }
-                events = CalendarChange.applying(waiting, to: loaded)
+                events = CalendarChange.applying(waiting + undoable.values.flatMap { $0 }, to: loaded)
                 tasksProblem = (service as? CalendarWithTasks)?.tasksProblem
                 loadedInterval = interval
                 isLoading = false
@@ -757,41 +757,48 @@ final class CalendarViewModel {
     @ObservationIgnored weak var mailer: InvitationMailer?
     /// The account's mail, whose invitation emails are marked read once they're answered here.
     @ObservationIgnored weak var mailModel: MailViewModel?
-    /// Saves waiting out their Undo pause, by draft.
-    @ObservationIgnored private var undoableSaves: [UUID: Task<Void, Never>] = [:]
+    /// Changes made a moment ago that Undo can still take back, by their note along the bottom: what sends the messages
+    /// PMail keeps from guests once the pause is over (or deletes the event, where its calendar couldn't put it back).
+    @ObservationIgnored private var undoableWork: [UUID: Task<Void, Never>] = [:]
+    /// Changes being made, shown already: a load meanwhile still shows them.
+    @ObservationIgnored private var undoable: [UUID: [CalendarChange]] = [:]
+    /// How long Undo is offered after a change, instead of Undo Send's (the self-test makes it short).
+    @ObservationIgnored var undoDelay: TimeInterval?
 
-    /// Saves a draft after the same pause as sending a message (Settings ▸ Mail ▸ Undo Send), saying "Saving…" with
-    /// Undo meanwhile; Undo opens it to edit again, as it was. A save that fails opens it again, saying why.
-    func saveWithUndo(_ draft: EventDraft, delay: TimeInterval? = nil) {
-        let pause = delay ?? max(1, UserDefaults.standard.double(forKey: "UndoSendSeconds"))
-        undoableSaves[draft.id]?.cancel()
-        undoableSaves[draft.id] = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(pause))
-            guard !Task.isCancelled, let self else { return }
-            self.undoableSaves[draft.id] = nil
-            await self.finishSaving(draft)
-        }
-        app?.show("Saving…", actionTitle: "Undo", duration: pause) { [weak self] in self?.undoSave(draft) }
+    /// How long Undo is offered after a change: as long as messages wait before they go (Settings ▸ Mail ▸ Undo Send).
+    private var undoPause: TimeInterval { undoDelay ?? UndoSend.seconds }
+
+    /// When messages kept from guests for Undo go, for a change made now.
+    private var undoDeadline: Date { AppClock.now().addingTimeInterval(undoPause) }
+
+    /// What a save did: whether it reached the calendar, the event as saved, and the messages PMail keeps from its
+    /// guests until Undo has gone.
+    struct SavedChange {
+        var outcome: SaveOutcome
+        var saved: CalendarEvent?
+        var held: [UUID] = []
     }
 
-    /// Stops a save waiting out its pause, and opens the draft to edit again.
-    func undoSave(_ draft: EventDraft) {
-        guard let pending = undoableSaves.removeValue(forKey: draft.id) else { return }
-        pending.cancel()
-        app?.sheet = .eventEditor(draft)
-        app?.show("Saving undone.")
+    /// Saves a draft at once, then says so with Undo for as long as Undo Send's pause (Settings ▸ Mail). Undo puts the
+    /// event back as it was, or takes a new one away; the invitations PMail emails its guests wait until the pause is
+    /// over, so Undo stops them too. A save that fails opens it again, saying why.
+    func saveWithUndo(_ draft: EventDraft) {
+        Task { await saveNow(draft) }
     }
 
-    /// Whether a draft is waiting out its Undo pause.
-    func isSavingLater(_ draft: EventDraft) -> Bool { undoableSaves[draft.id] != nil }
-
-    private func finishSaving(_ draft: EventDraft) async {
+    private func saveNow(_ draft: EventDraft) async {
+        // What Undo puts back: the event as its calendar has it now.
+        var snapshot: CalendarSnapshot?
+        if let original = draft.original { snapshot = await service.snapshot(of: original) }
         do {
-            let outcome = try await save(draft)
-            if outcome == .waiting {
+            let change = try await save(draft, holdingUntil: undoDeadline)
+            guard change.outcome == .saved else {
                 app?.show("Saved on this Mac. It’ll go to your \(draft.isTask ? "tasks" : "calendar") when you’re back online.")
-            } else {
-                app?.show(draft.isNew ? (draft.isTask ? "Task saved." : "Event saved.") : "Changes saved.")
+                return
+            }
+            offerUndo(draft.isNew ? (draft.isTask ? "Task saved." : "Event saved.") : "Changes saved.",
+                      undone: draft.isNew ? "Saving undone." : "Changes undone.", held: change.held) { [weak self] in
+                await self?.takeBack(draft, saved: change.saved, snapshot: snapshot, showing: draft.original.map { [$0] } ?? [])
             }
         } catch {
             var again = draft
@@ -806,21 +813,192 @@ final class CalendarViewModel {
         }
     }
 
-    /// Saves a draft: makes the event (or task), or changes it, creating its video meeting if asked. When the calendar
-    /// can't be reached, the change is kept on this Mac and sent once it can. Guests just invited who aren't in
-    /// contacts are added (or asked about), as people written to are.
+    /// Says a change was made, with Undo for as long as Undo Send's pause. Once the pause is over, the messages PMail kept
+    /// from guests (`held`) go; Undo drops them and puts things back (`takeBack`).
+    private func offerUndo(_ note: String, undone: String, held: [UUID], takeBack: @escaping () async -> Void) {
+        let id = UUID()
+        let pause = undoPause
+        undoableWork[id] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(pause))
+            guard !Task.isCancelled, let self else { return }
+            self.undoableWork[id] = nil
+            for message in held { await self.mailer?.release(message) }
+        }
+        app?.show(note, actionTitle: "Undo", duration: pause) { [weak self] in
+            guard let self, let waiting = self.undoableWork.removeValue(forKey: id) else { return }
+            waiting.cancel()
+            Task {
+                for message in held { await self.mailer?.drop(message) }
+                await takeBack()
+                self.app?.show(undone)
+            }
+        }
+    }
+
+    /// Undo for a save: a new event or task is taken away; a changed one is put back as its calendar had it (exactly,
+    /// where the calendar can), else changed back. It shows as it was at once (`originals`), and nothing is emailed.
+    private func takeBack(_ draft: EventDraft, saved: CalendarEvent?, snapshot: CalendarSnapshot?, showing originals: [CalendarEvent]) async {
+        guard let saved else { return }
+        events.removeAll { $0.id == saved.id }
+        restore(originals)
+        do {
+            if draft.original == nil {
+                try await service.delete(saved, scope: .allEvents)
+            } else if let snapshot {
+                try await service.restore(snapshot, removing: saved)
+            } else if let original = draft.original {
+                var back = original
+                (back.id, back.seriesID, back.resourceHref, back.etag) = (saved.id, saved.seriesID, saved.resourceHref, saved.etag)
+                _ = try await service.update(back, scope: draft.scope, addingConference: false)
+            }
+        } catch {
+            app?.report(error, doing: "Undoing the change")
+        }
+        changeCount += 1
+        reload()
+    }
+
+    /// Puts events back as they were, in place of any copy showing.
+    private func restore(_ originals: [CalendarEvent]) {
+        events.removeAll { event in originals.contains { $0.id == event.id } }
+        events += originals
+    }
+
+    /// Emails guests about an event now, or keeps the message on this Mac until a time (Undo's pause) when one is given;
+    /// the kept message's ID.
+    private func tell(_ method: Invitation.Method, text: String, about event: CalendarEvent, to guests: [MailAddress],
+                      holdingUntil deadline: Date?) async -> [UUID] {
+        guard let mailer, !guests.isEmpty else { return [] }
+        guard let deadline else {
+            mailer.send(method, text: text, about: event, to: guests)
+            return []
+        }
+        return await mailer.hold(method, text: text, about: event, to: guests, until: deadline).map { [$0] } ?? []
+    }
+
+    // MARK: Dragging
+
+    /// A repeating event dropped somewhere new, waiting to hear whether that time moves or every time.
+    struct PendingMove: Identifiable {
+        let id = UUID()
+        let event: CalendarEvent
+        let start: Date
+        let end: Date
+    }
+
+    var pendingMove: PendingMove?
+    /// Whether an event is being dragged, and when the last drag ended: letting go of a drag also clicks the event,
+    /// which mustn't open its details.
+    @ObservationIgnored private var isDraggingEvent = false
+    @ObservationIgnored private var dragEndedAt: Date?
+
+    /// Whether an event can be dragged somewhere else: one on a calendar that can be changed, that isn't called off or
+    /// someone else's meeting (theirs to move).
+    func canMove(_ event: CalendarEvent) -> Bool {
+        guard calendarInfo(event.calendarID)?.isReadOnly == false, event.status != .cancelled else { return false }
+        return event.organizer.map { $0.isSameMailbox(as: account.email) } ?? true
+    }
+
+    /// Shows an event's details, unless it was just dragged.
+    func select(_ event: CalendarEvent) {
+        guard !isDraggingEvent, dragEndedAt.map({ Date().timeIntervalSince($0) > 0.3 }) ?? true else { return }
+        selectedEventID = event.id
+    }
+
+    /// An event starts being dragged: its details close, and the pointer is a closed hand.
+    func dragStarted() {
+        guard !isDraggingEvent else { return }
+        isDraggingEvent = true
+        selectedEventID = nil
+        NSCursor.closedHand.push()
+    }
+
+    func dragEnded() {
+        guard isDraggingEvent else { return }
+        isDraggingEvent = false
+        dragEndedAt = Date()
+        NSCursor.pop()
+    }
+
+    /// Moves an event dropped somewhere new in the day, week or month view. A repeating event asks first whether that
+    /// time moves or every time.
+    func drop(_ event: CalendarEvent, start: Date, end: Date) {
+        guard start != event.start || end != event.end else { return }
+        if event.isRecurring {
+            pendingMove = PendingMove(event: event, start: start, end: end)
+        } else {
+            move(event, start: start, end: end, scope: .thisEvent)
+        }
+    }
+
+    /// Moves an event (or every time of a repeating one, by as much) to start and end at other times. It shows there at
+    /// once and is saved at once, then says so with Undo for as long as Undo Send's pause: Undo puts it back, and the
+    /// updates PMail emails its guests wait until the pause is over.
+    func move(_ event: CalendarEvent, start: Date, end: Date, scope: RecurrenceScope) {
+        pendingMove = nil
+        var draft = draft(for: event)
+        (draft.start, draft.end, draft.scope) = (start, end, scope)
+        // Every time of the series moves on the wall clock by whole days, or by the same stretch of time.
+        let days = calendar.dateComponents([.day], from: event.start, to: start).day ?? 0
+        let byDays = calendar.date(byAdding: .day, value: days, to: event.start) == start
+        let shift = start.timeIntervalSince(event.start)
+        let originals = events.filter { $0.id == event.id || (scope == .allEvents && event.seriesID != nil && $0.seriesID == event.seriesID) }
+        let changes = originals.map { occurrence -> CalendarChange in
+            var moved = occurrence
+            if occurrence.id == event.id {
+                (moved.start, moved.end) = (start, end)
+            } else if byDays {
+                moved.start = calendar.date(byAdding: .day, value: days, to: occurrence.start) ?? occurrence.start
+                moved.end = calendar.date(byAdding: .day, value: days, to: occurrence.end) ?? occurrence.end
+            } else {
+                (moved.start, moved.end) = (occurrence.start.addingTimeInterval(shift), occurrence.end.addingTimeInterval(shift))
+            }
+            return .update(moved, scope: .thisEvent, addingConference: false)
+        }
+        events = CalendarChange.applying(changes, to: events)
+        let shown = UUID()
+        undoable[shown] = changes
+        let title = event.shownTitle
+        Task {
+            let snapshot = await service.snapshot(of: event)
+            do {
+                let change = try await save(draft, holdingUntil: undoDeadline)
+                undoable[shown] = nil
+                guard change.outcome == .saved else {
+                    app?.show("Moved on this Mac. It’ll go to your \(draft.isTask ? "tasks" : "calendar") when you’re back online.")
+                    return
+                }
+                offerUndo(draft.isTask ? "Task moved." : "Event moved.", undone: "Move undone.", held: change.held) {
+                    await self.takeBack(draft, saved: change.saved, snapshot: snapshot, showing: originals)
+                }
+            } catch {
+                undoable[shown] = nil
+                restore(originals)
+                app?.show("“\(title)” wasn’t moved: \(describe(error))")
+            }
+        }
+    }
+
+    /// Saves a draft: makes the event (or task), or changes it, creating its video meeting if asked, and emails the
+    /// invitations PMail sends. When the calendar can't be reached, the change is kept on this Mac and sent once it
+    /// can. Guests just invited who aren't in contacts are added (or asked about), as people written to are.
     @discardableResult
     func save(_ draft: EventDraft) async throws -> SaveOutcome {
+        try await save(draft, holdingUntil: nil).outcome
+    }
+
+    /// The same, keeping the invitations PMail emails on this Mac until a time (Undo's pause), when one is given.
+    private func save(_ draft: EventDraft, holdingUntil deadline: Date?) async throws -> SavedChange {
         if draft.isTask { return try await saveTask(draft) }
-        let outcome = try await saveEvent(draft)
+        let change = try await saveEvent(draft, holdingUntil: deadline)
         let invited = draft.guests.filter { guest in
             !(draft.original?.attendees.contains { $0.address.isSameMailbox(as: guest.email) } ?? false)
         }
         if let contacts, !invited.isEmpty { Task { await contacts.addPeopleWritten(to: invited) } }
-        return outcome
+        return change
     }
 
-    private func saveEvent(_ draft: EventDraft) async throws -> SaveOutcome {
+    private func saveEvent(_ draft: EventDraft, holdingUntil deadline: Date?) async throws -> SavedChange {
         var event = draft.original ?? CalendarEvent(calendarID: draft.calendarID, start: draft.start, end: draft.end)
         event.calendarID = draft.calendarID
         event.title = draft.title.trimmingCharacters(in: .whitespaces)
@@ -873,7 +1051,7 @@ final class CalendarViewModel {
         } else {
             later = .update(event, scope: scope, addingConference: draft.addsNativeConference)
         }
-        if waits(event.id), await keep(later) { return .waiting }
+        if waits(event.id), await keep(later) { return SavedChange(outcome: .waiting) }
         do {
             if draft.original == nil {
                 saved = try await service.create(event, addingConference: draft.addsNativeConference)
@@ -881,15 +1059,21 @@ final class CalendarViewModel {
                 saved = try await service.update(event, scope: scope, addingConference: draft.addsNativeConference)
             }
         } catch let error where PMailError.isConnectionProblem(error) {
-            if await keep(later) { return .waiting }
+            if await keep(later) { return SavedChange(outcome: .waiting) }
             throw error
         }
         changeCount += 1
         // Invitations PMail emails: all of them on a calendar without a server, else those to guests a calendar server on
         // an IMAP/POP account doesn't invite, and on iCloud when the Apple Account's email isn't an iCloud address.
         // Google, Microsoft and iCloud otherwise send every one of theirs.
+        // With Undo offered, they wait until it's gone.
+        var held: [UUID] = []
         if service.emailsInvitations || saved.attendees.contains(where: \.invitedByEmail) || (draft.original?.attendees.contains(where: \.invitedByEmail) ?? false) {
-            Task { await emailInvitations(for: saved, before: draft.original) }
+            if let deadline {
+                held = await emailInvitations(for: saved, before: draft.original, holdingUntil: deadline)
+            } else {
+                Task { await emailInvitations(for: saved, before: draft.original) }
+            }
         }
         // Out of office or focus time that PMail declines meetings for: the ones already planned, if it says so.
         if saved.type == .outOfOffice || saved.type == .focusTime { Task { await declinePeriodSaved(saved) } }
@@ -901,11 +1085,11 @@ final class CalendarViewModel {
             events.removeAll { $0.id == saved.id || $0.id == draft.original?.id }
             events.append(saved)
         }
-        return .saved
+        return SavedChange(outcome: .saved, saved: saved, held: held)
     }
 
     /// Saves a task: on its day in its list, with its notes and whether it's done.
-    private func saveTask(_ draft: EventDraft) async throws -> SaveOutcome {
+    private func saveTask(_ draft: EventDraft) async throws -> SavedChange {
         let day = calendar.startOfDay(for: draft.start)
         var task = draft.original ?? CalendarEvent(calendarID: draft.calendarID, start: day, end: day, type: .task)
         task.calendarID = draft.calendarID
@@ -919,19 +1103,19 @@ final class CalendarViewModel {
         var made = task
         made.id = LocalID.make()
         let later: CalendarChange = draft.original == nil ? .create(made, addingConference: false) : .update(task, scope: .thisEvent, addingConference: false)
-        if waits(task.id), await keep(later) { return .waiting }
+        if waits(task.id), await keep(later) { return SavedChange(outcome: .waiting) }
         let saved: CalendarEvent
         do {
             saved = draft.original == nil ? try await service.create(task, addingConference: false)
                 : try await service.update(task, scope: .thisEvent, addingConference: false)
         } catch let error where PMailError.isConnectionProblem(error) {
-            if await keep(later) { return .waiting }
+            if await keep(later) { return SavedChange(outcome: .waiting) }
             throw error
         }
         changeCount += 1
         events.removeAll { $0.id == saved.id || $0.id == draft.original?.id }
         events.append(saved)
-        return .saved
+        return SavedChange(outcome: .saved, saved: saved)
     }
 
     /// Ticks a task off (or back on): here at once, then in its list.
@@ -957,47 +1141,96 @@ final class CalendarViewModel {
         }
     }
 
+    /// Deletes an event (one time of a repeating event, or all of them): it's gone from the window at once, and from its
+    /// calendar at once where the calendar can put it back exactly, then Undo is offered for as long as Undo Send's
+    /// pause. Undo puts it back; the cancellations PMail emails its guests wait until the pause is over. A calendar
+    /// that can't put it back (Google, Microsoft, a task list) gets the deletion once the pause is over instead.
     func delete(_ event: CalendarEvent, scope: RecurrenceScope) {
-        let snapshot = events
-        if scope == .allEvents, let series = event.seriesID {
-            events.removeAll { $0.seriesID == series || $0.id == event.id }
-        } else {
-            events.removeAll { $0.id == event.id }
-        }
+        let later = CalendarChange.delete(event, scope: scope)
+        let removed = events.filter { shown in !CalendarChange.applying([later], to: [shown]).contains { $0.id == shown.id } }
+        events = CalendarChange.applying([later], to: events)
         changeCount += 1
         selectedEventID = nil
+        let shown = UUID()
+        undoable[shown] = [later]
+        let restored = event.isTask ? "Task restored." : "Event restored."
+        Task {
+            guard let snapshot = await service.snapshot(of: event) else {
+                return deleteAfterPause(event, scope: scope, removed: removed, shown: shown, restored: restored)
+            }
+            let result = await finishDeleting(event, scope: scope, restoring: removed, holdingUntil: undoDeadline)
+            undoable[shown] = nil
+            guard result.deleted else { return }
+            offerUndo(event.isTask ? "Task deleted." : "Event deleted.", undone: restored, held: result.held) {
+                self.restore(removed)
+                do {
+                    try await self.service.restore(snapshot, removing: nil)
+                } catch {
+                    self.app?.report(error, doing: "Putting the event back")
+                }
+                self.changeCount += 1
+                self.reload()
+            }
+        }
+    }
+
+    /// Deletes an event once Undo's pause is over, for a calendar that can't put it back afterwards: it's gone from the
+    /// window already, and neither the calendar nor the guests hear of it before then.
+    private func deleteAfterPause(_ event: CalendarEvent, scope: RecurrenceScope, removed: [CalendarEvent], shown: UUID, restored: String) {
+        let pause = undoPause
+        undoableWork[shown] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(pause))
+            guard !Task.isCancelled, let self else { return }
+            self.undoableWork[shown] = nil
+            await self.finishDeleting(event, scope: scope, restoring: removed, holdingUntil: nil)
+            self.undoable[shown] = nil
+        }
+        app?.show(event.isTask ? "Task deleted." : "Event deleted.", actionTitle: "Undo", duration: pause) { [weak self] in
+            guard let self, let waiting = self.undoableWork.removeValue(forKey: shown) else { return }
+            waiting.cancel()
+            self.undoable[shown] = nil
+            self.restore(removed)
+            self.app?.show(restored)
+        }
+    }
+
+    /// Deletes an event from its calendar, and tells the guests PMail invites by email (at once, or keeping the messages
+    /// until `deadline`). Offline, the deletion waits on this Mac; if the calendar turns it down, the event comes back.
+    /// Whether it was deleted from the calendar, and the messages kept.
+    @discardableResult
+    private func finishDeleting(_ event: CalendarEvent, scope: RecurrenceScope, restoring removed: [CalendarEvent],
+                                holdingUntil deadline: Date?) async -> (deleted: Bool, held: [UUID]) {
         let service = self.service
         let later = CalendarChange.delete(event, scope: scope)
-        let done = event.isTask ? "Task deleted." : "Event deleted."
         let waitingText = "Deleted on this Mac. It’ll be deleted from your calendar when you’re back online."
-        Task {
-            if waits(event.id), await keep(later) {
-                app?.show(LocalID.isLocal(event.id) ? done : waitingText)
-                return
+        if waits(event.id), await keep(later) {
+            if !LocalID.isLocal(event.id) { app?.show(waitingText) }
+            return (false, [])
+        }
+        // Called off for everyone PMail invites by email (everyone, on a calendar without a server); asked for while
+        // the event's still there.
+        let guests = Self.invitedByEmail(guestsToTell(about: event), in: event, all: service.emailsInvitations)
+        let wholeEvent = scope == .allEvents || !event.isRecurring
+        let cancellation = !guests.isEmpty && wholeEvent
+            ? try? await service.invitationText(for: event, method: .cancel, attendees: nil) : nil
+        do {
+            try await service.delete(event, scope: scope)
+            changeCount += 1
+            var held: [UUID] = []
+            if let cancellation { held += await tell(.cancel, text: cancellation, about: event, to: guests, holdingUntil: deadline) }
+            // One time of a repeating meeting: guests get the series without it.
+            if !guests.isEmpty, !wholeEvent, let update = try? await service.invitationText(for: event, method: .request, attendees: nil) {
+                held += await tell(.request, text: update, about: event, to: guests, holdingUntil: deadline)
             }
-            // Called off for everyone PMail invites by email (everyone, on a calendar without a server); asked for while
-            // the event's still there.
-            let guests = Self.invitedByEmail(guestsToTell(about: event), in: event, all: service.emailsInvitations)
-            let wholeEvent = scope == .allEvents || !event.isRecurring
-            let cancellation = !guests.isEmpty && wholeEvent
-                ? try? await service.invitationText(for: event, method: .cancel, attendees: nil) : nil
-            do {
-                try await service.delete(event, scope: scope)
-                changeCount += 1
-                app?.show(done)
-                if let cancellation { mailer?.send(.cancel, text: cancellation, about: event, to: guests) }
-                // One time of a repeating meeting: guests get the series without it.
-                if !guests.isEmpty, !wholeEvent, let update = try? await service.invitationText(for: event, method: .request, attendees: nil) {
-                    mailer?.send(.request, text: update, about: event, to: guests)
-                }
-            } catch {
-                if PMailError.isConnectionProblem(error), await keep(later) {
-                    app?.show(waitingText)
-                    return
-                }
-                events = snapshot
-                app?.report(error, doing: "Deleting the event")
+            return (true, held)
+        } catch {
+            if PMailError.isConnectionProblem(error), await keep(later) {
+                app?.show(waitingText)
+                return (false, [])
             }
+            restore(removed)
+            app?.report(error, doing: "Deleting the event")
+            return (false, [])
         }
     }
 
@@ -1060,9 +1293,10 @@ final class CalendarViewModel {
     /// Emails a saved meeting's invitation to the guests PMail invites by email (everyone, for a calendar with no
     /// server to send it): to each of them when something they'd want to know changed (or it's new), else to those PMail
     /// has just started inviting (new guests, and ones the server had and left to PMail); guests taken off get a
-    /// cancellation.
-    private func emailInvitations(for saved: CalendarEvent, before original: CalendarEvent?) async {
-        guard let mailer else { return }
+    /// cancellation. With a `deadline` (Undo's pause), the messages are kept on this Mac until then; their IDs.
+    @discardableResult
+    private func emailInvitations(for saved: CalendarEvent, before original: CalendarEvent?, holdingUntil deadline: Date? = nil) async -> [UUID] {
+        guard mailer != nil else { return [] }
         let all = service.emailsInvitations
         let current = guestsToTell(about: saved)
         let guests = Self.invitedByEmail(current, in: saved, all: all)
@@ -1076,12 +1310,14 @@ final class CalendarViewModel {
                 || old.conference?.joinURL != saved.conference?.joinURL
         } ?? true
         let invited = matters ? guests : added
+        var held: [UUID] = []
         if !invited.isEmpty, let text = try? await service.invitationText(for: saved, method: .request, attendees: nil) {
-            mailer.send(.request, text: text, about: saved, to: invited)
+            held += await tell(.request, text: text, about: saved, to: invited, holdingUntil: deadline)
         }
         if !removed.isEmpty, let text = try? await service.invitationText(for: saved, method: .cancel, attendees: removed) {
-            mailer.send(.cancel, text: text, about: saved, to: removed)
+            held += await tell(.cancel, text: text, about: saved, to: removed, holdingUntil: deadline)
         }
+        return held
     }
 
     /// Answers an invitation that came by email. The calendar's own copy is answered when it has one (its server, or

@@ -162,6 +162,8 @@ enum SelfTest {
         // MARK: Starting up
         step { wait("the first account's inbox", upTo: 8) { app.current?.mail.conversations.isEmpty == false } }
         step {
+            // Calendar changes offer Undo only a moment, so the checks go on.
+            for each in app.accounts.sessions.values { each.calendar.undoDelay = 0.05 }
             check(app.accounts.accounts.count == 3, "three sample accounts", "\(app.accounts.accounts.count)")
             check(session.account.kind == .google, "the first account shows first", "\(session.account.kind)")
             check(app.module == .mail, "PMail opens on mail")
@@ -1106,39 +1108,77 @@ enum SelfTest {
             if let saved { calendar.delete(saved, scope: .thisEvent) }
         }
 
-        // MARK: Saving an event waits out Undo, as sending does
+        // MARK: Saving, moving and deleting an event happen at once, with Undo for as long as sending waits
+        var calendarService: SampleCalendarService? { (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService }
+        var movedFrom: Date?
         step {
             let calendar = session.calendar
             guard var draft = calendar.newDraft() else { return check(false, "an event can be started") }
             draft.title = "Self-test undo"
             app.sheet = nil
-            calendar.saveWithUndo(draft, delay: 0.6)
-            check(app.toast?.text == "Saving…" && app.toast?.actionTitle == "Undo" && calendar.isSavingLater(draft), "saving an event says so, with Undo",
-                  app.toast?.text ?? "none")
+            calendar.undoDelay = 30
+            calendar.saveWithUndo(draft)
+            wait("the event saved at once") { calendar.events.contains { $0.title == "Self-test undo" } && app.toast?.text == "Event saved." }
+        }
+        step {
+            let calendar = session.calendar
+            let service = calendarService
+            check(app.toast?.actionTitle == "Undo", "saving an event happens at once, saying so with Undo", app.toast?.text ?? "none")
+            check(read { await service?.allEvents.contains { $0.title == "Self-test undo" } ?? false } == true, "it's on the calendar already")
             app.toast?.action?()
-            if case let .eventEditor(back)? = app.sheet {
-                check(back.id == draft.id && back.title == "Self-test undo", "Undo opens it to edit again, as it was")
-            } else {
-                check(false, "Undo opens it to edit again, as it was")
-            }
-            app.sheet = nil
-            wait(upTo: 1) { false }
+            wait("Undo to take it away") { !calendar.events.contains { $0.title == "Self-test undo" } && app.toast?.text == "Saving undone." }
         }
         step {
             let calendar = session.calendar
-            check(!calendar.events.contains { $0.title == "Self-test undo" }, "and it isn't saved")
-            guard var draft = calendar.newDraft() else { return }
-            draft.title = "Self-test saved later"
-            calendar.saveWithUndo(draft, delay: 0.3)
-            check(!calendar.events.contains { $0.title == "Self-test saved later" }, "nothing's saved before the pause is out")
-            wait("the save after the pause") { calendar.events.contains { $0.title == "Self-test saved later" } }
+            let service = calendarService
+            check(read { await service?.allEvents.contains { $0.title == "Self-test undo" } ?? true } == false, "Undo takes it off the calendar too")
+            guard var draft = calendar.newDraft() else { return check(false, "an event can be started") }
+            draft.title = "Self-test moved"
+            Task { try? await calendar.save(draft) }
+            wait("an event to move") { calendar.events.contains { $0.title == "Self-test moved" } }
         }
         step {
             let calendar = session.calendar
-            check(calendar.events.contains { $0.title == "Self-test saved later" } && app.toast?.text == "Event saved.", "after it, it's saved",
-                  app.toast?.text ?? "none")
-            if let saved = calendar.events.first(where: { $0.title == "Self-test saved later" }) { calendar.delete(saved, scope: .thisEvent) }
-            wait("it to go") { !calendar.events.contains { $0.title == "Self-test saved later" } }
+            guard let event = calendar.events.first(where: { $0.title == "Self-test moved" }) else { return check(false, "the event to move") }
+            check(calendar.canMove(event), "an event of the account's own can be dragged")
+            movedFrom = event.start
+            let later = event.start.addingTimeInterval(90 * 60)
+            calendar.drop(event, start: later, end: event.end.addingTimeInterval(90 * 60))
+            check(calendar.events.first { $0.title == "Self-test moved" }?.start == later, "dropped somewhere else, it shows there at once")
+            wait("the move saved") { app.toast?.text == "Event moved." }
+        }
+        step {
+            let calendar = session.calendar
+            let service = calendarService
+            let saved = read { await service?.allEvents.first { $0.title == "Self-test moved" }?.start } ?? nil
+            check(saved != nil && saved == calendar.events.first { $0.title == "Self-test moved" }?.start && app.toast?.actionTitle == "Undo",
+                  "and it's saved at once, with Undo")
+            app.toast?.action?()
+            wait("Undo to put it back") { app.toast?.text == "Move undone." && calendar.events.first { $0.title == "Self-test moved" }?.start == movedFrom }
+        }
+        step {
+            let calendar = session.calendar
+            let service = calendarService
+            let saved = read { await service?.allEvents.first { $0.title == "Self-test moved" }?.start } ?? nil
+            check(saved != nil && saved == movedFrom, "Undo puts it back where it was, on the calendar too")
+            if let event = calendar.events.first(where: { $0.title == "Self-test moved" }) { calendar.delete(event, scope: .thisEvent) }
+            check(!calendar.events.contains { $0.title == "Self-test moved" }, "deleting takes it away at once")
+            wait("the deletion with Undo") { app.toast?.text == "Event deleted." }
+        }
+        step {
+            let service = calendarService
+            check(read { await service?.allEvents.contains { $0.title == "Self-test moved" } ?? true } == false && app.toast?.actionTitle == "Undo",
+                  "it's deleted from the calendar at once, with Undo")
+            app.toast?.action?()
+            wait("Undo to bring it back") { session.calendar.events.contains { $0.title == "Self-test moved" } && app.toast?.text == "Event restored." }
+        }
+        step {
+            let calendar = session.calendar
+            let service = calendarService
+            check(read { await service?.allEvents.contains { $0.title == "Self-test moved" } ?? false } == true, "Undo puts it back on the calendar")
+            calendar.undoDelay = 0.05
+            if let event = calendar.events.first(where: { $0.title == "Self-test moved" }) { calendar.delete(event, scope: .thisEvent) }
+            wait("it to go") { read { await service?.allEvents.contains { $0.title == "Self-test moved" } ?? false } == false }
         }
 
         // MARK: Calendars and contacts with each mail check, and changes made offline

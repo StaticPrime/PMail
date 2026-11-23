@@ -179,12 +179,17 @@ public struct CalendarFeatures: Sendable, Hashable {
     public var guestPermissions: [GuestPermission]
     /// Whether other people's busy times can be looked up (`CalendarService.freeBusy`).
     public var looksUpBusyTimes: Bool
+    /// Whether moving one time of a repeating event for all of them moves the whole series by as much. Google and
+    /// Microsoft keep a series' own times when every occurrence changes, so there only that one time can move.
+    public var movesWholeSeries: Bool
 
-    public init(maximumReminders: Int, visibilities: [EventVisibility], guestPermissions: [GuestPermission], looksUpBusyTimes: Bool) {
+    public init(maximumReminders: Int, visibilities: [EventVisibility], guestPermissions: [GuestPermission], looksUpBusyTimes: Bool,
+                movesWholeSeries: Bool = false) {
         self.maximumReminders = maximumReminders
         self.visibilities = visibilities
         self.guestPermissions = guestPermissions
         self.looksUpBusyTimes = looksUpBusyTimes
+        self.movesWholeSeries = movesWholeSeries
     }
 
     /// Google calendars: five notifications, all three visibilities and guest permissions, and free/busy lookups.
@@ -196,9 +201,10 @@ public struct CalendarFeatures: Sendable, Hashable {
                                                    guestPermissions: [.seeGuestList], looksUpBusyTimes: true)
     /// CalDAV servers that keep an event's CLASS: several notifications and the three visibilities.
     public static let calDAV = CalendarFeatures(maximumReminders: 5, visibilities: EventVisibility.allCases, guestPermissions: [],
-                                                looksUpBusyTimes: false)
+                                                looksUpBusyTimes: false, movesWholeSeries: true)
     /// iCloud calendars and calendars kept on the Mac: several notifications, nothing more.
-    public static let basic = CalendarFeatures(maximumReminders: 5, visibilities: [], guestPermissions: [], looksUpBusyTimes: false)
+    public static let basic = CalendarFeatures(maximumReminders: 5, visibilities: [], guestPermissions: [], looksUpBusyTimes: false,
+                                               movesWholeSeries: true)
 }
 
 /// When someone is busy, from their calendar, or why that isn't known.
@@ -525,9 +531,44 @@ public protocol CalendarService: AnyObject, Sendable {
     /// waiting for an answer (or updates it, whatever changed), a CANCEL marks it canceled, and a REPLY puts a guest's
     /// answer on an event of the owner's. `invitationText(for:method: .reply…)` then gives the answer to email, where PMail sends it.
     func receive(_ invitation: Invitation) async throws
+
+    // Undo: an event put back exactly as its calendar had it before PMail changed or deleted it.
+
+    /// The event's data as its calendar keeps it now, for Undo to put back (`restore`); nil where a calendar can't put
+    /// an event back exactly (Google, Microsoft, task lists).
+    func snapshot(of event: CalendarEvent) async -> CalendarSnapshot?
+
+    /// Puts an event's data back as a snapshot has it, over whatever its calendar has now; a copy a change made elsewhere
+    /// (`made`: the event moved to another calendar) is removed. PMail emails no one about it.
+    func restore(_ snapshot: CalendarSnapshot, removing made: CalendarEvent?) async throws
+}
+
+/// An event's data as its calendar kept it just before PMail changed or deleted it, so Undo can put it back exactly
+/// (`CalendarService.restore`).
+public struct CalendarSnapshot: Sendable, Hashable {
+    /// The event as it was.
+    public let event: CalendarEvent
+    /// Where its calendar keeps its data (a resource's path, or a file's name), and the data.
+    public let location: String
+    public let data: String
+    /// What PMail kept of it on this Mac: a kind its calendar can't hold, and how it declines meetings.
+    public var kind: EventType?
+    public var declining: DeclineBook.Entry?
+
+    public init(event: CalendarEvent, location: String, data: String) {
+        self.event = event
+        self.location = location
+        self.data = data
+    }
 }
 
 extension CalendarService {
+    public func snapshot(of event: CalendarEvent) async -> CalendarSnapshot? { nil }
+
+    public func restore(_ snapshot: CalendarSnapshot, removing made: CalendarEvent?) async throws {
+        throw PMailError.notSupported("This calendar can’t put the event back.")
+    }
+
     public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope) async throws {
         try await respond(to: event, with: response)
     }

@@ -734,6 +734,29 @@ actor SampleCalendarService: CalendarService {
     func remove(_ ids: [String]) { events.removeAll { ids.contains($0.id) } }
 
     var allEvents: [CalendarEvent] { events }
+
+    /// What Undo puts back: the event as kept here (a repeating one's series), with the times taken out of it.
+    private struct Kept: Codable {
+        var event: CalendarEvent
+        var taken: [Date]
+    }
+
+    func snapshot(of event: CalendarEvent) async -> CalendarSnapshot? {
+        let id = event.seriesID.flatMap { series in events.contains { $0.id == series } ? series : nil } ?? event.id
+        guard let kept = events.first(where: { $0.id == id }),
+              let data = try? JSONEncoder().encode(Kept(event: kept, taken: taken[id].map(Array.init) ?? [])) else { return nil }
+        return CalendarSnapshot(event: event, location: id, data: String(decoding: data, as: UTF8.self))
+    }
+
+    func restore(_ snapshot: CalendarSnapshot, removing made: CalendarEvent?) async throws {
+        await pause()
+        try reach()
+        guard let kept = try? JSONDecoder().decode(Kept.self, from: Data(snapshot.data.utf8)) else { throw PMailError.notFound }
+        if let made, made.id != snapshot.location { events.removeAll { $0.id == made.id } }
+        events.removeAll { $0.id == snapshot.location }
+        events.append(kept.event)
+        taken[snapshot.location] = kept.taken.isEmpty ? nil : Set(kept.taken)
+    }
 }
 
 /// Made-up task lists, as a Google or Microsoft account's: in memory, a moment later.

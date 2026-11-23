@@ -660,7 +660,7 @@ struct EventEditor: View {
         }
     }
 
-    /// Closes the editor and saves after the Undo Send pause, with Undo to come back to it.
+    /// Closes the editor and saves at once, with Undo afterwards to put the event back as it was.
     private func commit(scope: RecurrenceScope) {
         draft.scope = scope
         draft.saveError = nil

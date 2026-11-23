@@ -20,6 +20,35 @@ final class InvitationMailer {
         Task { await deliver(message, in: session) }
     }
 
+    /// Keeps an invitation, update or cancellation on this Mac until `date` (Undo's pause): it goes when `release`d,
+    /// unless Undo `drop`s it first, and if PMail quits meanwhile it's sent like a scheduled message. The kept message's
+    /// ID; nil when there's nothing to send, or it couldn't be kept (then it goes at once).
+    func hold(_ method: Invitation.Method, text: String, about event: CalendarEvent, to people: [MailAddress], until date: Date) async -> UUID? {
+        guard let session, !people.isEmpty, method != .other else { return nil }
+        let message = Self.message(method, text: text, about: event, from: session.account.address, to: people, answer: nil,
+                                   formatting: session.calendar.formatting)
+        let kept = QueuedMessage(message: message, sendAt: date, queuedAt: AppClock.now())
+        do {
+            try await session.storage.queue.save(kept)
+            return kept.id
+        } catch {
+            await deliver(message, in: session)
+            return nil
+        }
+    }
+
+    /// Sends a kept message now that Undo's pause is over (offline, it waits in the Outbox).
+    func release(_ id: UUID) async {
+        guard let session, let kept = await session.storage.queue.item(id) else { return }
+        await session.storage.queue.remove(id)
+        await deliver(kept.message, in: session)
+    }
+
+    /// Undo: a kept message never goes.
+    func drop(_ id: UUID) async {
+        await session?.storage.queue.remove(id)
+    }
+
     /// The message that carries an invitation, cancellation or answer: a few plain words for any mail program, and the
     /// event itself for those that show it.
     static func message(_ method: Invitation.Method, text: String, about event: CalendarEvent, from sender: MailAddress, to people: [MailAddress],

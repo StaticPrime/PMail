@@ -160,6 +160,25 @@ public final class CalendarWithTasks: CalendarService {
         try await calendars.receive(invitation)
     }
 
+    /// An event's data, with the kind and declining kept for it on this Mac. Tasks and calendars from web addresses
+    /// have none to put back.
+    public func snapshot(of event: CalendarEvent) async -> CalendarSnapshot? {
+        guard !event.isTask, !CalendarFeeds.isFeed(event.calendarID), var snapshot = await calendars.snapshot(of: event) else { return nil }
+        snapshot.kind = await types.type(for: event)
+        snapshot.declining = await declines?.entry(for: event)
+        return snapshot
+    }
+
+    public func restore(_ snapshot: CalendarSnapshot, removing made: CalendarEvent?) async throws {
+        try await calendars.restore(snapshot, removing: made)
+        if let made, EventTypeBook.key(for: made) != EventTypeBook.key(for: snapshot.event) {
+            await types.set(nil, for: made)
+            await declines?.set(nil, for: made)
+        }
+        await types.set(snapshot.kind, for: snapshot.event)
+        await declines?.set(snapshot.declining, for: snapshot.event)
+    }
+
     /// The event as saved, as the kind the person chose: kept on this Mac when the calendar saved it as another kind,
     /// and forgotten here when the calendar holds it itself. The same goes for declining meetings during out of office
     /// or focus time: a calendar that doesn't keep it (it comes back without) has PMail decline them instead.
