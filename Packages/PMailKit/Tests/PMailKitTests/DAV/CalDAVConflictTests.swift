@@ -44,10 +44,14 @@ struct CalDAVConflictTests {
         .replacingOccurrences(of: "DTSTART:20261124T150000Z", with: "DTSTART:20261125T150000Z")
         .replacingOccurrences(of: "DTEND:20261124T160000Z", with: "DTEND:20261125T160000Z")
 
-    private func serve(_ server: Server) -> StubTransport {
+    /// The server, which may refuse queries by UID (as iCloud may) or answer queries for a stretch of time with nothing.
+    private func serve(_ server: Server, findsByUID: Bool = true, findsByTime: Bool = true) -> StubTransport {
         let transport = CalDAVTests.iCloudLikeServer()
-        transport.on("REPORT", "/123456/calendars/work") { _ in
-            DAVStub.multistatus(DAVStub.response(Self.path, DAVStub.calendarData(server.text, etag: server.etag)))
+        transport.on("REPORT", "/123456/calendars/work") { request in
+            let byUID = request.bodyText.contains("prop-filter name=\"UID\"")
+            if byUID, !findsByUID { return .status(403) }
+            if !byUID, !findsByTime { return DAVStub.multistatus() }
+            return DAVStub.multistatus(DAVStub.response(Self.path, DAVStub.calendarData(server.text, etag: server.etag)))
         }
         transport.on("GET", Self.path) { _ in
             StubTransport.Response(status: 200, body: Data(server.text.utf8), headers: ["ETag": server.etag, "Content-Type": "text/calendar"])
@@ -125,6 +129,33 @@ struct CalDAVConflictTests {
         let saved = server.text.replacingOccurrences(of: "\r\n ", with: "")
         #expect(saved.contains("DTSTART:20261125T150000Z") && saved.contains("PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:pug@icloud.com"),
                 "the answer PMail saw for the 24th waits again")
+    }
+
+    // MARK: Finding the copy
+
+    @Test func aServerThatWontFindByUIDStillHasItsCopyUpdated() async throws {
+        // Without the search by UID, the copy is found among the events around the invitation's time, and moved, not
+        // added a second time.
+        let server = Server(Self.copy(), etag: "\"v0\"")
+        let transport = serve(server, findsByUID: false)
+        try await CalDAVTests.service(transport).receive(try #require(Invitation.read(Data(Self.moved.utf8), ownerEmail: "pug@me.com")))
+        let puts = transport.sent("PUT", "/123456/calendars/")
+        #expect(puts.count == 1 && puts.first?.url?.path == Self.path && DAVStub.header(puts.first, "If-Match") == "\"v0\"")
+        #expect(server.text.contains("DTSTART:20261125T150000Z") && server.text.contains("PARTSTAT=NEEDS-ACTION"))
+    }
+
+    @Test func whereACopyIsIsRemembered() async throws {
+        // Seen when the calendar loaded, the copy is found where it was, whatever the server answers to queries.
+        let server = Server(Self.copy(), etag: "\"v0\"")
+        let transport = serve(server, findsByUID: false)
+        let service = try CalDAVTests.service(transport)
+        _ = try await service.loadEvents(in: ["/123456/calendars/work/"], from: ICS.moment("2026-11-22 00:00"), to: ICS.moment("2026-11-29 00:00"))
+        transport.on("REPORT", "/123456/calendars/work") { request in
+            request.bodyText.contains("prop-filter name=\"UID\"") ? .status(403) : DAVStub.multistatus()
+        }
+        try await service.receive(try #require(Invitation.read(Data(Self.moved.utf8), ownerEmail: "pug@me.com")))
+        #expect(transport.sent("GET", Self.path).count == 1 && transport.sent("PUT", "/123456/calendars/").count == 1)
+        #expect(server.text.contains("DTSTART:20261125T150000Z"))
     }
 
     @Test func aKeptAnswerKeepsItsNote() throws {

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Talks WebDAV (RFC 4918) and its calendar and contacts extensions over an `HTTPTransport`: signs each request in,
 /// follows redirects itself, and turns HTTP failures into `PMailError`s (401 is a refused sign-in, 404 is gone,
@@ -6,6 +7,10 @@ import Foundation
 struct WebDAVClient: Sendable {
     /// Most redirects followed for one request.
     static let maximumRedirects = 5
+    /// Failed requests are noted in the Mac's log (Console, subsystem com.pugglesoft.PMail, category DAV): the method,
+    /// the resource's name within its calendar, the status, and the version a change was made on. Nothing of the
+    /// account or its events.
+    static let log = Logger(subsystem: "com.pugglesoft.PMail", category: "DAV")
 
     let credential: Credential
     let transport: any HTTPTransport
@@ -49,7 +54,12 @@ struct WebDAVClient: Sendable {
                 await tokens.invalidateAccessToken()
                 continue
             }
-            guard (200..<300).contains(status) else { throw Self.error(status: status) }
+            guard (200..<300).contains(status) else {
+                let name = address.pathComponents.suffix(2).joined(separator: "/")
+                let condition = headers["If-Match"].map { " If-Match \($0)" } ?? (headers["If-None-Match"].map { " If-None-Match \($0)" } ?? "")
+                Self.log.notice("\(method, privacy: .public) \(name, privacy: .public) answered \(status, privacy: .public)\(condition, privacy: .public)")
+                throw Self.error(status: status)
+            }
             return Response(status: status, body: data, url: response.url ?? address,
                             etag: response.value(forHTTPHeaderField: "ETag").flatMap { $0.isEmpty ? nil : $0 })
         }

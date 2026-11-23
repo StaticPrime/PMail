@@ -183,7 +183,8 @@ enum DAVRequestBody {
 
     /// A CalDAV calendar-query for the event with an iCalendar UID (RFC 4791 section 9.7.5).
     static func calendarQuery(uid: String) -> Data {
-        let match = "<c:prop-filter name=\"UID\"><c:text-match collation=\"i;octet\">\(escape(uid))</c:text-match></c:prop-filter>"
+        // The default collation, which every server has (not all have i;octet); the UID is checked exactly after.
+        let match = "<c:prop-filter name=\"UID\"><c:text-match>\(escape(uid))</c:text-match></c:prop-filter>"
         let events = "<c:comp-filter name=\"VEVENT\">\(match)</c:comp-filter>"
         let filter = "<c:filter><c:comp-filter name=\"VCALENDAR\">\(events)</c:comp-filter></c:filter>"
         return document("c:calendar-query", properties: [.getETag, .calendarData], inner: filter)

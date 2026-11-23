@@ -32,6 +32,9 @@ public actor CalDAVCalendarService: CalendarService {
     /// The calendar data last seen for each resource, by path, so a change can keep what PMail doesn't understand
     /// without downloading the resource again.
     private var resources: [String: Resource] = [:]
+    /// Where each event's resource is, by iCalendar UID, as last loaded or saved: the surest way to find an emailed
+    /// invitation's copy again, since not every server answers a query by UID.
+    private var pathsByUID: [String: String] = [:]
 
     public init(serverURL: URL, credential: Credential, ownerEmail: String, transport: any HTTPTransport = URLSessionTransport()) {
         self.init(serverURL: serverURL, credential: credential, ownerEmail: ownerEmail, transport: transport, timeZone: .current)
@@ -148,6 +151,7 @@ public actor CalDAVCalendarService: CalendarService {
                 for calendar in ICalendarComponent.parse(item.text) where calendar.name == "VCALENDAR" {
                     let reader = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
                     events += reader.events(calendarID: collection.info.id, href: item.path, etag: item.etag, from: start, to: end)
+                    for uid in reader.series.compactMap(\.uid) { pathsByUID[uid] = item.path }
                 }
             }
         }
@@ -367,7 +371,7 @@ public actor CalDAVCalendarService: CalendarService {
         var firstSeen: Found?
         var attempt = 0
         while true {
-            let found = try await resource(withUID: invitation.uid)
+            let found = try await resource(withUID: invitation.uid, near: invitation.event.start)
             if attempt == 0 { firstSeen = found }
             do {
                 try await take(invitation, incoming, over: found, firstSeen: firstSeen)
@@ -400,6 +404,7 @@ public actor CalDAVCalendarService: CalendarService {
                 }
                 let url = main.url.appendingPathComponent(DAVResourceName.name(for: invitation.uid, fileExtension: "ics"))
                 _ = try await save(copy, to: url, ifMatch: nil, isNew: true)
+                pathsByUID[invitation.uid] = url.path(percentEncoded: true)
                 return
             }
             if InvitationText.isNewer(incoming, than: found.calendar) {
@@ -455,27 +460,60 @@ public actor CalDAVCalendarService: CalendarService {
             let uid = InvitationText.mainEvent(of: newer)?.property("UID")?.value ?? UUID().uuidString
             let url = found.url.deletingLastPathComponent().appendingPathComponent(DAVResourceName.name(for: uid, fileExtension: "ics"))
             _ = try await save(newer, to: url, ifMatch: nil, isNew: true)
+            pathsByUID[uid] = url.path(percentEncoded: true)
         }
     }
 
-    /// The resource holding the event with an iCalendar UID, in any of the account's calendars it can change.
-    private func resource(withUID uid: String) async throws -> Found? {
+    /// The resource holding the event with an iCalendar UID, in any of the account's calendars it can change: where
+    /// PMail last saw it, else by asking the server for the UID, else among the events around `when` (servers that don't
+    /// answer a query by UID, as iCloud may not, still answer one for a stretch of time).
+    private func resource(withUID uid: String, near when: Date?) async throws -> Found? {
         if collections.isEmpty { _ = try await loadCalendars() }
-        let query = DAVRequestBody.calendarQuery(uid: uid)
+        if let path = pathsByUID[uid] {
+            if let found = await resource(at: path, uid: uid) { return found }
+            pathsByUID[uid] = nil
+        }
+        if let found = await firstResource(uid: uid, answering: DAVRequestBody.calendarQuery(uid: uid)) { return found }
+        guard let when else { return nil }
+        let around = DAVRequestBody.calendarQuery(from: when.addingTimeInterval(-Self.searchReach), to: when.addingTimeInterval(Self.searchReach))
+        return await firstResource(uid: uid, answering: around)
+    }
+
+    /// How far either side of an invitation's time its copy is looked for, when the server won't find it by UID: as far
+    /// as an organizer might move it.
+    static let searchReach: TimeInterval = 183 * 86_400
+
+    /// A resource by its path, as it is on the server now, when it still holds the event with the UID.
+    private func resource(at path: String, uid: String) async -> Found? {
+        guard let collection = collections.values.filter({ path.hasPrefix($0.info.id) && !$0.info.isReadOnly }).max(by: { $0.info.id.count < $1.info.id.count }),
+              let url = URL(string: path, relativeTo: collection.url)?.absoluteURL,
+              let (data, etag) = try? await client.get(url) else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+        return found(text, etag: etag, at: url, uid: uid)
+    }
+
+    /// The first resource with the UID among a query's answers, in the calendars that can be changed.
+    private func firstResource(uid: String, answering query: Data) async -> Found? {
         for collection in collections.values where !collection.info.isReadOnly {
             let fetched = (try? await Self.fetchEvents(client: client, calendar: collection.url, query: query)) ?? []
             for resource in fetched {
-                guard let calendar = ICalendarComponent.parse(resource.text).first(where: { $0.name == "VCALENDAR" }),
-                      calendar.components.contains(where: { $0.name == "VEVENT" && $0.property("UID")?.value == uid }),
-                      let url = URL(string: resource.path, relativeTo: collection.url)?.absoluteURL else { continue }
-                let path = url.path(percentEncoded: true)
-                let before = resources[path].flatMap { $0.etag == resource.etag ? nil : $0.text }
-                    .flatMap { ICalendarComponent.parse($0).first { $0.name == "VCALENDAR" } }
-                resources[path] = Resource(etag: resource.etag, text: resource.text)
-                return Found(url: url, etag: resource.etag, calendar: calendar, before: before)
+                guard let url = URL(string: resource.path, relativeTo: collection.url)?.absoluteURL,
+                      let found = found(resource.text, etag: resource.etag, at: url, uid: uid) else { continue }
+                return found
             }
         }
         return nil
+    }
+
+    /// A resource's copy of the event with the UID, noting it as seen (with the copy PMail had seen before, if older).
+    private func found(_ text: String, etag: String?, at url: URL, uid: String) -> Found? {
+        guard let calendar = ICalendarComponent.parse(text).first(where: { $0.name == "VCALENDAR" }),
+              calendar.components.contains(where: { $0.name == "VEVENT" && $0.property("UID")?.value == uid }) else { return nil }
+        let path = url.path(percentEncoded: true)
+        let before = resources[path].flatMap { $0.etag == etag ? nil : $0.text }.flatMap { ICalendarComponent.parse($0).first { $0.name == "VCALENDAR" } }
+        resources[path] = Resource(etag: etag, text: text)
+        pathsByUID[uid] = path
+        return Found(url: url, etag: etag, calendar: calendar, before: before)
     }
 
     // MARK: Resources
