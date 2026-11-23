@@ -21,8 +21,26 @@ struct SampleServiceFactory: ServiceFactory {
         return AccountServices(
             mail: SampleMailService(account: account, folders: mail.folders, messages: mail.messages, sorter: storage?.sorter),
             calendar: CalendarWithTasks(calendars: calendars, tasks: tasks,
-                                        types: EventTypeBook(file: place.appendingPathComponent(EventTypeBook.fileName))),
+                                        types: EventTypeBook(file: place.appendingPathComponent(EventTypeBook.fileName)),
+                                        feeds: CalendarFeeds(folder: place.appendingPathComponent(CalendarFeeds.folderName, isDirectory: true),
+                                                             transport: SampleFeedTransport())),
             contacts: SampleContactsService(contacts: SampleData.contacts(for: account), directory: SampleData.directory(for: account)))
+    }
+}
+
+/// Calendar feeds for sample runs, which never reach the internet: calendars.example.com has a team's games every
+/// Saturday; any other address has no calendar.
+struct SampleFeedTransport: HTTPTransport {
+    static let feed = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Example//Fixtures//EN", "X-WR-CALNAME:Riverside Rovers",
+                       "BEGIN:VEVENT", "UID:rovers-games@calendars.example.com", "DTSTAMP:20261101T000000Z",
+                       "DTSTART:20261107T150000Z", "DTEND:20261107T170000Z", "RRULE:FREQ=WEEKLY;BYDAY=SA;COUNT=10",
+                       "SUMMARY:Rovers game", "LOCATION:Riverside Park", "END:VEVENT", "END:VCALENDAR"].joined(separator: "\r\n") + "\r\n"
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let url = request.url ?? URL(string: "https://example.com")!
+        let found = url.host == "calendars.example.com"
+        let response = HTTPURLResponse(url: url, statusCode: found ? 200 : 404, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/calendar"])!
+        return (Data((found ? Self.feed : "Not found").utf8), response)
     }
 }
 
@@ -421,6 +439,35 @@ actor SampleCalendarService: CalendarService {
     private var failsLikeOffline = false
 
     func setFailsLikeOffline(_ fails: Bool) { failsLikeOffline = fails }
+
+    nonisolated var canSubscribeToPeople: Bool { account.kind == .google || account.kind == .microsoft }
+
+    /// Follows someone's calendar: one with a lunch every weekday, for anyone at example.com (others haven't shared).
+    func subscribe(toCalendarOf email: String) async throws -> CalendarInfo {
+        await pause()
+        guard email.lowercased().hasSuffix("@example.com") else {
+            throw PMailError.notSupported("\(email) hasn’t shared their calendar with you, or there’s no calendar for that address.")
+        }
+        let id = FollowedCalendars.calendarID(for: email)
+        let name = email.split(separator: "@").first.map { $0.split(separator: ".").map(\.capitalized).joined(separator: " ") } ?? email
+        let calendar = CalendarInfo(id: id, name: name, colorHex: "#8E24AA", isReadOnly: true, isOther: true, canUnsubscribe: true)
+        guard !calendars.contains(where: { $0.id == id }) else { return calendar }
+        calendars.append(calendar)
+        let week = CalendarGrid(calendar: .current).startOfWeek(AppClock.now())
+        for day in 1...5 {
+            let start = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: week.addingTimeInterval(Double(day) * 86_400)) ?? week
+            counter += 1
+            events.append(CalendarEvent(id: "sample-followed-\(counter)", calendarID: id, title: "\(name.split(separator: " ").first ?? "") — lunch",
+                                        start: start, end: start.addingTimeInterval(3_600), uid: "followed-\(counter)@example.com"))
+        }
+        return calendar
+    }
+
+    func unsubscribe(from calendarID: String) async throws {
+        await pause()
+        calendars.removeAll { $0.id == calendarID }
+        events.removeAll { $0.calendarID == calendarID }
+    }
 
     /// Emails invitations itself and takes in the ones that come by email, as a calendar with no server does (for
     /// the self-test).

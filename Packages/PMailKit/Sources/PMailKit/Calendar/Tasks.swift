@@ -8,12 +8,15 @@ public final class CalendarWithTasks: CalendarService {
     public let calendars: any CalendarService
     public let tasks: (any TaskService)?
     public let types: EventTypeBook
+    /// Calendars followed from web addresses, kept on this Mac for any account.
+    public let feeds: CalendarFeeds?
     private let problem = OSAllocatedUnfairLock<String?>(initialState: nil)
 
-    public init(calendars: any CalendarService, tasks: (any TaskService)?, types: EventTypeBook) {
+    public init(calendars: any CalendarService, tasks: (any TaskService)?, types: EventTypeBook, feeds: CalendarFeeds? = nil) {
         self.calendars = calendars
         self.tasks = tasks
         self.types = types
+        self.feeds = feeds
     }
 
     /// Why the tasks couldn't be loaded the last time they were asked for (signing in again may be needed), if they
@@ -22,6 +25,7 @@ public final class CalendarWithTasks: CalendarService {
 
     public func loadCalendars() async throws -> [CalendarInfo] {
         var calendars = try await self.calendars.loadCalendars()
+        if let feeds { calendars += await feeds.calendars() }
         guard let tasks else { return calendars }
         do {
             let lists = try await tasks.loadTaskLists()
@@ -37,9 +41,11 @@ public final class CalendarWithTasks: CalendarService {
 
     public func loadEvents(in calendarIDs: [String], from start: Date, to end: Date) async throws -> [CalendarEvent] {
         let listIDs = calendarIDs.compactMap(TaskLists.listID(from:))
-        let calendarOnly = calendarIDs.filter { TaskLists.listID(from: $0) == nil }
+        let feedIDs = calendarIDs.filter(CalendarFeeds.isFeed)
+        let calendarOnly = calendarIDs.filter { TaskLists.listID(from: $0) == nil && !CalendarFeeds.isFeed($0) }
         var events = calendarOnly.isEmpty ? [] : try await calendars.loadEvents(in: calendarOnly, from: start, to: end)
         events = await types.applying(to: events)
+        if let feeds, !feedIDs.isEmpty { events += await feeds.events(in: feedIDs, from: start, to: end) }
         if let tasks, !listIDs.isEmpty {
             do {
                 events += try await tasks.loadTasks(in: listIDs, from: start, to: end)
@@ -51,25 +57,55 @@ public final class CalendarWithTasks: CalendarService {
     }
 
     public func create(_ event: CalendarEvent, addingConference: Bool) async throws -> CalendarEvent {
+        try Self.refuseFeed(event)
         if event.isTask { return try await requireTasks().create(Self.asTask(event)) }
         let saved = try await calendars.create(event, addingConference: addingConference)
         return await reconciled(saved, wanted: event)
     }
 
     public func update(_ event: CalendarEvent, scope: RecurrenceScope, addingConference: Bool) async throws -> CalendarEvent {
+        try Self.refuseFeed(event)
         if event.isTask { return try await requireTasks().update(Self.asTask(event)) }
         let saved = try await calendars.update(event, scope: scope, addingConference: addingConference)
         return await reconciled(saved, wanted: event)
     }
 
     public func delete(_ event: CalendarEvent, scope: RecurrenceScope) async throws {
+        try Self.refuseFeed(event)
         if event.isTask { return try await requireTasks().delete(event) }
         try await calendars.delete(event, scope: scope)
         if scope == .allEvents || !event.isRecurring { await types.set(nil, for: event) }
     }
 
     public func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
+        try Self.refuseFeed(event)
         try await calendars.respond(to: event, with: response)
+    }
+
+    // MARK: Subscriptions
+
+    public var canSubscribeToPeople: Bool { calendars.canSubscribeToPeople }
+
+    public func subscribe(toCalendarOf email: String) async throws -> CalendarInfo {
+        try await calendars.subscribe(toCalendarOf: email)
+    }
+
+    /// Follows a calendar from a web address, kept on this Mac.
+    public func subscribe(toFeed address: String, name: String? = nil) async throws -> CalendarInfo {
+        guard let feeds else { throw PMailError.notSupported("This account can’t follow calendars from web addresses.") }
+        return try await feeds.subscribe(to: address, name: name)
+    }
+
+    public func unsubscribe(from calendarID: String) async throws {
+        if CalendarFeeds.isFeed(calendarID) { return try await feeds?.unsubscribe(calendarID) ?? () }
+        try await calendars.unsubscribe(from: calendarID)
+    }
+
+    /// Calendars from web addresses can only be read.
+    private static func refuseFeed(_ event: CalendarEvent) throws {
+        if CalendarFeeds.isFeed(event.calendarID) {
+            throw PMailError.notSupported("This calendar comes from a web address, so its events can’t be changed here.")
+        }
     }
 
     public func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy] {

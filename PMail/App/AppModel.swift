@@ -52,6 +52,8 @@ final class AppModel {
         case contactEditor(Contact)
         /// "Add to Contacts?" for people written to: the account, and who.
         case addPeople(UUID, [MailAddress])
+        /// Subscribing the account showing to a calendar: someone's, or one from a web address.
+        case subscribeToCalendar(SubscribeCalendarSheet.Kind)
         case shortcuts
 
         var id: String {
@@ -61,6 +63,7 @@ final class AppModel {
             case let .eventEditor(draft): "event-\(draft.id)"
             case let .contactEditor(contact): "contact-\(contact.id)"
             case let .addPeople(account, people): "add-people-\(account)-\(people.map(\.email).joined(separator: ","))"
+            case let .subscribeToCalendar(kind): kind == .person ? "subscribe-person" : "subscribe-address"
             case .shortcuts: "shortcuts"
             }
         }

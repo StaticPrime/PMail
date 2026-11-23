@@ -83,6 +83,7 @@ private struct CalendarSidebar: View {
     let app: AppModel
     let model: CalendarViewModel
     @State private var createMenu = PopUpMenu()
+    @State private var subscribeMenu = PopUpMenu()
 
     var body: some View {
         let expanded = app.isSidebarExpanded
@@ -107,7 +108,7 @@ private struct CalendarSidebar: View {
                             .padding(.bottom, 18)
                         if !model.myCalendars.isEmpty { calendarSection("My calendars", model.myCalendars) }
                         if !model.taskLists.isEmpty || model.tasksProblem != nil { taskSection }
-                        if !model.otherCalendars.isEmpty { calendarSection("Other calendars", model.otherCalendars) }
+                        otherCalendarsSection
                     }
                 }
                 .scrollIndicators(.never)
@@ -149,6 +150,43 @@ private struct CalendarSidebar: View {
                 .padding(.bottom, 12)
             }
         }
+    }
+
+    /// Calendars the account follows, with + to subscribe to another: someone's, or one from a web address.
+    private var otherCalendarsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) {
+                Text("Other calendars").font(.pm(14, .medium)).foregroundStyle(Theme.textPrimary)
+                Spacer()
+                IconButton(symbol: "plus", help: "Subscribe to a calendar", size: 26, iconSize: 12) { showSubscribeMenu() }
+                    .background(MenuAnchor(menu: subscribeMenu))
+                    .padding(.trailing, 10)
+            }
+            .padding(.leading, 26)
+            .padding(.vertical, 4)
+            ForEach(model.otherCalendars) { calendar in
+                CalendarToggleRow(name: calendar.name, color: model.color(for: calendar), isOn: model.isVisible(calendar)) {
+                    model.toggle(calendar)
+                }
+                .contextMenu {
+                    if calendar.canUnsubscribe == true {
+                        Button("Unsubscribe from “\(calendar.name)”") { model.unsubscribe(calendar) }
+                    }
+                }
+            }
+        }
+        .padding(.bottom, 12)
+    }
+
+    private func showSubscribeMenu() {
+        var items: [PopUpMenu.Item] = []
+        if model.canSubscribeToPeople {
+            items.append(PopUpMenu.Item(title: "Subscribe to Calendar…", symbol: "person.crop.circle.badge.plus") {
+                app.sheet = .subscribeToCalendar(.person)
+            })
+        }
+        items.append(PopUpMenu.Item(title: "From URL…", symbol: "link") { app.sheet = .subscribeToCalendar(.address) })
+        subscribeMenu.show(items)
     }
 
     private func calendarSection(_ title: String, _ calendars: [CalendarInfo]) -> some View {

@@ -33,8 +33,9 @@ struct LiveServiceFactory: ServiceFactory {
     /// An account's calendars with its tasks beside them, and the kinds of events its calendars can't hold kept on
     /// this Mac.
     private func calendar(_ calendars: any CalendarService, tasks: any TaskService, for account: Account) -> CalendarWithTasks {
-        CalendarWithTasks(calendars: calendars, tasks: tasks,
-                          types: EventTypeBook(file: storage(for: account).appendingPathComponent(EventTypeBook.fileName)))
+        let place = storage(for: account)
+        return CalendarWithTasks(calendars: calendars, tasks: tasks, types: EventTypeBook(file: place.appendingPathComponent(EventTypeBook.fileName)),
+                                 feeds: CalendarFeeds(folder: place.appendingPathComponent(CalendarFeeds.folderName, isDirectory: true)))
     }
 
     private func unavailable(_ reason: PMailError) -> AccountServices {
@@ -60,7 +61,8 @@ struct LiveServiceFactory: ServiceFactory {
         }
         return AccountServices(mail: MicrosoftMailService(email: account.email, tokens: tokenProvider),
                                calendar: calendar(MicrosoftCalendarService(tokens: tokenProvider,
-                                                                           declinedFile: storage(for: account).appendingPathComponent(DeclinedMeetings.fileName)),
+                                                                           declinedFile: storage(for: account).appendingPathComponent(DeclinedMeetings.fileName),
+                                                                           followedFile: storage(for: account).appendingPathComponent(FollowedCalendars.fileName)),
                                                   tasks: MicrosoftTasksService(tokens: tokenProvider), for: account),
                                contacts: MicrosoftContactsService(tokens: tokenProvider))
     }

@@ -58,7 +58,8 @@ public struct OAuthProvider: Sendable, Hashable {
                              clientID: clientID,
                              redirectURI: redirectURI ?? "msauth.com.pugglesoft.PMail://auth",
                              scopes: ["openid", "profile", "email", "offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send",
-                                      "MailboxSettings.ReadWrite", "Calendars.ReadWrite", "Contacts.ReadWrite", "Tasks.ReadWrite", "People.Read"],
+                                      "MailboxSettings.ReadWrite", "Calendars.ReadWrite", "Calendars.Read.Shared", "Contacts.ReadWrite", "Tasks.ReadWrite",
+                                      "People.Read"],
                              extraParameters: ["prompt": "select_account", "response_mode": "query"])
     }
 

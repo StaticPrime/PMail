@@ -61,6 +61,8 @@ struct RootView: View {
                     AddPeopleSheet(model: session.contacts, people: people)
                 }
             }
+        case let .subscribeToCalendar(kind):
+            if let session = app.current { SubscribeCalendarSheet(app: app, model: session.calendar, kind: kind) }
         case .shortcuts:
             ShortcutsView()
         }

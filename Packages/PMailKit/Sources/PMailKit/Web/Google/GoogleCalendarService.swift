@@ -57,6 +57,35 @@ public actor GoogleCalendarService: CalendarService {
         return calendars
     }
 
+    // MARK: Subscriptions
+
+    public nonisolated var canSubscribeToPeople: Bool { true }
+
+    /// Adds another person's calendar to the account's calendar list. Google lets it in only when they've shared it
+    /// with the account or made it public.
+    public func subscribe(toCalendarOf email: String) async throws -> CalendarInfo {
+        let address = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let entry = try await client.post(Self.url("users/me/calendarList"), ["id": .string(address)])
+            guard let calendar = Self.calendar(from: entry) else { throw PMailError.protocolError("Google didn’t say which calendar it added") }
+            defaultReminders[calendar.id] = Self.popupMinutes(entry["defaultReminders"])
+            return calendar
+        } catch PMailError.notFound {
+            throw PMailError.notSupported("\(address) hasn’t shared their calendar with you, or there’s no calendar for that address.")
+        } catch let PMailError.http(status, _) where status == 403 {
+            throw PMailError.notSupported("\(address) hasn’t shared their calendar with you.")
+        }
+    }
+
+    /// Takes a calendar off the account's calendar list; the calendar itself is untouched.
+    public func unsubscribe(from calendarID: String) async throws {
+        do {
+            try await client.delete(Self.url("users/me/calendarList/\(WebURL.segment(calendarID))"))
+        } catch PMailError.notFound {
+            // Already off the list.
+        }
+    }
+
     /// A calendar list entry. Calendars the person can only read and that aren't their own are "other calendars".
     static func calendar(from item: JSONValue) -> CalendarInfo? {
         guard let id = item["id"].nonEmpty else { return nil }
@@ -66,7 +95,8 @@ public actor GoogleCalendarService: CalendarService {
         let meet = item["conferenceProperties"]["allowedConferenceSolutionTypes"].strings.contains("hangoutsMeet")
         return CalendarInfo(id: id, name: item["summaryOverride"].nonEmpty ?? item["summary"].nonEmpty ?? id,
                             colorHex: WebColor.hex(item["backgroundColor"].string) ?? "#1A73E8", isPrimary: primary,
-                            isReadOnly: readOnly, nativeConference: meet ? .meet : nil, isOther: !primary && readOnly)
+                            isReadOnly: readOnly, nativeConference: meet ? .meet : nil, isOther: !primary && readOnly,
+                            canUnsubscribe: !primary && readOnly)
     }
 
     /// Minutes before the start of the pop-up reminders in a list of reminders.

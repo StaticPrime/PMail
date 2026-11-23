@@ -16,9 +16,12 @@ public struct CalendarInfo: Codable, Sendable, Identifiable, Hashable {
     public var nativeConference: Conference.Kind?
     /// Subscribed or shared calendars, listed under "Other calendars".
     public var isOther: Bool
+    /// A calendar the account follows (another person's, or one from a web address) and can stop following; nil for
+    /// any other.
+    public var canUnsubscribe: Bool?
 
     public init(id: String, name: String, colorHex: String = "#1A73E8", isPrimary: Bool = false, isReadOnly: Bool = false,
-                nativeConference: Conference.Kind? = nil, isOther: Bool = false) {
+                nativeConference: Conference.Kind? = nil, isOther: Bool = false, canUnsubscribe: Bool = false) {
         self.id = id
         self.name = name
         self.colorHex = colorHex
@@ -26,6 +29,7 @@ public struct CalendarInfo: Codable, Sendable, Identifiable, Hashable {
         self.isReadOnly = isReadOnly
         self.nativeConference = nativeConference
         self.isOther = isOther
+        self.canUnsubscribe = canUnsubscribe ? true : nil
     }
 }
 
@@ -455,6 +459,18 @@ public protocol CalendarService: AnyObject, Sendable {
     /// Ask for a cancellation before deleting the event.
     func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String?
 
+    // Subscriptions: other calendars the account follows, listed under "Other calendars".
+
+    /// Whether another person's calendar can be followed by their address.
+    var canSubscribeToPeople: Bool { get }
+
+    /// Follows another person's calendar, by their address, and returns it. Throws when they haven't shared it with the
+    /// account (or made it public).
+    func subscribe(toCalendarOf email: String) async throws -> CalendarInfo
+
+    /// Stops following a calendar (one whose `canUnsubscribe` is set). Nothing is deleted from the calendar itself.
+    func unsubscribe(from calendarID: String) async throws
+
     /// Takes in an invitation that came by email, when the owner is one of its guests: a REQUEST adds its event,
     /// waiting for an answer (or updates it), a CANCEL takes it off, and a REPLY puts a guest's answer on an event of
     /// the owner's. `invitationText(for:method: .reply…)` then gives the answer to email, where PMail sends it.
@@ -470,6 +486,16 @@ extension CalendarService {
     public var emailsInvitations: Bool { false }
 
     public var takesInEmailedInvitations: Bool { false }
+
+    public var canSubscribeToPeople: Bool { false }
+
+    public func subscribe(toCalendarOf email: String) async throws -> CalendarInfo {
+        throw PMailError.notSupported("This account can’t follow other people’s calendars.")
+    }
+
+    public func unsubscribe(from calendarID: String) async throws {
+        throw PMailError.notSupported("This calendar can’t be unsubscribed from here.")
+    }
 
     public func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? { nil }
 

@@ -202,6 +202,55 @@ final class CalendarViewModel {
         }
     }
 
+    // MARK: Subscriptions
+
+    /// Whether another person's calendar can be followed by their address.
+    var canSubscribeToPeople: Bool { service.canSubscribeToPeople }
+
+    /// Follows another person's calendar, shows it, and returns it.
+    func subscribe(toCalendarOf email: String) async throws -> CalendarInfo {
+        let calendar = try await service.subscribe(toCalendarOf: email.trimmingCharacters(in: .whitespacesAndNewlines))
+        await calendarsChanged(showing: calendar.id)
+        return calendar
+    }
+
+    /// Follows a calendar from a web address, shows it, and returns it.
+    func subscribe(toFeed address: String, name: String) async throws -> CalendarInfo {
+        guard let withFeeds = service as? CalendarWithTasks else {
+            throw PMailError.notSupported("This account can’t follow calendars from web addresses.")
+        }
+        let calendar = try await withFeeds.subscribe(toFeed: address, name: name)
+        await calendarsChanged(showing: calendar.id)
+        return calendar
+    }
+
+    /// Stops following a calendar.
+    func unsubscribe(_ calendar: CalendarInfo) {
+        Task {
+            do {
+                try await service.unsubscribe(from: calendar.id)
+                app?.show("Unsubscribed from “\(calendar.name)”.")
+                await calendarsChanged(showing: nil)
+            } catch {
+                app?.report(error, doing: "Unsubscribing from “\(calendar.name)”")
+            }
+        }
+    }
+
+    /// The calendars again after one is added or taken away (a new one shown), and their events.
+    private func calendarsChanged(showing id: String?) async {
+        if let loaded = try? await service.loadCalendars() {
+            calendars = loaded
+            await cache?.save(calendars: loaded)
+        }
+        if let id, hiddenCalendarIDs.contains(id) {
+            hiddenCalendarIDs.remove(id)
+            defaults.set(Array(hiddenCalendarIDs), forKey: "HiddenCalendars-\(account.id.uuidString)")
+        }
+        changeCount += 1
+        reload()
+    }
+
     /// Loads the events around what's showing again.
     func reload() {
         loadedInterval = nil

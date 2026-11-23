@@ -8,6 +8,8 @@ public actor MicrosoftCalendarService: CalendarService {
     let client: WebClient
     /// Meetings declined from PMail, which Outlook has taken off the calendar.
     let declined: DeclinedMeetings
+    /// People whose shared calendars the account follows from PMail (Graph can't add them to the account's own list).
+    let followed: FollowedCalendars
     /// The events as last loaded or saved, so an update sends only what the person changed.
     private var loaded: [EventKey: CalendarEvent] = [:]
     /// Each series' RRULE lines, from its series master (occurrences don't say how they repeat), by the master's ID.
@@ -29,14 +31,17 @@ public actor MicrosoftCalendarService: CalendarService {
         var eventID: String
     }
 
-    /// `declinedFile` keeps meetings declined from PMail between launches.
-    public init(tokens: any AccessTokenProvider, transport: any HTTPTransport = URLSessionTransport(), declinedFile: URL? = nil) {
-        self.init(client: WebClient(tokens: tokens, transport: transport), declinedFile: declinedFile)
+    /// `declinedFile` keeps meetings declined from PMail between launches, and `followedFile` the people whose calendars
+    /// the account follows.
+    public init(tokens: any AccessTokenProvider, transport: any HTTPTransport = URLSessionTransport(), declinedFile: URL? = nil,
+                followedFile: URL? = nil) {
+        self.init(client: WebClient(tokens: tokens, transport: transport), declinedFile: declinedFile, followedFile: followedFile)
     }
 
-    init(client: WebClient, declinedFile: URL? = nil) {
+    init(client: WebClient, declinedFile: URL? = nil, followedFile: URL? = nil) {
         self.client = client
         declined = DeclinedMeetings(file: declinedFile)
+        followed = FollowedCalendars(file: followedFile)
     }
 
     static func url(_ path: String, _ query: [(String, String)] = []) throws -> URL {
@@ -53,7 +58,40 @@ public actor MicrosoftCalendarService: CalendarService {
     public func loadCalendars() async throws -> [CalendarInfo] {
         let items = try await client.graphItems(Self.url("calendars", [("$top", "100")]), headers: Self.headers)
         let me = items.first { $0["isDefaultCalendar"].bool == true }?["owner"]["address"].string
-        return items.compactMap { Self.calendar(from: $0, ownerAddress: me) }
+        return items.compactMap { Self.calendar(from: $0, ownerAddress: me) } + (await followed.calendars())
+    }
+
+    // MARK: Subscriptions
+
+    public nonisolated var canSubscribeToPeople: Bool { true }
+
+    /// Follows another person's calendar, where they've shared it with the account: Graph reads it, and PMail keeps
+    /// the person, since Graph can't add it to the account's own list.
+    public func subscribe(toCalendarOf email: String) async throws -> CalendarInfo {
+        let address = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        let calendar: JSONValue
+        do {
+            calendar = try await client.get(Self.personURL(address, "calendar", [("$select", "id,name,owner,hexColor")]), headers: Self.headers)
+        } catch PMailError.notFound {
+            throw PMailError.notSupported("\(address) hasn’t shared their calendar with you, or there’s no calendar for that address.")
+        } catch let PMailError.http(status, _) where status == 403 {
+            throw PMailError.notSupported("\(address) hasn’t shared their calendar with you. If they have, sign in to this account again "
+                + "to let PMail read calendars shared with it.")
+        }
+        let name = calendar["owner"]["name"].nonEmpty ?? address
+        return await followed.add(email: address, name: name, colorHex: WebColor.hex(calendar["hexColor"].string))
+    }
+
+    public func unsubscribe(from calendarID: String) async throws {
+        guard let email = FollowedCalendars.email(from: calendarID) else {
+            throw PMailError.notSupported("This calendar was added in Outlook. Remove it there, or hide it here.")
+        }
+        await followed.remove(email: email)
+    }
+
+    /// Another person's mailbox, or something in it.
+    static func personURL(_ email: String, _ path: String, _ query: [(String, String)] = []) throws -> URL {
+        try WebURL.make(Graph.root + "users/\(WebURL.segment(email))/\(path)", query: query)
     }
 
     /// A calendar. Calendars someone else owns, and ones that can't be changed, are "other calendars".
@@ -91,9 +129,14 @@ public actor MicrosoftCalendarService: CalendarService {
     public func loadEvents(in calendarIDs: [String], from start: Date, to end: Date) async throws -> [CalendarEvent] {
         let client = self.client
         let results = try await WebClient.concurrentMap(WebClient.unique(calendarIDs)) { calendarID -> [CalendarEvent] in
-            let url = try Self.url("calendars/\(WebURL.segment(calendarID))/calendarView",
-                                   [("startDateTime", WebDate.utcString(start)), ("endDateTime", WebDate.utcString(end)),
-                                    ("$top", "500"), ("$select", Self.eventFields)])
+            let window = [("startDateTime", WebDate.utcString(start)), ("endDateTime", WebDate.utcString(end)),
+                          ("$top", "500"), ("$select", Self.eventFields)]
+            // Someone else's calendar the account follows is read from their mailbox.
+            if let email = FollowedCalendars.email(from: calendarID) {
+                let items = (try? await client.graphItems(Self.personURL(email, "calendar/calendarView", window), headers: Self.headers)) ?? []
+                return items.compactMap { Self.event(from: $0, calendarID: calendarID) }
+            }
+            let url = try Self.url("calendars/\(WebURL.segment(calendarID))/calendarView", window)
             do {
                 let items = try await client.graphItems(url, headers: Self.headers)
                 return items.compactMap { Self.event(from: $0, calendarID: calendarID) }

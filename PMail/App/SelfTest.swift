@@ -83,6 +83,8 @@ enum SelfTest {
     /// Reads a value from one of the sample services (they're actors), blocking until it arrives.
     /// The invitation the self-test answers by email.
     static var gardenParty: Invitation?
+    /// Why following a calendar was refused.
+    static var subscribeRefusal: String?
     /// The invitation the self-test takes into a calendar, and the ID of its email.
     static var picnic: Invitation?
     static var picnicMessage: String?
@@ -542,6 +544,50 @@ enum SelfTest {
             let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
             check(read { await service?.allEvents.contains { $0.uid == "picnic@example.com" } } == false, "a cancellation takes it off the calendar")
             service?.emailing.withLock { $0 = false }
+        }
+        step {
+            // Following someone's calendar: it shows under Other calendars, on, with its events.
+            let calendar = session.calendar
+            check(calendar.canSubscribeToPeople, "a Google account can follow other people’s calendars")
+            Task { _ = try? await calendar.subscribe(toCalendarOf: "sam.rivera@example.com") }
+            wait("the followed calendar and its events") {
+                calendar.events.contains { $0.calendarID == FollowedCalendars.calendarID(for: "sam.rivera@example.com") }
+            }
+        }
+        step {
+            let calendar = session.calendar
+            let followed = calendar.otherCalendars.first { $0.id == FollowedCalendars.calendarID(for: "sam.rivera@example.com") }
+            check(followed?.canUnsubscribe == true && followed.map(calendar.isVisible) == true && followed?.isReadOnly == true,
+                  "a followed calendar shows under Other calendars, on, with its events")
+            // Someone who hasn't shared their calendar: it says so.
+            subscribeRefusal = nil
+            Task {
+                do { _ = try await calendar.subscribe(toCalendarOf: "stranger@elsewhere.example") } catch { subscribeRefusal = "\(error)" }
+            }
+            // And a calendar from a web address.
+            Task { _ = try? await calendar.subscribe(toFeed: "webcal://calendars.example.com/rovers.ics", name: "") }
+            wait("the refusal and the calendar from a web address") {
+                subscribeRefusal != nil && calendar.events.contains { $0.title == "Rovers game" }
+            }
+        }
+        step {
+            let calendar = session.calendar
+            check(subscribeRefusal?.contains("hasn’t shared their calendar") == true, "following someone who hasn’t shared says so", subscribeRefusal ?? "")
+            let feed = calendar.otherCalendars.first { $0.name == "Riverside Rovers" }
+            check(feed.map { CalendarFeeds.isFeed($0.id) && $0.isReadOnly && $0.canUnsubscribe == true } == true,
+                  "a calendar from a web address is named from the feed, under Other calendars, read-only")
+            check(calendar.events.contains { $0.title == "Rovers game" && $0.location == "Riverside Park" }, "with its events, repeats and all")
+            // Unsubscribing from both.
+            for subscribed in calendar.otherCalendars where subscribed.canUnsubscribe == true && subscribed.id != "holidays" { calendar.unsubscribe(subscribed) }
+            wait("both unsubscribed") {
+                !calendar.otherCalendars.contains { $0.name == "Riverside Rovers" || $0.id.hasPrefix(FollowedCalendars.prefix) }
+                    && !calendar.events.contains { $0.title == "Rovers game" }
+            }
+        }
+        step {
+            let calendar = session.calendar
+            check(!calendar.otherCalendars.contains { $0.name == "Riverside Rovers" || $0.id.hasPrefix(FollowedCalendars.prefix) }
+                  && !calendar.events.contains { $0.title == "Rovers game" }, "unsubscribing takes a calendar and its events away")
         }
         step {
             let calendar = session.calendar
