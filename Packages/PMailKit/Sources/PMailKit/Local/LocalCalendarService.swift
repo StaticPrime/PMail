@@ -120,18 +120,17 @@ public actor LocalCalendarService: CalendarService {
             guard InvitationText.hasGuest(ownerEmail, in: incoming) else { return }
             incoming.removeProperties("METHOD")
             if let stored {
-                let storedSequence = InvitationText.sequence(of: stored)
-                if invitation.sequence < storedSequence { return }
-                // Sent again without a change that matters: the answer already given stays.
-                if invitation.sequence == storedSequence,
-                   let answer = reader(stored).firstEvent(calendarID: Self.calendarID, href: nil, etag: nil)?.myResponse, answer != .needsAction {
-                    _ = InvitationText.setAnswer(answer, of: ownerEmail, in: &incoming)
-                }
+                // Only a newer version changes it; its time moving asks again, else the answer given stays.
+                guard InvitationText.isNewer(incoming, than: stored) else { return }
+                let answer = reader(stored).firstEvent(calendarID: Self.calendarID, href: nil, etag: nil)?.myResponse
+                InvitationText.carryAnswer(of: ownerEmail, from: stored, into: &incoming, answer: answer)
             }
+            InvitationText.noteVersion(&incoming)
             _ = try store.write(Data(incoming.serialized.utf8), to: name)
         case .cancel:
             // Kept, marked canceled (the whole event, or the times it names), until the owner deletes it.
-            guard var calendar = stored, !organizesIt(calendar), let cancellation = InvitationText.vcalendar(invitation.text) else { return }
+            guard var calendar = stored, !organizesIt(calendar), let cancellation = InvitationText.vcalendar(invitation.text),
+                  InvitationText.sequence(of: cancellation) >= InvitationText.sequence(of: calendar) else { return }
             InvitationText.markCanceled(&calendar, by: cancellation)
             _ = try store.write(Data(calendar.serialized.utf8), to: name)
         case .reply:

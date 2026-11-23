@@ -280,44 +280,64 @@ public actor CalDAVCalendarService: CalendarService {
     }
 
     /// Takes in an invitation that came by email, when the owner is one of its guests. A new one goes on the main
-    /// calendar, waiting for an answer, marked as answered by email (so the server doesn't answer too); a newer
-    /// version replaces it, and a cancellation marks it canceled. One the server took in itself is the server's to keep.
+    /// calendar, waiting for an answer, marked as answered by email (so the server doesn't answer too). A newer
+    /// version updates the calendar's copy, whoever put it there (PMail, the server, another app), its time moving
+    /// asking again; a cancellation marks it canceled.
     public func receive(_ invitation: Invitation) async throws {
         guard invitation.method == .request || invitation.method == .cancel,
               !(invitation.organizer.map { ICalendarEventProperties.isSameMailbox($0.email, ownerEmail) } ?? false),
               var incoming = InvitationText.vcalendar(invitation.text) else { return }
         let found = try await resource(withUID: invitation.uid)
-        if let found, !InvitationText.isAnsweredByEmail(found.calendar) { return }
         switch invitation.method {
         case .request:
             guard InvitationText.hasGuest(ownerEmail, in: incoming) else { return }
             incoming.removeProperties("METHOD")
-            InvitationText.markAnsweredByEmail(&incoming)
-            if let found {
-                let storedSequence = InvitationText.sequence(of: found.calendar)
-                if invitation.sequence < storedSequence { return }
-                // Sent again without a change that matters: the answer already given stays.
-                let reader = ICalendarReader(calendar: found.calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
-                if invitation.sequence == storedSequence,
-                   let answer = reader.firstEvent(calendarID: "", href: nil, etag: nil)?.myResponse, answer != .needsAction {
-                    _ = InvitationText.setAnswer(answer, of: ownerEmail, in: &incoming)
-                }
-                _ = try await save(incoming, to: found.url, ifMatch: found.etag)
-            } else {
+            InvitationText.noteVersion(&incoming)
+            guard let found else {
+                InvitationText.markAnsweredByEmail(&incoming)
                 if collections.isEmpty { _ = try await loadCalendars() }
                 guard let main = collections.values.first(where: { $0.info.isPrimary }) else {
                     throw PMailError.notSupported("This account has no calendar to add the invitation to.")
                 }
                 let url = main.url.appendingPathComponent(DAVResourceName.name(for: invitation.uid, fileExtension: "ics"))
                 _ = try await save(incoming, to: url, ifMatch: nil, isNew: true)
+                return
             }
+            guard InvitationText.isNewer(incoming, than: found.calendar) else { return }
+            let reader = ICalendarReader(calendar: found.calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
+            InvitationText.carryAnswer(of: ownerEmail, from: found.calendar, into: &incoming,
+                                       answer: reader.firstEvent(calendarID: "", href: nil, etag: nil)?.myResponse)
+            try await update(found, to: incoming)
         case .cancel:
-            // Kept, marked canceled (the whole event, or the times it names), until the owner deletes it.
-            guard var calendar = found?.calendar, let found else { return }
+            guard var calendar = found?.calendar, let found,
+                  InvitationText.sequence(of: incoming) >= InvitationText.sequence(of: calendar) else { return }
             InvitationText.markCanceled(&calendar, by: incoming)
-            _ = try await save(calendar, to: found.url, ifMatch: found.etag)
+            try await update(found, to: calendar)
         default:
             return
+        }
+    }
+
+    /// Saves a newer version of an emailed invitation over the calendar's copy. PMail's own copy stays answered by
+    /// email. A copy the server or another app put there keeps the server answering for it, and is changed without the
+    /// server sending anything for the owner (Schedule-Reply: F); if the server won't take the change, PMail's own copy
+    /// replaces it.
+    private func update(_ found: (url: URL, etag: String?, calendar: ICalendarComponent), to calendar: ICalendarComponent) async throws {
+        var newer = calendar
+        if InvitationText.isAnsweredByEmail(found.calendar) {
+            InvitationText.markAnsweredByEmail(&newer)
+            _ = try await save(newer, to: found.url, ifMatch: found.etag)
+            return
+        }
+        do {
+            _ = try await save(newer, to: found.url, ifMatch: found.etag, scheduleReply: false)
+        } catch let PMailError.http(status, _) where status == 403 || status == 409 {
+            try await client.delete(found.url, ifMatch: found.etag, extraHeaders: ["Schedule-Reply": "F"])
+            resources[found.url.path(percentEncoded: true)] = nil
+            InvitationText.markAnsweredByEmail(&newer)
+            let uid = InvitationText.mainEvent(of: newer)?.property("UID")?.value ?? UUID().uuidString
+            let url = found.url.deletingLastPathComponent().appendingPathComponent(DAVResourceName.name(for: uid, fileExtension: "ics"))
+            _ = try await save(newer, to: url, ifMatch: nil, isNew: true)
         }
     }
 
@@ -376,11 +396,13 @@ public actor CalDAVCalendarService: CalendarService {
         return (calendar, resource)
     }
 
-    /// Saves a calendar resource and returns its new ETag (asking for it when the server doesn't send it back).
-    private func save(_ calendar: ICalendarComponent, to url: URL, ifMatch: String?, isNew: Bool = false) async throws -> String? {
+    /// Saves a calendar resource and returns its new ETag (asking for it when the server doesn't send it back). Without
+    /// `scheduleReply`, the server is asked not to send the owner's answer for the change (RFC 6638's Schedule-Reply).
+    private func save(_ calendar: ICalendarComponent, to url: URL, ifMatch: String?, isNew: Bool = false,
+                      scheduleReply: Bool = true) async throws -> String? {
         let text = calendar.serialized
         var etag = try await client.put(url, data: Data(text.utf8), contentType: "text/calendar; charset=utf-8", ifMatch: ifMatch,
-                                        ifNoneMatch: isNew)
+                                        ifNoneMatch: isNew, extraHeaders: scheduleReply ? [:] : ["Schedule-Reply": "F"])
         if etag == nil { etag = (try? await client.etag(of: url)) ?? nil }
         resources[url.path(percentEncoded: true)] = Resource(etag: etag, text: text)
         return etag

@@ -332,10 +332,10 @@ import Testing
         #expect(reply.contains("METHOD:REPLY") && reply.contains("PARTSTAT=ACCEPTED") && !reply.contains("SCHEDULE-AGENT"))
         #expect(try await service.invitationText(for: event, method: .request, attendees: nil) == nil, "the server sends the organizer's own")
 
-        // Not for the owner, or already the server's: nothing's saved.
+        // Not for the owner, or no newer than the calendar's copy: nothing's saved.
         let saves = transport.sent("PUT", "/123456/calendars/").count
         try await service.receive(try #require(Invitation.read(Data(Self.invitation(uid: "other@example.com", guest: "sam@example.com").utf8), ownerEmail: "pug@me.com")))
-        try await service.receive(try #require(Invitation.read(Data(Self.invitation(uid: "theirs@example.com", sequence: 3).utf8), ownerEmail: "pug@me.com")))
+        try await service.receive(try #require(Invitation.read(Data(Self.invitation(uid: "theirs@example.com").utf8), ownerEmail: "pug@me.com")))
         #expect(transport.sent("PUT", "/123456/calendars/").count == saves)
 
         // A cancellation keeps PMail's copy, marked canceled.
@@ -343,5 +343,39 @@ import Testing
                                                                ownerEmail: "pug@me.com")))
         #expect(transport.sent("DELETE", "/123456/calendars/").isEmpty)
         #expect(transport.sent("PUT", "/123456/calendars/work/party").last?.bodyText.contains("STATUS:CANCELLED") == true)
+    }
+
+    /// A newer version of an invitation the server (or another app) put on the calendar updates that copy, asking again
+    /// since its time moved, without the server answering for the owner; if the server won't take the change, PMail's
+    /// own copy replaces it.
+    @Test func theServersCopyOfAnInvitationIsUpdatedToo() async throws {
+        for refuses in [false, true] {
+            let transport = Self.iCloudLikeServer()
+            let declined = Self.invitation(uid: "test3@example.com").replacingOccurrences(of: "PARTSTAT=NEEDS-ACTION;RSVP=TRUE", with: "PARTSTAT=DECLINED")
+                .replacingOccurrences(of: "METHOD:REQUEST\r\n", with: "")
+            transport.on("REPORT", "/123456/calendars/work") { _ in
+                DAVStub.multistatus(DAVStub.response("/123456/calendars/work/apple-made.ics", DAVStub.calendarData(declined, etag: "\"a1\"")))
+            }
+            // New resources are saved; the server's own copy takes the change, or (refusing) doesn't.
+            transport.on("PUT", "/123456/calendars/work/") { _ in DAVStub.saved(etag: "\"p1\"") }
+            transport.on("PUT", "/123456/calendars/work/apple-made.ics") { _ in refuses ? .status(403) : DAVStub.saved(etag: "\"a2\"", status: 204) }
+            transport.on("DELETE", "/123456/calendars/work/apple-made.ics") { _ in .status(204) }
+            let moved = Self.invitation(uid: "test3@example.com", sequence: 1)
+                .replacingOccurrences(of: "DTSTART:20261124T150000Z", with: "DTSTART:20261125T150000Z")
+                .replacingOccurrences(of: "DTEND:20261124T160000Z", with: "DTEND:20261125T160000Z")
+            try await Self.service(transport).receive(try #require(Invitation.read(Data(moved.utf8), ownerEmail: "pug@me.com")))
+            let changed = try #require(transport.sent("PUT", "/123456/calendars/work/apple-made.ics").first)
+            #expect(DAVStub.header(changed, "Schedule-Reply") == "F" && DAVStub.header(changed, "If-Match") == "\"a1\"")
+            #expect(changed.bodyText.contains("DTSTART:20261125T150000Z") && changed.bodyText.contains("PARTSTAT=NEEDS-ACTION"))
+            #expect(!changed.bodyText.contains("SCHEDULE-AGENT"), "the server keeps answering for its own copy")
+            if refuses {
+                let delete = try #require(transport.sent("DELETE", "/123456/calendars/work/apple-made.ics").first)
+                #expect(DAVStub.header(delete, "Schedule-Reply") == "F")
+                let own = try #require(transport.requests.last { $0.httpMethod == "PUT" && $0.url?.path.hasSuffix("apple-made.ics") == false })
+                #expect(DAVStub.header(own, "If-None-Match") == "*" && own.bodyText.contains("SCHEDULE-AGENT=CLIENT"))
+            } else {
+                #expect(transport.sent("DELETE", "/123456/calendars/").isEmpty)
+            }
+        }
     }
 }

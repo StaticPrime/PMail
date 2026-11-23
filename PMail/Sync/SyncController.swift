@@ -158,7 +158,7 @@ final class SyncController {
             Task { await putKeptMailBack(of: session) }
             // Invitations, answers and cancellations that came by email, for a calendar with no server to take them.
             if state != nil, session.services.calendar.takesInEmailedInvitations {
-                let arrived = result.messages.filter { $0.hasAttachments && !sorted.movedOut.contains($0.id) }
+                let arrived = result.messages.filter { ($0.isInvitation == true || $0.hasAttachments) && !sorted.movedOut.contains($0.id) }
                 if !arrived.isEmpty { Task { await takeInInvitations(from: arrived, in: session) } }
             }
         } catch PMailError.notSupported {

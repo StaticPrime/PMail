@@ -863,21 +863,25 @@ final class CalendarViewModel {
     /// first; otherwise the answer goes to the organizer by email.
     func answer(_ invitation: Invitation, with response: AttendeeResponse) {
         Task {
-            if let event = await event(withUID: invitation.uid, near: invitation.event) {
-                return respond(to: event, with: response)
-            }
+            // The calendar's copy is brought up to this invitation first (added, or updated when this is newer), so the
+            // answer goes on the version it's for.
             if service.takesInEmailedInvitations {
-                do {
-                    try await service.receive(invitation)
-                } catch {
-                    app?.report(error, doing: "Adding the invitation to your calendar")
-                    return
+                let existing = await event(withUID: invitation.uid, near: invitation.event)
+                if existing.map({ Self.differs($0, from: invitation.event) }) ?? true {
+                    do {
+                        try await service.receive(invitation)
+                    } catch {
+                        app?.report(error, doing: "Adding the invitation to your calendar")
+                        return
+                    }
                 }
-                if let event = await event(withUID: invitation.uid, near: invitation.event) {
+                if let event = await event(withUID: invitation.uid, near: invitation.event, fresh: true) {
                     respond(to: event, with: response)
                     reload()
+                    return
                 }
-                return
+            } else if let event = await event(withUID: invitation.uid, near: invitation.event) {
+                return respond(to: event, with: response)
             }
             guard let organizer = invitation.organizer,
                   let reply = InvitationText.reply(to: invitation.text, from: account.address, response: response) else {
@@ -920,9 +924,17 @@ final class CalendarViewModel {
         events.first { $0.uid == invitation.uid && !$0.isTask }?.myResponse ?? answeredByEmail[invitation.uid]
     }
 
-    /// The calendar's event with an iCalendar UID: one already loaded, or one found around the invitation's time.
-    func event(withUID uid: String, near reference: CalendarEvent) async -> CalendarEvent? {
-        if let loaded = events.first(where: { $0.uid == uid && !$0.isTask }) { return loaded }
+    /// When the calendar's copy of an invitation happens now, if that's not when this email says (it changed since).
+    func changedTime(of invitation: Invitation) -> CalendarEvent? {
+        guard let copy = events.first(where: { $0.uid == invitation.uid && !$0.isTask }),
+              copy.start != invitation.event.start || copy.end != invitation.event.end else { return nil }
+        return copy
+    }
+
+    /// The calendar's event with an iCalendar UID: one already loaded (unless `fresh`), or one found around the
+    /// invitation's time.
+    func event(withUID uid: String, near reference: CalendarEvent, fresh: Bool = false) async -> CalendarEvent? {
+        if !fresh, let loaded = events.first(where: { $0.uid == uid && !$0.isTask }) { return loaded }
         let ids = calendars.filter { !$0.isTaskList }.map(\.id)
         guard !ids.isEmpty else { return nil }
         let found = try? await service.loadEvents(in: ids, from: reference.start.addingTimeInterval(-86_400), to: reference.end.addingTimeInterval(86_400))

@@ -203,6 +203,67 @@ public enum InvitationText {
         }
     }
 
+    /// Whether an invitation is a newer version than a copy: a higher SEQUENCE, or the same one sent later. A copy
+    /// PMail wrote remembers when the version it came from was sent (X-PMAIL-INVITED), since answering it stamps it
+    /// anew; other copies are compared by their own DTSTAMP.
+    static func isNewer(_ incoming: ICalendarComponent, than stored: ICalendarComponent) -> Bool {
+        let (new, old) = (sequence(of: incoming), sequence(of: stored))
+        if new != old { return new > old }
+        let main = mainEvent(of: stored)
+        let storedStamp = (main?.property(versionProperty) ?? main?.property("DTSTAMP"))?.value.trimmingCharacters(in: .whitespaces) ?? ""
+        let incomingStamp = mainEvent(of: incoming)?.property("DTSTAMP")?.value.trimmingCharacters(in: .whitespaces) ?? ""
+        return incomingStamp > storedStamp
+    }
+
+    /// Where a copy keeps when the invitation it came from was sent.
+    static let versionProperty = "X-PMAIL-INVITED"
+
+    /// Notes, on a version about to be kept, when the invitation it came from was sent.
+    static func noteVersion(_ calendar: inout ICalendarComponent) {
+        for index in calendar.components.indices where calendar.components[index].name == "VEVENT" {
+            if let stamp = calendar.components[index].property("DTSTAMP")?.value {
+                calendar.components[index].setProperty(ICalendarLine(versionProperty, value: stamp))
+            }
+        }
+    }
+
+    /// Whether two versions of an event happen at different times: when it starts or ends, how it repeats, or when
+    /// one of its times was moved to.
+    static func timesDiffer(_ first: ICalendarComponent, _ second: ICalendarComponent) -> Bool {
+        func times(_ calendar: ICalendarComponent) -> [String] {
+            calendar.components.filter { $0.name == "VEVENT" }.map { event in
+                ["RECURRENCE-ID", "DTSTART", "DTEND", "DURATION", "RRULE", "RDATE", "EXDATE"].map { name in
+                    event.properties(name).map { line in
+                        (line.parameters.map { "\($0.name)=\($0.values.joined(separator: ","))" }.sorted() + [line.value]).joined(separator: ";")
+                    }.joined(separator: "|")
+                }.joined(separator: "\n")
+            }.sorted()
+        }
+        return times(first) != times(second)
+    }
+
+    /// Takes the owner's answer into a newer version of their invitation: waiting for an answer again when its time
+    /// moved, else the answer they already gave.
+    static func carryAnswer(of owner: String, from stored: ICalendarComponent, into incoming: inout ICalendarComponent, answer: AttendeeResponse?) {
+        if timesDiffer(stored, incoming) {
+            if setAnswer(.needsAction, of: owner, in: &incoming) {
+                for event in incoming.components.indices where incoming.components[event].name == "VEVENT" {
+                    for index in incoming.components[event].properties.indices where incoming.components[event].properties[index].name == "ATTENDEE" {
+                        guard let address = ICalendarEventProperties.address(of: incoming.components[event].properties[index]),
+                              ICalendarEventProperties.isSameMailbox(address.email, owner) else { continue }
+                        incoming.components[event].properties[index].setParameter("RSVP", "TRUE")
+                    }
+                }
+            }
+        } else if let answer, answer != .needsAction {
+            _ = setAnswer(answer, of: owner, in: &incoming)
+        }
+    }
+
+    static func mainEvent(of calendar: ICalendarComponent) -> ICalendarComponent? {
+        calendar.components.first { $0.name == "VEVENT" && $0.property("RECURRENCE-ID") == nil } ?? calendar.components.first { $0.name == "VEVENT" }
+    }
+
     static func sequence(of calendar: ICalendarComponent) -> Int {
         let main = calendar.components.first { $0.name == "VEVENT" && $0.property("RECURRENCE-ID") == nil }
             ?? calendar.components.first { $0.name == "VEVENT" }

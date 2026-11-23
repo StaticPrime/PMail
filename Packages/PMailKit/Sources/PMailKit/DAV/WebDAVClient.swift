@@ -98,15 +98,16 @@ struct WebDAVClient: Sendable {
 
     /// Saves a resource. With `ifNoneMatch` it must not exist yet; with `ifMatch` it must still be that version.
     /// Returns the new ETag, when the server gives one.
-    func put(_ url: URL, data: Data, contentType: String, ifMatch: String? = nil, ifNoneMatch: Bool = false) async throws -> String? {
-        var headers = ["Content-Type": contentType]
+    func put(_ url: URL, data: Data, contentType: String, ifMatch: String? = nil, ifNoneMatch: Bool = false,
+             extraHeaders: [String: String] = [:]) async throws -> String? {
+        var headers = extraHeaders.merging(["Content-Type": contentType]) { $1 }
         if let ifMatch { headers["If-Match"] = ifMatch }
         if ifNoneMatch { headers["If-None-Match"] = "*" }
         return try await send("PUT", to: url, headers: headers, body: data).etag
     }
 
-    func delete(_ url: URL, ifMatch: String?) async throws {
-        var headers: [String: String] = [:]
+    func delete(_ url: URL, ifMatch: String?, extraHeaders: [String: String] = [:]) async throws {
+        var headers = extraHeaders
         if let ifMatch { headers["If-Match"] = ifMatch }
         _ = try await send("DELETE", to: url, headers: headers)
     }

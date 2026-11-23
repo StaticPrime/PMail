@@ -371,6 +371,12 @@ private struct InvitationCard: View {
                 if let location = event.location, !location.isEmpty {
                     Text(location).font(.pm(12.5)).foregroundStyle(Theme.textSecondary).lineLimit(1)
                 }
+                // An older email: the calendar has the time it changed to.
+                if let now = calendar.changedTime(of: invitation) {
+                    Label("Changed since: \(calendar.formatting.eventTime(start: now.start, end: now.end, isAllDay: now.isAllDay, includeDate: true))",
+                          systemImage: "arrow.triangle.2.circlepath")
+                        .font(.pm(12)).foregroundStyle(Theme.textSecondary)
+                }
                 status(invitation, calendar).padding(.top, 4)
             }
             Spacer(minLength: 0)

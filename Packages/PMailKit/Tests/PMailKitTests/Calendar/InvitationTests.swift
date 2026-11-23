@@ -170,4 +170,83 @@ struct InvitationTests {
         #expect(invitation.uid == "abc@example.com" && invitation.method == .request && invitation.event.title == "Roadmap")
         #expect(parsed.summary(id: "m1").isInvitation == true, "the list knows it's an invitation")
     }
+
+    /// An invitation as Google sends one: a time zone with daylight saving rules, times in that zone (or in UTC). It
+    /// reads as the time it says, wherever the Mac is.
+    @Test func invitationTimesReadAsTheySay() throws {
+        let zone = "BEGIN:VTIMEZONE\nTZID:America/New_York\nX-LIC-LOCATION:America/New_York\nBEGIN:DAYLIGHT\nTZOFFSETFROM:-0500\nTZOFFSETTO:-0400\n"
+            + "TZNAME:EDT\nDTSTART:19700308T020000\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU\nEND:DAYLIGHT\nBEGIN:STANDARD\nTZOFFSETFROM:-0400\n"
+            + "TZOFFSETTO:-0500\nTZNAME:EST\nDTSTART:19701101T020000\nRRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU\nEND:STANDARD\nEND:VTIMEZONE\n"
+        for times in ["DTSTART;TZID=America/New_York:20261123T210000\nDTEND;TZID=America/New_York:20261123T220000",
+                      "DTSTART:20261124T020000Z\nDTEND:20261124T030000Z"] {
+            let text = ICS.calendar("METHOD:REQUEST\n" + zone + "BEGIN:VEVENT\n" + times + "\nDTSTAMP:20261122T120000Z\nUID:test3@google.com\n"
+                + "SEQUENCE:1\nSUMMARY:test3\nORGANIZER;CN=Jason:mailto:jason@gmail.example\n"
+                + "ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@example.com\nEND:VEVENT")
+            for mac in ["America/New_York", "UTC", "Asia/Tokyo"] {
+                let invitation = try #require(Invitation.read(Data(text.utf8), ownerEmail: "me@example.com", timeZone: ICS.timeZone(mac)))
+                #expect(invitation.event.start == WebFixtures.date("2026-11-24T02:00:00Z") && invitation.event.end == WebFixtures.date("2026-11-24T03:00:00Z"),
+                        "\(times.prefix(30)) on a Mac in \(mac): \(invitation.event.start)")
+            }
+        }
+    }
+
+    /// One time of a repeating event moved (Tuesday 9 PM to Monday 9 PM), sent on its own: the invitation is for when
+    /// it is now, not when it was.
+    @Test func aMovedTimeReadsAsItsNewTime() throws {
+        let text = ICS.calendar("""
+        METHOD:REQUEST
+        BEGIN:VEVENT
+        UID:weekly@google.com
+        RECURRENCE-ID:20261125T020000Z
+        DTSTART:20261124T020000Z
+        DTEND:20261124T030000Z
+        DTSTAMP:20261122T120000Z
+        SEQUENCE:1
+        SUMMARY:test3
+        ORGANIZER:mailto:jason@gmail.example
+        ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com
+        END:VEVENT
+        """)
+        let invitation = try #require(Invitation.read(Data(text.utf8), ownerEmail: "me@example.com", timeZone: ICS.timeZone("America/New_York")))
+        #expect(invitation.event.start == WebFixtures.date("2026-11-24T02:00:00Z"), "\(invitation.event.start)")
+    }
+
+    /// A newer version that moves the invitation asks again, even when it still carries the answer given before (as
+    /// Google's can); one that changes something else keeps the answer; an older one changes nothing.
+    @Test func aMovedInvitationAsksAgain() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        func version(_ sequence: Int, day: Int, stamp: String, myAnswer: String, notes: String = "Bring snacks") -> Invitation? {
+            Invitation.read(Data(ICS.calendar("""
+            METHOD:REQUEST
+            BEGIN:VEVENT
+            UID:test3@google.com
+            SEQUENCE:\(sequence)
+            DTSTAMP:\(stamp)
+            DTSTART:202611\(day)T020000Z
+            DTEND:202611\(day)T030000Z
+            SUMMARY:test3
+            DESCRIPTION:\(notes)
+            ORGANIZER:mailto:jason@gmail.example
+            ATTENDEE;PARTSTAT=\(myAnswer):mailto:me@example.com
+            END:VEVENT
+            """).utf8), ownerEmail: "me@example.com")
+        }
+        let mine = calendar(folder)
+        try await mine.receive(try #require(version(0, day: 24, stamp: "20261122T100000Z", myAnswer: "NEEDS-ACTION")))
+        let first = try #require(try await week(mine).first)
+        try await mine.respond(to: first, with: .declined)
+
+        try await mine.receive(try #require(version(1, day: 25, stamp: "20261122T110000Z", myAnswer: "DECLINED")))
+        var current = try #require(try await week(mine).first)
+        #expect(current.start == WebFixtures.date("2026-11-25T02:00:00Z") && current.myResponse == .needsAction, "moved, it asks again")
+
+        try await mine.respond(to: current, with: .tentative)
+        try await mine.receive(try #require(version(1, day: 25, stamp: "20261122T120000Z", myAnswer: "NEEDS-ACTION", notes: "Bring drinks")))
+        current = try #require(try await week(mine).first)
+        #expect(current.notes == "Bring drinks" && current.myResponse == .tentative, "another change keeps the answer")
+
+        try await mine.receive(try #require(version(0, day: 24, stamp: "20261122T100000Z", myAnswer: "NEEDS-ACTION")))
+        #expect(try await week(mine).first?.start == WebFixtures.date("2026-11-25T02:00:00Z"), "an older one changes nothing")
+    }
 }
