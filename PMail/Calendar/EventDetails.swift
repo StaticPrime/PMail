@@ -70,7 +70,9 @@ struct EventDetailsView: View {
                             .font(.pm(13))
                             .foregroundStyle(Theme.textPrimary)
                         if event.declinesInvitations {
-                            Text("Declining meetings during this time" + (event.declineMessage.map { ": “\($0)”" } ?? ""))
+                            Text((event.declinesExisting ? "Declining meetings during this time, including the ones already planned"
+                                                         : "Declining new invitations during this time")
+                                 + (event.declineMessage.map { ": “\($0)”" } ?? ""))
                                 .font(.pm(12))
                                 .foregroundStyle(Theme.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)

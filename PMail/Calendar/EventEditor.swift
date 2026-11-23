@@ -345,7 +345,8 @@ struct EventEditor: View {
             })
     }
 
-    /// Declining meetings during out of office or focus time, with a message for the people whose meetings are declined.
+    /// Declining meetings during out of office or focus time: new invitations only, or the meetings already planned
+    /// too, with a message for the people whose meetings are declined.
     private var declineRow: some View {
         field(icon: "person.crop.circle.badge.xmark") {
             VStack(alignment: .leading, spacing: 8) {
@@ -353,13 +354,22 @@ struct EventEditor: View {
                     .toggleStyle(.checkbox)
                     .padding(.top, 5)
                 if draft.declinesInvitations {
+                    Picker("Decline", selection: $draft.declinesExisting) {
+                        Text("Only new invitations").tag(false)
+                        Text("New invitations and meetings already planned").tag(true)
+                    }
+                    .pickerStyle(.radioGroup)
+                    .labelsHidden()
                     TextField("Message for declined meetings (optional)", text: $draft.declineMessage)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 420)
                 }
-                Text("Where the calendar can: the main calendar of a work or school account.")
+                Text(model.providerDeclines(draft)
+                     ? "A work or school account’s calendar declines them itself; otherwise PMail does, while it’s open."
+                     : "PMail declines them for you while it’s open, and sends the organizers your message.")
                     .font(.pm(11.5))
                     .foregroundStyle(Theme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

@@ -23,7 +23,8 @@ struct SampleServiceFactory: ServiceFactory {
             calendar: CalendarWithTasks(calendars: calendars, tasks: tasks,
                                         types: EventTypeBook(file: place.appendingPathComponent(EventTypeBook.fileName)),
                                         feeds: CalendarFeeds(folder: place.appendingPathComponent(CalendarFeeds.folderName, isDirectory: true),
-                                                             transport: SampleFeedTransport())),
+                                                             transport: SampleFeedTransport()),
+                                        declines: DeclineBook(file: place.appendingPathComponent(DeclineBook.fileName))),
             contacts: SampleContactsService(contacts: SampleData.contacts(for: account), directory: SampleData.directory(for: account)))
     }
 }
@@ -570,7 +571,10 @@ actor SampleCalendarService: CalendarService {
         var saved = event
         saved.isTypeLocal = false
         if !(holds[event.calendarID] ?? []).contains(event.type) { saved.type = .event }
-        if saved.type == .event { (saved.declinesInvitations, saved.declineMessage) = (false, nil) }
+        // Like the real ones, only a Google account's main calendar declines meetings for out of office and focus time.
+        if saved.type == .event || account.kind != .google || event.calendarID != "primary" {
+            (saved.declinesInvitations, saved.declineMessage, saved.declinesExisting) = (false, nil, false)
+        }
         return saved
     }
 
@@ -687,6 +691,21 @@ actor SampleCalendarService: CalendarService {
         try reach()
         if let index = events.firstIndex(where: { $0.id == event.id }) { events[index].myResponse = response }
     }
+
+    /// The messages sent with answers, by event (for the self-test).
+    private var answerComments: [String: String] = [:]
+
+    func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws {
+        try await respond(to: event, with: response)
+        answerComments[event.id] = comment
+    }
+
+    func comment(for eventID: String) -> String? { answerComments[eventID] }
+
+    func event(_ id: String) -> CalendarEvent? { events.first { $0.id == id } }
+
+    /// Takes events away, as if deleted somewhere else (for the self-test).
+    func remove(_ ids: [String]) { events.removeAll { ids.contains($0.id) } }
 
     var allEvents: [CalendarEvent] { events }
 }

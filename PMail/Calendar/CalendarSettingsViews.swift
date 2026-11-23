@@ -129,6 +129,9 @@ struct CalendarSettingsPane: View {
                     Picker("Account", selection: Binding(get: { account }, set: { accountID = $0; calendarID = nil })) {
                         ForEach(app.accounts.accounts) { account in Text(account.email).tag(Optional(account.id)) }
                     }
+                }
+                if let model { conflictSection(model) }
+                Section {
                     Picker("Calendar", selection: Binding(get: { calendar?.id }, set: { calendarID = $0 })) {
                         ForEach(choices) { calendar in Text(calendar.name).tag(Optional(calendar.id)) }
                     }
@@ -147,6 +150,30 @@ struct CalendarSettingsPane: View {
         .onAppear { follow(app.calendarSettingsTarget) }
         .onChange(of: app.calendarSettingsTarget) { _, target in follow(target) }
         .onChange(of: settings) { _, changed in scheduleSave(changed) }
+    }
+
+    /// The account's automatic answer to invitations that overlap an event it's going to, and its message.
+    private func conflictSection(_ model: CalendarViewModel) -> some View {
+        Section {
+            Picker("Automatic reply", selection: Binding(get: { model.preferences.conflictReply?.response },
+                                                         set: { model.setConflictReply(response: $0) })) {
+                Text("None").tag(AttendeeResponse?.none)
+                Text("No").tag(Optional(AttendeeResponse.declined))
+                Text("Maybe").tag(Optional(AttendeeResponse.tentative))
+            }
+            if model.preferences.conflictReply != nil {
+                TextField("Message", text: Binding(get: { model.preferences.conflictReply?.message ?? "" },
+                                                   set: { model.setConflictReply(message: $0) }), axis: .vertical)
+                    .lineLimit(1...4)
+            }
+        } header: {
+            Text("Invitations that conflict")
+        } footer: {
+            Text("For new invitations that overlap an event you’re going to on this account’s own calendars: PMail answers them for you "
+                 + "while it’s open, and sends the organizer your message. Invitations already waiting, all-day ones and ones you’ve "
+                 + "answered are left to you.")
+                .font(.pm(11.5)).foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder

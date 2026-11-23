@@ -39,13 +39,13 @@ import Testing
         let calendars = try await service(transport).loadCalendars()
         #expect(calendars == [
             CalendarInfo(id: "jamie@gmail.com", name: "jamie@gmail.com", colorHex: "#9FE1E7", isPrimary: true, nativeConference: .meet,
-                         defaultReminders: [10]),
+                         defaultReminders: [10], isOwned: true),
             CalendarInfo(id: "family123@group.calendar.google.com", name: "Rivera family", colorHex: "#F83A22", nativeConference: .meet,
-                         defaultReminders: []),
+                         defaultReminders: [], isOwned: false),
             CalendarInfo(id: "en.usa#holiday@group.v.calendar.google.com", name: "Holidays in United States", colorHex: "#16A765",
-                         isReadOnly: true, isOther: true, canUnsubscribe: true, defaultReminders: []),
+                         isReadOnly: true, isOther: true, canUnsubscribe: true, defaultReminders: [], isOwned: false),
             CalendarInfo(id: "alex@example.com", name: "Alex Kim", colorHex: "#CABDBF", isReadOnly: true, isOther: true, canUnsubscribe: true,
-                         defaultReminders: []),
+                         defaultReminders: [], isOwned: false),
         ])
         #expect(transport.requests.map { $0.query("pageToken") } == [nil, "p2"])
     }
@@ -331,6 +331,28 @@ import Testing
             ["email": "jamie@gmail.com", "self": true, "responseStatus": "accepted"],
             ["email": "room4@resource.calendar.google.com", "displayName": "Room 4", "resource": true, "responseStatus": "accepted"],
         ]])
+    }
+
+    /// An answer can carry a message for the organizer, which Google sends with it; a later answer without one clears
+    /// it, since it was for the earlier answer.
+    @Test func answersCarryAMessageForTheOrganizer() async throws {
+        let transport = StubTransport()
+        transport.on("GET", "\(Self.events)/meet1") { _ in
+            .json(#"""
+            {"id": "meet1", "attendees": [
+                {"email": "alex@example.com", "organizer": true, "responseStatus": "accepted"},
+                {"email": "jamie@gmail.com", "self": true, "responseStatus": "needsAction", "comment": "Old note"}
+            ]}
+            """#)
+        }
+        transport.on("PATCH", "\(Self.events)/meet1") { _ in .json(#"{"id": "meet1"}"#) }
+        let event = CalendarEvent(id: "meet1", calendarID: Self.primary, start: Date(), end: Date())
+        let calendar = service(transport)
+        try await calendar.respond(to: event, with: .declined, comment: "  I have another event at this time. ")
+        try await calendar.respond(to: event, with: .accepted)
+        let patches = transport.sent("PATCH", "\(Self.events)/meet1").map { $0.bodyJSONValue["attendees"].array.last }
+        #expect(patches.first??["responseStatus"] == "declined" && patches.first??["comment"] == "I have another event at this time.")
+        #expect(patches.last??["responseStatus"] == "accepted" && patches.last??["comment"] == .null)
     }
 
     @Test func busyCalendarAnswersAreRetried() async throws {

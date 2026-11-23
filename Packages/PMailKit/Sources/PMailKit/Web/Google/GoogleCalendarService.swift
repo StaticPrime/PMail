@@ -159,7 +159,8 @@ public actor GoogleCalendarService: CalendarService {
         return CalendarInfo(id: id, name: item["summaryOverride"].nonEmpty ?? item["summary"].nonEmpty ?? id,
                             colorHex: WebColor.hex(item["backgroundColor"].string) ?? "#1A73E8", isPrimary: primary,
                             isReadOnly: readOnly, nativeConference: meet ? .meet : nil, isOther: !primary && readOnly,
-                            canUnsubscribe: !primary && readOnly, defaultReminders: popupMinutes(item["defaultReminders"]))
+                            canUnsubscribe: !primary && readOnly, defaultReminders: popupMinutes(item["defaultReminders"]),
+                            isOwned: role == "owner")
     }
 
     /// Minutes before the start of the pop-up reminders in a list of reminders.
@@ -281,6 +282,7 @@ public actor GoogleCalendarService: CalendarService {
                              etag: item["etag"].nonEmpty, type: type,
                              declinesInvitations: declineMode.map { $0 != "declineNone" } ?? false,
                              declineMessage: type == .event ? nil : kindDetails["declineMessage"].nonEmpty,
+                             declinesExisting: declineMode == "declineAllConflictingInvitations",
                              visibility: visibility(item["visibility"].string),
                              guestsCanModify: item["guestsCanModify"].bool ?? false,
                              guestsCanInviteOthers: item["guestsCanInviteOthers"].bool ?? true,
@@ -490,6 +492,12 @@ public actor GoogleCalendarService: CalendarService {
     }
 
     public func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
+        try await respond(to: event, with: response, comment: nil)
+    }
+
+    /// Answers with a message, which Google sends the organizer with the answer. An answer without one clears an
+    /// earlier message, which was for the earlier answer.
+    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws {
         // The whole guest list goes back, so read it fresh and change only the owner's answer.
         let current = try await client.get(Self.eventsURL(event.calendarID, event.id))
         var attendees = current["attendees"].array
@@ -499,6 +507,11 @@ public actor GoogleCalendarService: CalendarService {
             throw PMailError.notSupported("You aren’t a guest at this event, so there’s no invitation to answer.")
         }
         entry["responseStatus"] = .string(Self.responseText(response))
+        if let comment = comment?.trimmingCharacters(in: .whitespacesAndNewlines), !comment.isEmpty {
+            entry["comment"] = .string(comment)
+        } else {
+            entry["comment"] = nil
+        }
         attendees[mine] = .object(entry)
         let url = try Self.eventsURL(event.calendarID, event.id, [("sendUpdates", "all")])
         _ = try await client.patch(url, ["attendees": .array(attendees)])
@@ -615,16 +628,19 @@ public actor GoogleCalendarService: CalendarService {
             body[edited.type == .outOfOffice ? "outOfOfficeProperties" : "focusTimeProperties"] = statusProperties(edited)
             if edited.type == .outOfOffice { body["transparency"] = "opaque" }
         } else if isStatusEvent(edited.type), let original, original.type == edited.type,
-                  original.declinesInvitations != edited.declinesInvitations || original.declineMessage != edited.declineMessage {
+                  original.declinesInvitations != edited.declinesInvitations || original.declineMessage != edited.declineMessage
+                    || original.declinesExisting != edited.declinesExisting {
             body[edited.type == .outOfOffice ? "outOfOfficeProperties" : "focusTimeProperties"] = statusProperties(edited)
         }
         return body
     }
 
-    /// What out of office or focus time does with invitations for its time: declines them (all of them, with the
-    /// message) or none; focus time also asks chat not to disturb while declining.
+    /// What out of office or focus time does with invitations for its time: declines new ones (and the meetings
+    /// already planned, if asked), with the message, or none; focus time also asks chat not to disturb while declining.
     static func statusProperties(_ event: CalendarEvent) -> JSONValue {
-        var value: [String: JSONValue] = ["autoDeclineMode": .string(event.declinesInvitations ? "declineAllConflictingInvitations" : "declineNone")]
+        let mode = !event.declinesInvitations ? "declineNone"
+            : event.declinesExisting ? "declineAllConflictingInvitations" : "declineOnlyNewConflictingInvitations"
+        var value: [String: JSONValue] = ["autoDeclineMode": .string(mode)]
         if event.declinesInvitations, let message = event.declineMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
             value["declineMessage"] = .string(message)
         }

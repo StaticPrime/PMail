@@ -13,17 +13,17 @@ final class InvitationMailer {
 
     /// Sends the iCalendar text about an event (`InvitationText`, or a calendar's `invitationText`) to some people.
     func send(_ method: Invitation.Method, text: String, about event: CalendarEvent, to people: [MailAddress],
-              answer: AttendeeResponse? = nil) {
+              answer: AttendeeResponse? = nil, note: String? = nil) {
         guard let session, !people.isEmpty, method != .other else { return }
         let message = Self.message(method, text: text, about: event, from: session.account.address, to: people, answer: answer,
-                                   formatting: session.calendar.formatting)
+                                   note: note, formatting: session.calendar.formatting)
         Task { await deliver(message, in: session) }
     }
 
     /// The message that carries an invitation, cancellation or answer: a few plain words for any mail program, and the
     /// event itself for those that show it.
     static func message(_ method: Invitation.Method, text: String, about event: CalendarEvent, from sender: MailAddress, to people: [MailAddress],
-                        answer: AttendeeResponse?, formatting: MailFormatting) -> OutgoingMessage {
+                        answer: AttendeeResponse?, note: String? = nil, formatting: MailFormatting) -> OutgoingMessage {
         let when = formatting.eventTime(start: event.start, end: event.end, isAllDay: event.isAllDay, includeDate: true)
         let title = event.shownTitle
         let name = sender.name.flatMap { $0.isEmpty ? nil : $0 } ?? sender.email
@@ -56,6 +56,7 @@ final class InvitationMailer {
             default: said = "answered the invitation to"
             }
             lines = ["\(name) \(said) \(title).", "", when]
+            if let note = note?.trimmingCharacters(in: .whitespacesAndNewlines), !note.isEmpty { lines += ["", note] }
         case .other:
             subject = title
             lines = [title]

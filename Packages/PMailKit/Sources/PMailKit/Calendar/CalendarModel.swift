@@ -22,9 +22,13 @@ public struct CalendarInfo: Codable, Sendable, Identifiable, Hashable {
     /// The notifications new timed events on it get, in minutes before they start, where the provider keeps them for
     /// the calendar (nil where it doesn't).
     public var defaultReminders: [Int]?
+    /// Whether the account owns it, where the provider says and it isn't plain from the rest (a Google calendar shared
+    /// with the account that it may change isn't its own); nil where it doesn't say.
+    public var isOwned: Bool?
 
     public init(id: String, name: String, colorHex: String = "#1A73E8", isPrimary: Bool = false, isReadOnly: Bool = false,
-                nativeConference: Conference.Kind? = nil, isOther: Bool = false, canUnsubscribe: Bool = false, defaultReminders: [Int]? = nil) {
+                nativeConference: Conference.Kind? = nil, isOther: Bool = false, canUnsubscribe: Bool = false, defaultReminders: [Int]? = nil,
+                isOwned: Bool? = nil) {
         self.id = id
         self.name = name
         self.colorHex = colorHex
@@ -34,6 +38,7 @@ public struct CalendarInfo: Codable, Sendable, Identifiable, Hashable {
         self.isOther = isOther
         self.canUnsubscribe = canUnsubscribe ? true : nil
         self.defaultReminders = defaultReminders
+        self.isOwned = isOwned
     }
 }
 
@@ -280,10 +285,12 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
     public var isCompleted: Bool
     /// Whether `type` is PMail's own, kept on this Mac because the calendar can't hold it.
     public var isTypeLocal: Bool
-    /// For out of office and focus time where the calendar can (a Google Workspace calendar): whether invitations for
-    /// that time are declined, and the message they're declined with.
+    /// For out of office and focus time: whether invitations for that time are declined, and the message they're
+    /// declined with. A Google Workspace calendar does it itself; elsewhere PMail does, and keeps these on this Mac.
     public var declinesInvitations: Bool
     public var declineMessage: String?
+    /// Whether the meetings already planned for that time are declined too, not only new invitations.
+    public var declinesExisting: Bool
     /// Who can see its details.
     public var visibility: EventVisibility
     /// What its guests may do, where the calendar keeps it: change it, invite others, see the guest list.
@@ -297,7 +304,7 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
                 recurrence: [String] = [], seriesID: String? = nil, occurrenceDate: Date? = nil, status: Status = .confirmed,
                 myResponse: AttendeeResponse? = nil, availability: EventAvailability = .busy, reminderMinutes: [Int] = [],
                 webLink: URL? = nil, uid: String? = nil, resourceHref: String? = nil, etag: String? = nil, type: EventType = .event,
-                isCompleted: Bool = false, isTypeLocal: Bool = false, declinesInvitations: Bool = false, declineMessage: String? = nil,
+                isCompleted: Bool = false, isTypeLocal: Bool = false, declinesInvitations: Bool = false, declineMessage: String? = nil, declinesExisting: Bool = false,
                 visibility: EventVisibility = .default, guestsCanModify: Bool = false, guestsCanInviteOthers: Bool = true,
                 guestsCanSeeOtherGuests: Bool = true, notesHTML: String? = nil) {
         self.id = id
@@ -328,6 +335,7 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
         self.isCompleted = isCompleted
         self.isTypeLocal = isTypeLocal
         self.declinesInvitations = declinesInvitations
+        self.declinesExisting = declinesExisting
         self.declineMessage = declineMessage
         self.visibility = visibility
         self.guestsCanModify = guestsCanModify
@@ -368,6 +376,7 @@ extension CalendarEvent {
                   isTypeLocal: try c.decodeIfPresent(Bool.self, forKey: .isTypeLocal) ?? false,
                   declinesInvitations: try c.decodeIfPresent(Bool.self, forKey: .declinesInvitations) ?? false,
                   declineMessage: try c.decodeIfPresent(String.self, forKey: .declineMessage),
+                  declinesExisting: try c.decodeIfPresent(Bool.self, forKey: .declinesExisting) ?? false,
                   visibility: try c.decodeIfPresent(EventVisibility.self, forKey: .visibility) ?? .default,
                   guestsCanModify: try c.decodeIfPresent(Bool.self, forKey: .guestsCanModify) ?? false,
                   guestsCanInviteOthers: try c.decodeIfPresent(Bool.self, forKey: .guestsCanInviteOthers) ?? true,
@@ -444,6 +453,10 @@ public protocol CalendarService: AnyObject, Sendable {
     /// Answers an invitation for the account's owner.
     func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws
 
+    /// Answers an invitation with a message for the organizer, where the calendar passes one on (Google and Microsoft
+    /// do; elsewhere the answer goes without it, and PMail puts it in the answer it emails).
+    func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws
+
     /// When people (by email address) are busy in `start..<end`, as far as the provider can tell: each one's busy
     /// times, or why they aren't known. Calendars that can't look people up say so for everyone.
     func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy]
@@ -493,6 +506,10 @@ public protocol CalendarService: AnyObject, Sendable {
 }
 
 extension CalendarService {
+    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws {
+        try await respond(to: event, with: response)
+    }
+
     public func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy] {
         Dictionary(addresses.map { ($0, FreeBusy.unknown("This account’s calendar can’t look up other people’s busy times.")) },
                    uniquingKeysWith: { first, _ in first })

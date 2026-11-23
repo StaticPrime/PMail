@@ -510,6 +510,11 @@ public actor MicrosoftCalendarService: CalendarService {
     /// Answers an invitation and sends the answer to the organizer. A declined meeting is kept on this Mac, since
     /// Outlook takes it off the calendar; once it's gone from there, the answer can't be changed.
     public func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
+        try await respond(to: event, with: response, comment: nil)
+    }
+
+    /// Answers with a message, which Outlook sends the organizer with the answer.
+    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws {
         let action: String
         switch response {
         case .accepted: action = "accept"
@@ -519,7 +524,9 @@ public actor MicrosoftCalendarService: CalendarService {
         }
         let wasDeclined = await declined.contains(id: event.id)
         do {
-            _ = try await client.post(Self.eventURL(event.id, action), ["sendResponse": true], headers: Self.headers)
+            var body: [String: JSONValue] = ["sendResponse": true]
+            if let comment = comment?.trimmingCharacters(in: .whitespacesAndNewlines), !comment.isEmpty { body["comment"] = .string(comment) }
+            _ = try await client.post(Self.eventURL(event.id, action), .object(body), headers: Self.headers)
         } catch PMailError.notFound where wasDeclined {
             throw PMailError.notSupported("Outlook took this meeting off your calendar when you declined it, so the answer can’t be "
                 + "changed. The organizer can send you the invitation again.")

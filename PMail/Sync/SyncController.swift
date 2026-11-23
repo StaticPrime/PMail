@@ -184,7 +184,10 @@ final class SyncController {
                 break
             }
         }
-        if changed { session.calendar.refreshQuietly() }
+        if changed {
+            session.calendar.refreshQuietly()
+            await session.calendar.answerInvitationsAutomatically()
+        }
     }
 
     /// Puts mail an earlier PMail kept on this Mac (rather than on the server) back on the account's server, and shows

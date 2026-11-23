@@ -46,6 +46,7 @@ import Testing
                                                              to: WebFixtures.date("2026-11-30T00:00:00Z"))
         let byID = Dictionary(uniqueKeysWithValues: events.map { ($0.id, $0) })
         #expect(byID["away"]?.type == .outOfOffice && byID["away"]?.declinesInvitations == true && byID["away"]?.declineMessage == "Back Monday")
+        #expect(byID["away"]?.declinesExisting == true, "declining all conflicting invitations includes the meetings already planned")
         #expect(byID["focus"]?.type == .focusTime && byID["focus"]?.declinesInvitations == false)
         #expect(byID["office"]?.type == .event, "a working location is an ordinary event to PMail")
     }
@@ -54,12 +55,18 @@ import Testing
         let transport = StubTransport()
         stubCreating(transport)
         let event = CalendarEvent(calendarID: Self.primary, title: "Out of office", start: start, end: start.addingTimeInterval(4 * 86_400),
-                                  type: .outOfOffice, declinesInvitations: true, declineMessage: "Back on the 30th")
+                                  type: .outOfOffice, declinesInvitations: true, declineMessage: "Back on the 30th", declinesExisting: true)
         let saved = try await service(transport).create(event, addingConference: false)
         let body = try #require(transport.requests.first?.bodyJSONValue)
         #expect(body["eventType"] == "outOfOffice" && body["transparency"] == "opaque")
         #expect(body["outOfOfficeProperties"] == ["autoDeclineMode": "declineAllConflictingInvitations", "declineMessage": "Back on the 30th"])
-        #expect(saved.type == .outOfOffice && saved.declinesInvitations && saved.declineMessage == "Back on the 30th")
+        #expect(saved.type == .outOfOffice && saved.declinesInvitations && saved.declineMessage == "Back on the 30th" && saved.declinesExisting)
+
+        // Only new invitations, leaving the meetings already planned.
+        var onlyNew = event
+        onlyNew.declinesExisting = false
+        _ = try await service(transport).create(onlyNew, addingConference: false)
+        #expect(transport.requests.last?.bodyJSONValue["outOfOfficeProperties"]["autoDeclineMode"] == "declineOnlyNewConflictingInvitations")
 
         let focus = CalendarEvent(calendarID: Self.primary, title: "Focus time", start: start, end: start.addingTimeInterval(7_200), type: .focusTime)
         _ = try await service(transport).create(focus, addingConference: false)
@@ -129,10 +136,16 @@ import Testing
                                                               to: WebFixtures.date("2026-11-30T00:00:00Z")).first)
         away.declinesInvitations = true
         away.declineMessage = "Away"
-        _ = try await calendar.update(away, scope: .thisEvent, addingConference: false)
+        let declining = try await calendar.update(away, scope: .thisEvent, addingConference: false)
         let body = try #require(transport.sent("PATCH", "\(Self.events)/away").first?.bodyJSONValue)
-        #expect(body == ["outOfOfficeProperties": ["autoDeclineMode": "declineAllConflictingInvitations", "declineMessage": "Away"]],
+        #expect(body == ["outOfOfficeProperties": ["autoDeclineMode": "declineOnlyNewConflictingInvitations", "declineMessage": "Away"]],
                 "only what changed")
+        // The meetings already planned too.
+        var everything = declining
+        everything.declinesExisting = true
+        _ = try await calendar.update(everything, scope: .thisEvent, addingConference: false)
+        #expect(transport.sent("PATCH", "\(Self.events)/away").last?.bodyJSONValue["outOfOfficeProperties"]["autoDeclineMode"]
+                == "declineAllConflictingInvitations")
     }
 
     // MARK: Google Tasks

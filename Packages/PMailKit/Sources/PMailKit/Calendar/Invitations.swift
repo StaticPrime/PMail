@@ -130,6 +130,17 @@ public enum InvitationText {
         return replied ? withMethod(.reply, calendar).serialized : nil
     }
 
+    /// An invitation, answer or cancellation with a message for the people it goes to (COMMENT, on each event in it).
+    public static func withComment(_ document: String, comment: String) -> String {
+        let text = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, var calendar = vcalendar(document) else { return document }
+        for index in calendar.components.indices where calendar.components[index].name == "VEVENT" {
+            calendar.components[index].removeProperties("COMMENT")
+            calendar.components[index].properties.append(.text("COMMENT", text))
+        }
+        return calendar.serialized
+    }
+
     /// Sets a guest's answer (by address) on every VEVENT of a calendar. False when they aren't on it.
     static func setAnswer(_ response: AttendeeResponse, of email: String, in calendar: inout ICalendarComponent) -> Bool {
         var found = false

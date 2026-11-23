@@ -35,7 +35,8 @@ struct LiveServiceFactory: ServiceFactory {
     private func calendar(_ calendars: any CalendarService, tasks: any TaskService, for account: Account) -> CalendarWithTasks {
         let place = storage(for: account)
         return CalendarWithTasks(calendars: calendars, tasks: tasks, types: EventTypeBook(file: place.appendingPathComponent(EventTypeBook.fileName)),
-                                 feeds: CalendarFeeds(folder: place.appendingPathComponent(CalendarFeeds.folderName, isDirectory: true)))
+                                 feeds: CalendarFeeds(folder: place.appendingPathComponent(CalendarFeeds.folderName, isDirectory: true)),
+                                 declines: DeclineBook(file: place.appendingPathComponent(DeclineBook.fileName)))
     }
 
     private func unavailable(_ reason: PMailError) -> AccountServices {

@@ -76,9 +76,11 @@ struct EventDraft: Identifiable, Hashable {
     var scope: RecurrenceScope = .thisEvent
     /// An event, a task, out of office or focus time.
     var type: EventType = .event
-    /// Out of office and focus time: whether invitations for that time are declined (where the calendar can), and how.
+    /// Out of office and focus time: whether invitations for that time are declined, how, and whether the meetings
+    /// already planned for it are declined too.
     var declinesInvitations = false
     var declineMessage = ""
+    var declinesExisting = false
     /// A task: whether it's done.
     var isCompleted = false
     /// Why saving it failed, when it was opened again for that.
@@ -503,6 +505,14 @@ final class CalendarViewModel {
         var colors: [String: ChosenColor] = [:]
         var eventReminders: [String: [Int]] = [:]
         var allDayReminders: [String: [AllDayReminder]] = [:]
+        /// How invitations that overlap an event the account is going to are answered, if PMail answers them.
+        var conflictReply: ConflictReply?
+    }
+
+    /// An automatic answer to invitations that overlap another event: No or Maybe, with a message for the organizer.
+    struct ConflictReply: Codable, Hashable {
+        var response: AttendeeResponse
+        var message: String
     }
 
     /// A color chosen here, with the color the provider gave the calendar once it was saved (on Outlook, the nearest
@@ -516,9 +526,13 @@ final class CalendarViewModel {
         }
     }
 
-    private(set) var preferences = CalendarPreferences()
+    var preferences = CalendarPreferences()
+    /// Answering invitations automatically: whether a look is under way, and when the last one began.
+    @ObservationIgnored var autoAnswering = false
+    @ObservationIgnored var autoAnswerAgain = false
+    @ObservationIgnored var lastAutoAnswers: Date?
 
-    private func savePreferences() {
+    func savePreferences() {
         defaults.set(try? JSONEncoder().encode(preferences), forKey: "CalendarPreferences-\(account.id.uuidString)")
     }
 
@@ -668,9 +682,17 @@ final class CalendarViewModel {
 
     /// Whether the calendar can decline invitations for out of office or focus time itself: a Google account's main
     /// calendar can, where the account is a work or school one (not for an event whose kind it couldn't keep).
+    /// Whether out of office or focus time can decline meetings: on any of the account's own calendars. A Google
+    /// Workspace account's main calendar does it itself; elsewhere PMail does.
     func canDecline(_ draft: EventDraft) -> Bool {
-        account.kind == .google && (draft.type == .outOfOffice || draft.type == .focusTime) && calendarInfo(draft.calendarID)?.isPrimary == true
-            && draft.original?.isTypeLocal != true
+        guard draft.type == .outOfOffice || draft.type == .focusTime, let calendar = calendarInfo(draft.calendarID) else { return false }
+        return Self.countsAsOwn(calendar)
+    }
+
+    /// Whether the calendar itself declines meetings during this out of office or focus time (a Google account's main
+    /// calendar, where it keeps the kind), rather than PMail.
+    func providerDeclines(_ draft: EventDraft) -> Bool {
+        account.kind == .google && calendarInfo(draft.calendarID)?.isPrimary == true && draft.original?.isTypeLocal != true
     }
 
     /// Makes a draft another kind. Something new gets what suits the kind: a task is all day on its day in the default
@@ -716,6 +738,7 @@ final class CalendarViewModel {
                                conference: event.conference, reminders: event.reminderMinutes.map(Reminder.init(minutes:)),
                                colorHex: event.colorHex, availability: event.availability, type: event.type,
                                declinesInvitations: event.declinesInvitations, declineMessage: event.declineMessage ?? "",
+                               declinesExisting: event.declinesExisting,
                                isCompleted: event.isCompleted, visibility: event.visibility, guestsCanModify: event.guestsCanModify,
                                guestsCanInviteOthers: event.guestsCanInviteOthers, guestsCanSeeOtherGuests: event.guestsCanSeeOtherGuests)
         if !event.recurrence.isEmpty {
@@ -836,6 +859,7 @@ final class CalendarViewModel {
         event.declinesInvitations = draft.type != .event && draft.declinesInvitations
         let message = draft.declineMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         event.declineMessage = event.declinesInvitations && !message.isEmpty ? message : nil
+        event.declinesExisting = event.declinesInvitations && draft.declinesExisting
         let saved: CalendarEvent
         // A new rule for a repeating event is for the whole series.
         let scope = draft.changesRepeat && draft.original?.isRecurring == true ? .allEvents : draft.scope
@@ -860,6 +884,8 @@ final class CalendarViewModel {
         }
         changeCount += 1
         if service.emailsInvitations { Task { await emailInvitations(for: saved, before: draft.original) } }
+        // Out of office or focus time that PMail declines meetings for: the ones already planned, if it says so.
+        if saved.type == .outOfOffice || saved.type == .focusTime { Task { await declinePeriodSaved(saved) } }
         // A repeating event's other times come with the next load.
         if draft.changesRepeat || (draft.original != nil && (scope == .allEvents || draft.original?.calendarID != saved.calendarID)) {
             if draft.repeatRule == nil { events.removeAll { $0.id == saved.id || $0.id == draft.original?.id } }
@@ -969,6 +995,13 @@ final class CalendarViewModel {
     }
 
     func respond(to event: CalendarEvent, with response: AttendeeResponse) {
+        respond(to: event, with: response, comment: nil, automatically: false)
+    }
+
+    /// Answers an invitation: on the calendar at once, then through the provider, with a message for the organizer
+    /// where one's given. Answered by hand, its email is marked read; an answer PMail gave on its own leaves it unread,
+    /// so it's still seen.
+    func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, automatically: Bool) {
         if let index = events.firstIndex(where: { $0.id == event.id }) { events[index].myResponse = response }
         changeCount += 1
         let service = self.service
@@ -976,17 +1009,18 @@ final class CalendarViewModel {
         Task {
             if waits(event.id), await keep(later) { return }
             do {
-                try await service.respond(to: event, with: response)
+                try await service.respond(to: event, with: response, comment: comment)
                 changeCount += 1
                 // Answered here, the invitation email needn't wait unread.
-                if let mailModel, event.organizer.map({ !$0.isSameMailbox(as: account.email) }) ?? false {
+                if !automatically, let mailModel, event.organizer.map({ !$0.isSameMailbox(as: account.email) }) ?? false {
                     Task { await mailModel.markInvitationRead(for: event) }
                 }
                 // The answer goes to the organizer by email when no server sends it (a calendar kept on this Mac, or
                 // an invitation PMail took in from an email).
                 if service.takesInEmailedInvitations, let organizer = event.organizer, !organizer.isSameMailbox(as: account.email),
-                   let reply = try? await service.invitationText(for: event, method: .reply, attendees: nil) {
-                    mailer?.send(.reply, text: reply, about: event, to: [organizer], answer: response)
+                   var reply = try? await service.invitationText(for: event, method: .reply, attendees: nil) {
+                    if let comment { reply = InvitationText.withComment(reply, comment: comment) }
+                    mailer?.send(.reply, text: reply, about: event, to: [organizer], answer: response, note: comment)
                 }
             } catch {
                 if PMailError.isConnectionProblem(error), await keep(later) { return }

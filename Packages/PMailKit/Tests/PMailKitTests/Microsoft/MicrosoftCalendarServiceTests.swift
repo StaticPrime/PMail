@@ -278,6 +278,9 @@ import Testing
         await #expect(throws: PMailError.notSupported("An answered invitation can’t be set back to unanswered.")) {
             try await calendar.respond(to: event, with: .needsAction)
         }
+        // With a message, which Outlook sends the organizer.
+        try await calendar.respond(to: event, with: .declined, comment: "I have another event at this time.")
+        #expect(transport.requests.last?.bodyJSONValue == ["sendResponse": true, "comment": "I have another event at this time."])
     }
 
     /// Deleting a meeting you organized calls it off, so everyone invited gets a cancellation; deleting one you were

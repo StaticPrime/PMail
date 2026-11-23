@@ -121,6 +121,8 @@ final class AccountSession: Identifiable {
     func refreshCalendarAndContacts() async {
         await calendar.sendWaitingChanges()
         await contacts.sendWaitingChanges()
+        // Invitations PMail answers for the account, as its settings say (shown or not).
+        await calendar.answerInvitationsIfDue()
         guard activated else { return }
         calendar.refreshQuietly()
         contacts.refreshQuietly()

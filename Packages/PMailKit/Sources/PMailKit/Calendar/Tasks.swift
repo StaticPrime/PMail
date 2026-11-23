@@ -3,20 +3,25 @@ import os
 
 /// An account's calendars with its task lists beside them, each list a calendar of tasks. Changes to a task go to the
 /// task service, everything else to the calendars. An event's kind (out of office, focus time) that its calendar
-/// can't hold is kept on this Mac (`EventTypeBook`), and the event shows as that kind there.
+/// can't hold is kept on this Mac (`EventTypeBook`), and the event shows as that kind there; so is the declining of
+/// meetings during out of office or focus time, where the calendar doesn't do it itself (`DeclineBook`).
 public final class CalendarWithTasks: CalendarService {
     public let calendars: any CalendarService
     public let tasks: (any TaskService)?
     public let types: EventTypeBook
     /// Calendars followed from web addresses, kept on this Mac for any account.
     public let feeds: CalendarFeeds?
+    /// Out of office and focus time that PMail declines meetings for.
+    public let declines: DeclineBook?
     private let problem = OSAllocatedUnfairLock<String?>(initialState: nil)
 
-    public init(calendars: any CalendarService, tasks: (any TaskService)?, types: EventTypeBook, feeds: CalendarFeeds? = nil) {
+    public init(calendars: any CalendarService, tasks: (any TaskService)?, types: EventTypeBook, feeds: CalendarFeeds? = nil,
+                declines: DeclineBook? = nil) {
         self.calendars = calendars
         self.tasks = tasks
         self.types = types
         self.feeds = feeds
+        self.declines = declines
     }
 
     /// Why the tasks couldn't be loaded the last time they were asked for (signing in again may be needed), if they
@@ -45,6 +50,7 @@ public final class CalendarWithTasks: CalendarService {
         let calendarOnly = calendarIDs.filter { TaskLists.listID(from: $0) == nil && !CalendarFeeds.isFeed($0) }
         var events = calendarOnly.isEmpty ? [] : try await calendars.loadEvents(in: calendarOnly, from: start, to: end)
         events = await types.applying(to: events)
+        if let declines { events = await declines.applying(to: events) }
         if let feeds, !feedIDs.isEmpty { events += await feeds.events(in: feedIDs, from: start, to: end) }
         if let tasks, !listIDs.isEmpty {
             do {
@@ -74,12 +80,20 @@ public final class CalendarWithTasks: CalendarService {
         try Self.refuseFeed(event)
         if event.isTask { return try await requireTasks().delete(event) }
         try await calendars.delete(event, scope: scope)
-        if scope == .allEvents || !event.isRecurring { await types.set(nil, for: event) }
+        if scope == .allEvents || !event.isRecurring {
+            await types.set(nil, for: event)
+            await declines?.set(nil, for: event)
+        }
     }
 
     public func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
         try Self.refuseFeed(event)
         try await calendars.respond(to: event, with: response)
+    }
+
+    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws {
+        try Self.refuseFeed(event)
+        try await calendars.respond(to: event, with: response, comment: comment)
     }
 
     // MARK: Settings
@@ -142,7 +156,8 @@ public final class CalendarWithTasks: CalendarService {
     }
 
     /// The event as saved, as the kind the person chose: kept on this Mac when the calendar saved it as another kind,
-    /// and forgotten here when the calendar holds it itself.
+    /// and forgotten here when the calendar holds it itself. The same goes for declining meetings during out of office
+    /// or focus time: a calendar that doesn't keep it (it comes back without) has PMail decline them instead.
     private func reconciled(_ saved: CalendarEvent, wanted: CalendarEvent) async -> CalendarEvent {
         let kind = wanted.type == .task ? .event : wanted.type
         var result = saved
@@ -153,6 +168,16 @@ public final class CalendarWithTasks: CalendarService {
             await types.set(kind, for: saved)
             result.type = kind
             result.isTypeLocal = true
+        }
+        if let declines {
+            let away = kind == .outOfOffice || kind == .focusTime
+            if away, wanted.declinesInvitations, !saved.declinesInvitations {
+                let end = wanted.isRecurring ? Date.distantFuture : wanted.end
+                await declines.set(DeclineBook.Entry(message: wanted.declineMessage, existing: wanted.declinesExisting, end: end), for: saved)
+                (result.declinesInvitations, result.declineMessage, result.declinesExisting) = (true, wanted.declineMessage, wanted.declinesExisting)
+            } else {
+                await declines.set(nil, for: saved)
+            }
         }
         return result
     }
@@ -225,6 +250,85 @@ public actor EventTypeBook {
     }
 
     private func save(_ new: [String: EventType]) {
+        entries = new
+        do {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(new).write(to: file, options: .atomic)
+        } catch {
+            // Kept in memory; written with the next change.
+        }
+    }
+}
+
+/// Out of office and focus time that PMail declines meetings for, because the calendar doesn't do it itself (only a
+/// Google Workspace calendar does): the message, whether meetings already planned are declined too, and when the time
+/// ends (a repeating one never does), so times that are over are forgotten. Kept on this Mac by event (a repeating
+/// event's are its series'), in a JSON file in the account's folder.
+public actor DeclineBook {
+    /// The file's name in the account's folder.
+    public static let fileName = "Declines.json"
+
+    public struct Entry: Codable, Sendable, Hashable {
+        public var message: String?
+        public var existing: Bool
+        public var end: Date
+
+        public init(message: String?, existing: Bool, end: Date) {
+            self.message = message
+            self.existing = existing
+            self.end = end
+        }
+    }
+
+    public nonisolated let file: URL
+    private var entries: [String: Entry]?
+
+    public init(file: URL) {
+        self.file = file
+    }
+
+    /// What's kept for an event, if anything.
+    public func entry(for event: CalendarEvent) -> Entry? {
+        loaded()[EventTypeBook.key(for: event)]
+    }
+
+    /// Keeps an event's declining (and its series'), or forgets it with nil.
+    public func set(_ entry: Entry?, for event: CalendarEvent) {
+        var current = loaded()
+        let key = EventTypeBook.key(for: event)
+        guard current[key] != entry else { return }
+        current[key] = entry
+        save(current)
+    }
+
+    /// Whether any time still to come declines meetings here.
+    public func hasUpcoming(now: Date = Date()) -> Bool {
+        loaded().values.contains { $0.end > now }
+    }
+
+    /// Events with the declining kept here.
+    public func applying(to events: [CalendarEvent]) -> [CalendarEvent] {
+        let current = loaded()
+        guard !current.isEmpty else { return events }
+        return events.map { event in
+            guard let entry = current[EventTypeBook.key(for: event)] else { return event }
+            var shown = event
+            (shown.declinesInvitations, shown.declineMessage, shown.declinesExisting) = (true, entry.message, entry.existing)
+            return shown
+        }
+    }
+
+    private func loaded() -> [String: Entry] {
+        if let entries { return entries }
+        var read = (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode([String: Entry].self, from: $0) } ?? [:]
+        // Times over more than a day ago are forgotten.
+        let over = read.filter { $0.value.end < Date().addingTimeInterval(-86_400) }.map(\.key)
+        for key in over { read[key] = nil }
+        entries = read
+        return read
+    }
+
+    private func save(_ new: [String: Entry]) {
         entries = new
         do {
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
