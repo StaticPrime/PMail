@@ -224,6 +224,40 @@ final class CalendarViewModel {
         return calendar
     }
 
+    /// The calendars a file's events can be imported into: the account's own that can be changed.
+    var importTargets: [CalendarInfo] {
+        calendars.filter { !$0.isReadOnly && !$0.isOther && !$0.isTaskList && !CalendarFeeds.isFeed($0.id) }
+    }
+
+    /// Adds events read from a file to a calendar, one by one; offline, they wait to be sent like events made then.
+    func importEvents(_ imported: [CalendarEvent], into calendarID: String) async -> (added: Int, failed: Int) {
+        var added = 0
+        var failed = 0
+        for var event in imported {
+            event.calendarID = calendarID
+            event.id = UUID().uuidString
+            if app?.sync?.isOnline == false && !service.emailsInvitations {
+                var made = event
+                made.id = LocalID.make()
+                if await keep(.create(made, addingConference: false)) { added += 1 } else { failed += 1 }
+                continue
+            }
+            do {
+                _ = try await service.create(event, addingConference: false)
+                added += 1
+            } catch let error where PMailError.isConnectionProblem(error) {
+                var made = event
+                made.id = LocalID.make()
+                if await keep(.create(made, addingConference: false)) { added += 1 } else { failed += 1 }
+            } catch {
+                failed += 1
+            }
+        }
+        changeCount += 1
+        reload()
+        return (added, failed)
+    }
+
     /// Stops following a calendar.
     func unsubscribe(_ calendar: CalendarInfo) {
         Task {

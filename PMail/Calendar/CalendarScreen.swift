@@ -158,7 +158,7 @@ private struct CalendarSidebar: View {
             HStack(spacing: 0) {
                 Text("Other calendars").font(.pm(14, .medium)).foregroundStyle(Theme.textPrimary)
                 Spacer()
-                IconButton(symbol: "plus", help: "Subscribe to a calendar", size: 26, iconSize: 12) { showSubscribeMenu() }
+                IconButton(symbol: "plus", help: "Subscribe to a calendar, or import events", size: 26, iconSize: 12) { showSubscribeMenu() }
                     .background(MenuAnchor(menu: subscribeMenu))
                     .padding(.trailing, 10)
             }
@@ -186,6 +186,12 @@ private struct CalendarSidebar: View {
             })
         }
         items.append(PopUpMenu.Item(title: "From URL…", symbol: "link") { app.sheet = .subscribeToCalendar(.address) })
+        // Events from a file go into one of the account's own calendars.
+        if !model.importTargets.isEmpty {
+            items.append(PopUpMenu.Item(title: "Import…", symbol: "square.and.arrow.down") {
+                if let file = ImportedEvents.choose(app: app) { app.sheet = .importEvents(file) }
+            })
+        }
         subscribeMenu.show(items)
     }
 

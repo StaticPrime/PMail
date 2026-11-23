@@ -63,6 +63,8 @@ struct RootView: View {
             }
         case let .subscribeToCalendar(kind):
             if let session = app.current { SubscribeCalendarSheet(app: app, model: session.calendar, kind: kind) }
+        case let .importEvents(file):
+            if let session = app.current { ImportEventsSheet(app: app, model: session.calendar, file: file) }
         case .shortcuts:
             ShortcutsView()
         }

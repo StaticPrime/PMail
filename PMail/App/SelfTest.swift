@@ -622,6 +622,25 @@ enum SelfTest {
                   && !calendar.events.contains { $0.title == "Rovers game" }, "unsubscribing takes a calendar and its events away")
         }
         step {
+            // Importing a file's events into one of the account's own calendars.
+            let calendar = session.calendar
+            let csv = "Subject,Start Date,Start Time,End Time\nImported dentist,11/19/2026,3:00 PM,4:00 PM\nImported lunch,11/20/2026,12:00 PM,1:00 PM\n"
+            guard let result = try? CalendarImport.events(from: Data(csv.utf8), fileExtension: "csv"),
+                  let target = calendar.importTargets.first(where: \.isPrimary) else { return check(false, "a file’s events are read") }
+            check(result.events.count == 2 && !calendar.importTargets.contains { $0.isOther || $0.isReadOnly || $0.isTaskList },
+                  "a file’s events are read, to go in the account’s own calendars")
+            Task { _ = await calendar.importEvents(result.events, into: target.id) }
+            wait("the imported events") { calendar.events.filter { $0.title.hasPrefix("Imported ") }.count == 2 }
+        }
+        step {
+            let calendar = session.calendar
+            let imported = calendar.events.filter { $0.title.hasPrefix("Imported ") }
+            check(imported.count == 2 && imported.allSatisfy { $0.calendarID == "primary" && $0.attendees.isEmpty },
+                  "importing adds them to the calendar chosen")
+            for event in imported { calendar.delete(event, scope: .thisEvent) }
+            wait("the imported events deleted") { !calendar.events.contains { $0.title.hasPrefix("Imported ") } }
+        }
+        step {
             let calendar = session.calendar
             let created = calendar.events.first { $0.title == "Self-test sync" }
             check(created?.conference?.kind == .meet && created?.conference?.joinURL.host == "meet.google.com", "a new event gets its Meet meeting",
