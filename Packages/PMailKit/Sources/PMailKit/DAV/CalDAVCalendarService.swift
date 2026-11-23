@@ -29,6 +29,10 @@ public actor CalDAVCalendarService: CalendarService {
     private let client: WebDAVClient
     private let localTimeZone: TimeZone
     private var homeURL: URL?
+    /// The signed-in person's principal, where the server names one.
+    private var principalURL: URL?
+    /// Who the owner is to the server, once asked (for a server that sends its own invitations).
+    private var identity: OwnerIdentity?
     private var collections: [String: Collection] = [:]
     /// The calendar data last seen for each resource, by path, so a change can keep what PMail doesn't understand
     /// without downloading the resource again.
@@ -104,9 +108,90 @@ public actor CalDAVCalendarService: CalendarService {
 
     private func calendarHome() async throws -> URL {
         if let homeURL { return homeURL }
-        let home = try await DAVDiscovery.home(client: client, serverURL: serverURL, wellKnown: "caldav", homeSet: .calendarHomeSet)
-        homeURL = home
-        return home
+        let found = try await DAVDiscovery.locate(client: client, serverURL: serverURL, wellKnown: "caldav", homeSet: .calendarHomeSet)
+        homeURL = found.home
+        principalURL = found.principal
+        return found.home
+    }
+
+    // MARK: Who the owner is to the server
+
+    /// The ways a server names the account's owner on events: their principal (and other such names), and their
+    /// addresses other than the account's (iCloud names a meeting's organizer by the Apple Account's main email).
+    struct OwnerIdentity: Sendable, Equatable {
+        var principalPath: String?
+        /// Principal paths and other non-address names, lowercased.
+        var names: Set<String> = []
+        /// The owner's other addresses, lowercased.
+        var otherAddresses: Set<String> = []
+    }
+
+    /// Who the owner is to the server: asked once, from their principal's calendar-user-address-set.
+    private func ownerIdentity() async -> OwnerIdentity {
+        if let identity { return identity }
+        _ = try? await calendarHome()
+        let principalPath = principalURL?.path(percentEncoded: true)
+        var found = OwnerIdentity(principalPath: principalPath)
+        if let principalPath { found.names.insert(principalPath.lowercased()) }
+        if let principalURL, let answer = try? await client.propfind(principalURL, depth: 0, properties: [.calendarUserAddressSet]),
+           let set = answer.responses.first?.property(.calendarUserAddressSet) {
+            for href in set.hrefs {
+                if href.lowercased().hasPrefix("mailto:") {
+                    let email = String(href.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+                    if !ICalendarEventProperties.isSameMailbox(email, ownerEmail) { found.otherAddresses.insert(email.lowercased()) }
+                } else {
+                    found.names.insert((URL(string: href).flatMap { $0.host == nil ? nil : $0.path(percentEncoded: true) } ?? href).lowercased())
+                }
+            }
+            let domains = set.hrefs.filter { $0.lowercased().hasPrefix("mailto:") }.compactMap { $0.split(separator: "@").last.map(String.init) }
+            Self.log.notice("The calendar knows the account by addresses at \(domains.joined(separator: ", "), privacy: .public); the account's own is \(found.otherAddresses.count == domains.count ? "not among them" : "among them", privacy: .public)")
+        }
+        identity = found
+        return found
+    }
+
+    /// Lines naming the owner another way (their principal, or another of their addresses) name them by the account's
+    /// address (EMAIL; a mailto value too), so PMail knows the owner's own meetings as theirs. The owner listed twice
+    /// on one event (their other address added as a guest, say) is listed once.
+    static func recognizeOwner(in calendar: inout ICalendarComponent, owner: String, identity: OwnerIdentity) {
+        guard !identity.names.isEmpty || !identity.otherAddresses.isEmpty else { return }
+        for event in calendar.components.indices where calendar.components[event].name == "VEVENT" {
+            var ownerAttendeeSeen = false
+            var kept: [ICalendarLine] = []
+            for var line in calendar.components[event].properties {
+                if line.name == "ORGANIZER" || line.name == "ATTENDEE" {
+                    let value = line.value.trimmingCharacters(in: .whitespaces)
+                    let named = identity.names.contains(value.lowercased())
+                        || (URL(string: value).flatMap { $0.host == nil ? nil : $0.path(percentEncoded: true).lowercased() }.map(identity.names.contains) ?? false)
+                    let email = ICalendarEventProperties.address(of: line)?.email.lowercased()
+                    if named || (email.map(identity.otherAddresses.contains) ?? false) {
+                        line.setParameter("EMAIL", owner)
+                        if value.lowercased().hasPrefix("mailto:") { line.value = "mailto:" + owner }
+                    }
+                    if line.name == "ATTENDEE", ICalendarEventProperties.address(of: line).map({ ICalendarEventProperties.isSameMailbox($0.email, owner) }) ?? false {
+                        if ownerAttendeeSeen { continue }
+                        ownerAttendeeSeen = true
+                    }
+                }
+                kept.append(line)
+            }
+            calendar.components[event].properties = kept
+        }
+    }
+
+    /// Names the owner on their own meeting the way Apple's apps do: by their principal on the server, with the account's
+    /// address (EMAIL), so the server knows the organizer is them and which of their addresses to send as.
+    static func nameOwner(in calendar: inout ICalendarComponent, owner: String, principalPath: String?) {
+        guard let principalPath else { return }
+        for event in calendar.components.indices where calendar.components[event].name == "VEVENT" && organizes(calendar.components[event], owner) {
+            for index in calendar.components[event].properties.indices {
+                let line = calendar.components[event].properties[index]
+                guard line.name == "ORGANIZER" || line.name == "ATTENDEE",
+                      ICalendarEventProperties.address(of: line).map({ ICalendarEventProperties.isSameMailbox($0.email, owner) }) ?? false else { continue }
+                calendar.components[event].properties[index].value = principalPath
+                calendar.components[event].properties[index].setParameter("EMAIL", owner)
+            }
+        }
     }
 
     private func collection(_ id: String) async throws -> Collection {
@@ -155,10 +240,12 @@ public actor CalDAVCalendarService: CalendarService {
         if let refused = failures.first(where: \.needsSignIn) { throw refused }
         if fetched.isEmpty, let failure = failures.first { throw failure }
         var events: [CalendarEvent] = []
+        let identity = providerInvites ? await ownerIdentity() : nil
         for (collection, items) in fetched {
             for item in items {
                 resources[item.path] = Resource(etag: item.etag, text: item.text)
-                for calendar in ICalendarComponent.parse(item.text) where calendar.name == "VCALENDAR" {
+                for var calendar in ICalendarComponent.parse(item.text) where calendar.name == "VCALENDAR" {
+                    if let identity { Self.recognizeOwner(in: &calendar, owner: ownerEmail, identity: identity) }
                     let reader = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
                     events += reader.events(calendarID: collection.info.id, href: item.path, etag: item.etag, from: start, to: end)
                     for uid in reader.series.compactMap(\.uid) { pathsByUID[uid] = item.path }
@@ -206,7 +293,10 @@ public actor CalDAVCalendarService: CalendarService {
         var saved = event
         saved.uid = uid
         var written = writer().newCalendar(for: saved, uid: uid)
-        if providerInvites { Self.leaveGuestsToTheServer(in: &written, owner: ownerEmail) }
+        if providerInvites {
+            Self.leaveGuestsToTheServer(in: &written, owner: ownerEmail)
+            Self.nameOwner(in: &written, owner: ownerEmail, principalPath: await ownerIdentity().principalPath)
+        }
         let (calendar, etag) = await invitationsAfterSaving(written, etag: try await save(written, to: url, ifMatch: nil, isNew: true), at: url)
         let reader = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
         return reader.firstEvent(calendarID: collection.info.id, href: url.path(percentEncoded: true), etag: etag) ?? saved
@@ -328,7 +418,10 @@ public actor CalDAVCalendarService: CalendarService {
         var (calendar, current) = try await editableCalendar(at: url, expectedETag: event.etag, fresh: false)
         let moving = source.info.id != target.info.id && (scope == .allEvents || !event.isRecurring)
         let key = try writer().update(&calendar, with: event, scope: moving ? .allEvents : scope)
-        if providerInvites { Self.leaveGuestsToTheServer(in: &calendar, owner: ownerEmail) }
+        if providerInvites {
+            Self.leaveGuestsToTheServer(in: &calendar, owner: ownerEmail)
+            Self.nameOwner(in: &calendar, owner: ownerEmail, principalPath: await ownerIdentity().principalPath)
+        }
         let savedURL = moving ? target.url.appendingPathComponent(url.lastPathComponent) : url
         var etag: String?
         if moving {
@@ -701,9 +794,10 @@ public actor CalDAVCalendarService: CalendarService {
             resource = Resource(etag: etag, text: String(decoding: data, as: UTF8.self))
             resources[path] = resource
         }
-        guard let calendar = ICalendarComponent.parse(resource.text).first(where: { $0.name == "VCALENDAR" }) else {
+        guard var calendar = ICalendarComponent.parse(resource.text).first(where: { $0.name == "VCALENDAR" }) else {
             throw PMailError.protocolError("the event on the server couldn’t be read")
         }
+        if providerInvites { Self.recognizeOwner(in: &calendar, owner: ownerEmail, identity: await ownerIdentity()) }
         return (calendar, resource)
     }
 

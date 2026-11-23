@@ -32,6 +32,7 @@ struct DAVProperty: Sendable, Hashable {
     static let getETag = DAVProperty(DAVNamespace.dav, "getetag")
     static let currentUserPrivilegeSet = DAVProperty(DAVNamespace.dav, "current-user-privilege-set")
     static let calendarHomeSet = DAVProperty(DAVNamespace.calDAV, "calendar-home-set")
+    static let calendarUserAddressSet = DAVProperty(DAVNamespace.calDAV, "calendar-user-address-set")
     static let supportedCalendarComponentSet = DAVProperty(DAVNamespace.calDAV, "supported-calendar-component-set")
     static let calendarData = DAVProperty(DAVNamespace.calDAV, "calendar-data")
     static let addressbookHomeSet = DAVProperty(DAVNamespace.cardDAV, "addressbook-home-set")
