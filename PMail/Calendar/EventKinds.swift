@@ -28,29 +28,34 @@ extension CalendarEvent {
     }
 }
 
-/// An event's title, after its kind's symbol (out of office, focus time) where it has one, and with "(Maybe)" after
-/// it when that's the answer to the invitation. Tasks draw their own check circle, which can be clicked.
+/// An event's title, after its kind's symbol (out of office, focus time) where it has one, and with "(Maybe)" or
+/// "(Canceled)" after it. Tasks draw their own check circle, which can be clicked.
 func eventTitle(_ event: CalendarEvent) -> Text {
-    let maybe = AnswerLook(event) == .maybe ? Text(verbatim: " (Maybe)") : Text(verbatim: "")
-    guard event.type == .outOfOffice || event.type == .focusTime else { return Text(verbatim: event.shownTitle) + maybe }
-    return Text("\(Image(systemName: event.type.symbol)) \(event.shownTitle)") + maybe
+    let note = Text(verbatim: AnswerLook(event).titleNote)
+    guard event.type == .outOfOffice || event.type == .focusTime else { return Text(verbatim: event.shownTitle) + note }
+    return Text("\(Image(systemName: event.type.symbol)) \(event.shownTitle)") + note
 }
 
 /// An event's title as `eventTitle` words it, as plain text (for checks and spoken labels).
 func eventTitleString(_ event: CalendarEvent) -> String {
-    event.shownTitle + (AnswerLook(event) == .maybe ? " (Maybe)" : "")
+    event.shownTitle + AnswerLook(event).titleNote
 }
 
 /// How an event shows on the calendar for the answer you gave its invitation: solid for Yes (and for your own
 /// events), outlined while it waits for an answer, see-through with "(Maybe)" after the title for Maybe, and
-/// see-through and struck through for No.
+/// see-through and struck through for No. A canceled event is see-through and struck through, with "(Canceled)".
 enum AnswerLook: Equatable {
     case solid
     case pending
     case maybe
     case declined
+    case canceled
 
     init(_ event: CalendarEvent) {
+        if event.status == .cancelled {
+            self = .canceled
+            return
+        }
         switch event.myResponse {
         case .needsAction?: self = .pending
         case .tentative?: self = .maybe
@@ -59,17 +64,26 @@ enum AnswerLook: Equatable {
         }
     }
 
-    /// Whether the event's color shows only faintly (Maybe and No).
-    var isFaint: Bool { self == .maybe || self == .declined }
-    /// How strongly the event's color fills it: none while it waits for an answer, faintly for Maybe and No.
+    /// Whether the event's color shows only faintly (Maybe, No and canceled).
+    var isFaint: Bool { self == .maybe || self == .declined || self == .canceled }
+    /// How strongly the event's color fills it: none while it waits for an answer, faintly for Maybe, No and canceled.
     var fillOpacity: Double {
         switch self {
         case .solid: 1
         case .pending: 0
-        case .maybe, .declined: 0.32
+        case .maybe, .declined, .canceled: 0.32
         }
     }
-    var isStruckThrough: Bool { self == .declined }
+    var isStruckThrough: Bool { self == .declined || self == .canceled }
+
+    /// What goes after the title.
+    var titleNote: String {
+        switch self {
+        case .maybe: " (Maybe)"
+        case .canceled: " (Canceled)"
+        default: ""
+        }
+    }
 
     /// The color for the event's words on its fill: white on a solid color, the event's color on an outline, and the
     /// usual text colors on a faint one (dimmer for No).
@@ -78,7 +92,7 @@ enum AnswerLook: Equatable {
         case .solid: .white
         case .pending: color
         case .maybe: Theme.textPrimary
-        case .declined: Theme.textSecondary
+        case .declined, .canceled: Theme.textSecondary
         }
     }
 
@@ -89,6 +103,7 @@ enum AnswerLook: Equatable {
         case .pending: ", not answered yet"
         case .maybe: ", maybe"
         case .declined: ", declined"
+        case .canceled: ", canceled"
         }
     }
 }

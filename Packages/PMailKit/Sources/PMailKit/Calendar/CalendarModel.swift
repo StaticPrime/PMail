@@ -472,8 +472,8 @@ public protocol CalendarService: AnyObject, Sendable {
     func unsubscribe(from calendarID: String) async throws
 
     /// Takes in an invitation that came by email, when the owner is one of its guests: a REQUEST adds its event,
-    /// waiting for an answer (or updates it), a CANCEL takes it off, and a REPLY puts a guest's answer on an event of
-    /// the owner's. `invitationText(for:method: .reply…)` then gives the answer to email, where PMail sends it.
+    /// waiting for an answer (or updates it, whatever changed), a CANCEL marks it canceled, and a REPLY puts a guest's
+    /// answer on an event of the owner's. `invitationText(for:method: .reply…)` then gives the answer to email, where PMail sends it.
     func receive(_ invitation: Invitation) async throws
 }
 

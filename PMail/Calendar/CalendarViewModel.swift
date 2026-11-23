@@ -422,11 +422,11 @@ final class CalendarViewModel {
 
     // MARK: Events
 
-    /// Events from the calendars that are on, minus cancelled ones, matching the search if there is one.
+    /// Events from the calendars that are on (canceled ones too, marked), matching the search if there is one.
     func shownEvents(matching search: String = "") -> [CalendarEvent] {
         let words = search.lowercased().split(separator: " ").map(String.init)
         return events.filter { event in
-            guard !hiddenCalendarIDs.contains(event.calendarID), event.status != .cancelled else { return false }
+            guard !hiddenCalendarIDs.contains(event.calendarID) else { return false }
             guard !words.isEmpty else { return true }
             let text = [event.title, event.location ?? "", event.notes ?? "", event.attendees.map(\.address.displayName).joined(separator: " ")]
                 .joined(separator: " ").lowercased()
@@ -893,14 +893,26 @@ final class CalendarViewModel {
     var answeredByEmail: [String: AttendeeResponse] = [:]
 
     /// Takes an invitation from an email into the calendar, when the calendar takes them in: one it doesn't have yet,
-    /// or a cancellation of one it has. It goes in only when the account is one of its guests.
+    /// a change to one it has (whatever changed: the time, place, guests, description…), or a cancellation, which
+    /// marks it canceled. It goes in only when the account is one of its guests.
     func takeIn(_ invitation: Invitation) async {
         guard service.takesInEmailedInvitations, invitation.method == .request || invitation.method == .cancel else { return }
         let existing = await event(withUID: invitation.uid, near: invitation.event)
-        if invitation.method == .request ? existing != nil : existing == nil { return }
+        if invitation.method == .request {
+            if let existing, !Self.differs(existing, from: invitation.event) { return }
+        } else {
+            guard let existing, existing.status != .cancelled else { return }
+        }
         guard (try? await service.receive(invitation)) != nil else { return }
         changeCount += 1
         reload()
+    }
+
+    /// Whether an invitation says something about its event that the calendar's copy doesn't: a change since.
+    static func differs(_ event: CalendarEvent, from invited: CalendarEvent) -> Bool {
+        event.title != invited.title || event.start != invited.start || event.end != invited.end || event.isAllDay != invited.isAllDay
+            || event.location != invited.location || event.notes != invited.notes || event.status != invited.status
+            || Set(event.attendees.map { $0.address.email.lowercased() }) != Set(invited.attendees.map { $0.address.email.lowercased() })
     }
 
     /// The account's answer to an invitation, as far as PMail knows: the calendar's copy, or an answer sent by email.

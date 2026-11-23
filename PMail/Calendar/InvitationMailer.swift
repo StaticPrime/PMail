@@ -37,8 +37,8 @@ final class InvitationMailer {
             if let link = event.conference?.joinURL.absoluteString { lines.append("Join: \(link)") }
             if let notes = event.notes, !notes.isEmpty { lines += ["", notes] }
         case .cancel:
-            subject = "Cancelled: \(title) @ \(when)"
-            lines = ["\(name) cancelled \(title).", "", when]
+            subject = "Canceled: \(title) @ \(when)"
+            lines = ["\(name) canceled \(title).", "", when]
         case .reply:
             let word: String
             switch answer {

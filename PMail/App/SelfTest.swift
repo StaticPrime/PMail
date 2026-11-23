@@ -93,15 +93,16 @@ enum SelfTest {
 
     /// An emailed invitation's iCalendar text, as another calendar would send it.
     static func invitation(uid: String, title: String, start: Date, end: Date, organizer: String, guest: String,
-                           method: String = "REQUEST") -> String {
+                           method: String = "REQUEST", sequence: Int = 0, location: String? = nil) -> String {
         let format = DateFormatter()
         format.locale = Locale(identifier: "en_US_POSIX")
         format.timeZone = TimeZone(identifier: "UTC")
         format.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
-        return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Example//Calendar//EN", "METHOD:\(method)", "BEGIN:VEVENT", "UID:\(uid)",
+        return (["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Example//Calendar//EN", "METHOD:\(method)", "BEGIN:VEVENT", "UID:\(uid)",
                 "DTSTAMP:\(format.string(from: start))", "DTSTART:\(format.string(from: start))", "DTEND:\(format.string(from: end))",
-                "SUMMARY:\(title)", "ORGANIZER:mailto:\(organizer)", "ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:\(guest)",
-                "END:VEVENT", "END:VCALENDAR"].joined(separator: "\r\n") + "\r\n"
+                "SUMMARY:\(title)", "SEQUENCE:\(sequence)"] + (location.map { ["LOCATION:\($0)"] } ?? [])
+            + ["ORGANIZER:mailto:\(organizer)", "ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:\(guest)",
+               "END:VEVENT", "END:VCALENDAR"]).joined(separator: "\r\n") + "\r\n"
     }
 
     static func read<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T? {
@@ -454,7 +455,7 @@ enum SelfTest {
             let calendar = session.calendar
             let mailService = sampleMail
             let last = read { await mailService?.sentMessages.last } ?? nil
-            check(last?.to.map(\.name) == ["Priya Shah"] && last?.subject.hasPrefix("Cancelled: Self-test emailed meeting") == true,
+            check(last?.to.map(\.name) == ["Priya Shah"] && last?.subject.hasPrefix("Canceled: Self-test emailed meeting") == true,
                   "a guest taken off gets a cancellation", last?.subject ?? "nothing sent")
             let sentCount = { () -> Int in (read { await mailService?.sentMessages.count ?? 0 }) ?? 0 }
             let count = sentCount()
@@ -527,22 +528,53 @@ enum SelfTest {
                 return all
             }
             check(decoys.count == 2 && stillUnread == true, "but not another event's invitation with the same title, or a message about it with none")
-            // The organizer calls it off: the cancellation takes it off the calendar.
+            // The organizer changes it: a day later, somewhere else. The calendar follows, and asks again.
             let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
             guard let picnic else { return }
-            let text = Self.invitation(uid: picnic.uid, title: "Self-test picnic", start: picnic.event.start, end: picnic.event.end,
-                                       organizer: "olivia.chen@example.com", guest: session.account.email, method: "CANCEL")
+            let moved = picnic.event.start.addingTimeInterval(86_400)
+            let text = Self.invitation(uid: picnic.uid, title: "Self-test picnic", start: moved, end: moved.addingTimeInterval(7_200),
+                                       organizer: "olivia.chen@example.com", guest: session.account.email, sequence: 1, location: "Laurelhurst Park")
+            if let change = Invitation.read(Data(text.utf8), ownerEmail: session.account.email) {
+                let calendar = session.calendar
+                Task { await calendar.takeIn(change) }
+            }
+            wait("the changed invitation") {
+                read { await service?.allEvents.first { $0.uid == "picnic@example.com" }?.location } == "Laurelhurst Park"
+            }
+        }
+        step {
+            let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
+            let changed = read { await service?.allEvents.first { $0.uid == "picnic@example.com" } } ?? nil
+            check(changed?.location == "Laurelhurst Park" && changed?.start == picnic.map { $0.event.start.addingTimeInterval(86_400) }
+                  && changed?.myResponse == .needsAction, "a changed invitation updates the event, and asks again when its time moves")
+            // The organizer calls it off: it stays, marked canceled.
+            guard let picnic, let start = changed?.start else { return }
+            let text = Self.invitation(uid: picnic.uid, title: "Self-test picnic", start: start, end: start.addingTimeInterval(7_200),
+                                       organizer: "olivia.chen@example.com", guest: session.account.email, method: "CANCEL", sequence: 2)
             if let cancellation = Invitation.read(Data(text.utf8), ownerEmail: session.account.email) {
                 let calendar = session.calendar
                 Task { await calendar.takeIn(cancellation) }
             }
-            wait("the cancelled invitation to go") {
+            wait("the canceled invitation") {
+                read { await service?.allEvents.first { $0.uid == "picnic@example.com" }?.status } == .cancelled
+            }
+        }
+        step {
+            let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
+            guard let canceled = read({ await service?.allEvents.first { $0.uid == "picnic@example.com" } }) ?? nil else {
+                return check(false, "a cancellation keeps the event")
+            }
+            check(AnswerLook(canceled) == .canceled && eventTitleString(canceled) == "Self-test picnic (Canceled)" && AnswerLook.canceled.isStruckThrough,
+                  "a cancellation keeps the event, marked (Canceled) and struck through")
+            // Deleting it takes it off.
+            session.calendar.delete(canceled, scope: .thisEvent)
+            wait("the canceled invitation deleted") {
                 read { await service?.allEvents.contains { $0.uid == "picnic@example.com" } } == false
             }
         }
         step {
             let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
-            check(read { await service?.allEvents.contains { $0.uid == "picnic@example.com" } } == false, "a cancellation takes it off the calendar")
+            check(read { await service?.allEvents.contains { $0.uid == "picnic@example.com" } } == false, "and deleting it takes it off")
             service?.emailing.withLock { $0 = false }
         }
         step {

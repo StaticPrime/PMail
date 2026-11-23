@@ -130,16 +130,9 @@ public actor LocalCalendarService: CalendarService {
             }
             _ = try store.write(Data(incoming.serialized.utf8), to: name)
         case .cancel:
-            guard var calendar = stored, !organizesIt(calendar) else { return }
-            let cancelled = InvitationText.vcalendar(invitation.text)?.components.filter { $0.name == "VEVENT" } ?? []
-            let occurrences = cancelled.compactMap { $0.property("RECURRENCE-ID") }
-            guard !occurrences.isEmpty else { return try store.delete(name) }
-            // Just some times of a repeating event: they're left out of it from now on.
-            guard let main = calendar.components.firstIndex(where: { $0.name == "VEVENT" && $0.property("RECURRENCE-ID") == nil }) else { return }
-            for occurrence in occurrences {
-                calendar.components[main].properties.append(ICalendarLine("EXDATE", parameters: occurrence.parameters, value: occurrence.value))
-                calendar.components.removeAll { $0.name == "VEVENT" && $0.property("RECURRENCE-ID")?.value == occurrence.value }
-            }
+            // Kept, marked canceled (the whole event, or the times it names), until the owner deletes it.
+            guard var calendar = stored, !organizesIt(calendar), let cancellation = InvitationText.vcalendar(invitation.text) else { return }
+            InvitationText.markCanceled(&calendar, by: cancellation)
             _ = try store.write(Data(calendar.serialized.utf8), to: name)
         case .reply:
             guard var calendar = stored, organizesIt(calendar), let replier = invitation.replier else { return }

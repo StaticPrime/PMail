@@ -33,12 +33,26 @@ public struct Invitation: Sendable, Hashable {
     /// Reads an invitation from an iCalendar file. `ownerEmail` is the account's address, for its own answer.
     public static func read(_ data: Data, ownerEmail: String, timeZone: TimeZone = .current) -> Invitation? {
         let text = String(decoding: data, as: UTF8.self)
-        guard let calendar = ICalendarComponent.parse(text).first(where: { $0.name == "VCALENDAR" }) else { return nil }
+        guard var calendar = ICalendarComponent.parse(text).first(where: { $0.name == "VCALENDAR" }) else { return nil }
+        // A cancellation of one time may name only that time (RECURRENCE-ID), not when it starts.
+        for index in calendar.components.indices where calendar.components[index].name == "VEVENT" {
+            if calendar.components[index].property("DTSTART") == nil, let time = calendar.components[index].property("RECURRENCE-ID") {
+                calendar.components[index].properties.append(ICalendarLine("DTSTART", parameters: time.parameters, value: time.value))
+            }
+        }
         let events = calendar.components.filter { $0.name == "VEVENT" }
         guard let main = events.first(where: { $0.property("RECURRENCE-ID") == nil }) ?? events.first,
-              let uid = main.property("UID")?.value.trimmingCharacters(in: .whitespaces), !uid.isEmpty,
-              let event = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: timeZone)
-                .firstEvent(calendarID: "", href: nil, etag: nil) else { return nil }
+              let uid = main.property("UID")?.value.trimmingCharacters(in: .whitespaces), !uid.isEmpty else { return nil }
+        var found = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: timeZone).firstEvent(calendarID: "", href: nil, etag: nil)
+        if found == nil, main.property("RECURRENCE-ID") != nil {
+            // Just one time of a repeating event, without the series: read as an event of its own.
+            var standalone = main
+            standalone.removeProperties("RECURRENCE-ID")
+            var alone = calendar
+            alone.components = calendar.components.filter { $0.name != "VEVENT" } + [standalone]
+            found = ICalendarReader(calendar: alone, ownerEmail: ownerEmail, localTimeZone: timeZone).firstEvent(calendarID: "", href: nil, etag: nil)
+        }
+        guard let event = found else { return nil }
         let methodText = calendar.property("METHOD")?.value.trimmingCharacters(in: .whitespaces).uppercased() ?? ""
         let method = Method(rawValue: methodText) ?? .other
         let organizer = main.property("ORGANIZER").flatMap(ICalendarEventProperties.address(of:))
@@ -152,6 +166,40 @@ public enum InvitationText {
             component.name == "VEVENT" && component.properties("ATTENDEE").contains { line in
                 ICalendarEventProperties.address(of: line).map { ICalendarEventProperties.isSameMailbox($0.email, email) } ?? false
             }
+        }
+    }
+
+    /// Marks a kept copy canceled, as a cancellation says: the whole event, or just the times of a repeating event it
+    /// names (each kept as a canceled time of its own, with the series' title and place where the cancellation
+    /// leaves them out).
+    static func markCanceled(_ calendar: inout ICalendarComponent, by cancellation: ICalendarComponent) {
+        let canceled = cancellation.components.filter { $0.name == "VEVENT" }
+        let times = canceled.filter { $0.property("RECURRENCE-ID") != nil }
+        guard !times.isEmpty else {
+            let sequence = canceled.first.flatMap { $0.property("SEQUENCE") }.flatMap { Int($0.value.trimmingCharacters(in: .whitespaces)) }
+            for index in calendar.components.indices where calendar.components[index].name == "VEVENT" {
+                calendar.components[index].setProperty(ICalendarLine("STATUS", value: "CANCELLED"))
+                if let sequence, sequence > Self.sequence(of: calendar) {
+                    calendar.components[index].setProperty(ICalendarLine("SEQUENCE", value: String(sequence)))
+                }
+            }
+            return
+        }
+        let series = calendar.components.first { $0.name == "VEVENT" && $0.property("RECURRENCE-ID") == nil }
+        for time in times {
+            guard let when = time.property("RECURRENCE-ID") else { continue }
+            var override = time
+            override.components.removeAll { $0.name == "VALARM" }
+            if override.property("DTSTART") == nil {
+                override.properties.append(ICalendarLine("DTSTART", parameters: when.parameters, value: when.value))
+            }
+            for name in ["SUMMARY", "LOCATION", "ORGANIZER", "DURATION"] where override.property(name) == nil {
+                if let line = series?.property(name) { override.properties.append(line) }
+            }
+            if override.properties("ATTENDEE").isEmpty { override.properties += series?.properties("ATTENDEE") ?? [] }
+            override.setProperty(ICalendarLine("STATUS", value: "CANCELLED"))
+            calendar.components.removeAll { $0.name == "VEVENT" && $0.property("RECURRENCE-ID")?.value == when.value }
+            calendar.components.append(override)
         }
     }
 

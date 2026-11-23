@@ -199,7 +199,12 @@ public actor MicrosoftCalendarService: CalendarService {
         let reminders = json["isReminderOn"].bool == true ? [max(json["reminderMinutesBeforeStart"].int ?? 15, 0)] : []
         // Graph often names zones its own way ("Pacific Standard Time"); only zone names the Mac knows are kept.
         let zone = json["originalStartTimeZone"].string.flatMap(TimeZone.init(identifier:))?.identifier
-        return CalendarEvent(id: id, calendarID: calendarID, title: json["subject"].string ?? "", start: start, end: end,
+        // Outlook puts "Canceled: " before a canceled meeting's title; PMail says "(Canceled)" after it instead.
+        var title = json["subject"].string ?? ""
+        if json["isCancelled"].bool == true {
+            for prefix in ["Canceled: ", "Cancelled: "] where title.lowercased().hasPrefix(prefix.lowercased()) { title = String(title.dropFirst(prefix.count)) }
+        }
+        return CalendarEvent(id: id, calendarID: calendarID, title: title, start: start, end: end,
                              isAllDay: isAllDay, timeZone: zone, location: location, notes: notes,
                              attendees: json["attendees"].array.compactMap { attendee(from: $0, organizer: organizer) },
                              organizer: organizer,

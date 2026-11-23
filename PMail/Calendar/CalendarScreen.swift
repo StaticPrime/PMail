@@ -744,7 +744,7 @@ private struct MonthEventChip: View {
                     Text(model.formatting.shortTime(event.start)).font(.pm(11.5)).foregroundStyle(Theme.textSecondary)
                         .strikethrough(look.isStruckThrough)
                     eventTitle(event).font(.pm(11.5, .medium))
-                        .foregroundStyle(look == .declined ? Theme.textSecondary : Theme.textPrimary)
+                        .foregroundStyle(look.isStruckThrough ? Theme.textSecondary : Theme.textPrimary)
                         .strikethrough(look.isStruckThrough)
                         .lineLimit(1)
                     Spacer(minLength: 0)
@@ -857,7 +857,7 @@ private struct ScheduleRow: View {
                         .strikethrough(look.isStruckThrough)
                         .frame(width: 170, alignment: .leading)
                     eventTitle(event).font(.pm(13.5, .medium))
-                        .foregroundStyle((event.isTask && event.isCompleted) || look == .declined ? Theme.textSecondary : Theme.textPrimary)
+                        .foregroundStyle((event.isTask && event.isCompleted) || look.isStruckThrough ? Theme.textSecondary : Theme.textPrimary)
                         .strikethrough((event.isTask && event.isCompleted) || look.isStruckThrough)
                         .lineLimit(1)
                     if let conference = event.conference {

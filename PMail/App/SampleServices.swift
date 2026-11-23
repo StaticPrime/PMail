@@ -477,9 +477,22 @@ actor SampleCalendarService: CalendarService {
 
     func receive(_ invitation: Invitation) async throws {
         guard emailsInvitations else { return }
-        if invitation.method == .cancel { return events.removeAll { $0.uid == invitation.uid } }
-        guard invitation.method == .request, !events.contains(where: { $0.uid == invitation.uid }),
+        if invitation.method == .cancel {
+            for index in events.indices where events[index].uid == invitation.uid { events[index].status = .cancelled }
+            return
+        }
+        guard invitation.method == .request,
               invitation.event.attendees.contains(where: { $0.address.isSameMailbox(as: account.email) }) else { return }
+        // A change: whatever it says now, asked again when the time moved.
+        if let index = events.firstIndex(where: { $0.uid == invitation.uid }) {
+            let moved = events[index].start != invitation.event.start || events[index].end != invitation.event.end
+            var changed = invitation.event
+            changed.id = events[index].id
+            changed.calendarID = events[index].calendarID
+            changed.myResponse = moved ? .needsAction : events[index].myResponse
+            events[index] = changed
+            return
+        }
         counter += 1
         var event = invitation.event
         event.id = "sample-invited-\(counter)"

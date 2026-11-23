@@ -338,9 +338,10 @@ import Testing
         try await service.receive(try #require(Invitation.read(Data(Self.invitation(uid: "theirs@example.com", sequence: 3).utf8), ownerEmail: "pug@me.com")))
         #expect(transport.sent("PUT", "/123456/calendars/").count == saves)
 
-        // A cancellation takes PMail's copy off.
+        // A cancellation keeps PMail's copy, marked canceled.
         try await service.receive(try #require(Invitation.read(Data(Self.invitation(uid: "party@example.com", sequence: 1, method: "CANCEL").utf8),
                                                                ownerEmail: "pug@me.com")))
-        #expect(transport.sent("DELETE", "/123456/calendars/work/party").count == 1)
+        #expect(transport.sent("DELETE", "/123456/calendars/").isEmpty)
+        #expect(transport.sent("PUT", "/123456/calendars/work/party").last?.bodyText.contains("STATUS:CANCELLED") == true)
     }
 }

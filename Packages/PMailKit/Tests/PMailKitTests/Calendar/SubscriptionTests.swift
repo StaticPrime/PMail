@@ -131,4 +131,49 @@ struct SubscriptionTests {
         await #expect(throws: PMailError.self) { try await wrapper.update(event, scope: .thisEvent, addingConference: false) }
         await #expect(throws: PMailError.self) { try await wrapper.delete(event, scope: .thisEvent) }
     }
+
+    // MARK: Canceled invitations
+
+    /// Google lists canceled events only when asked: an invitation its organizer canceled shows, marked canceled; one
+    /// the owner declined, or their own event they deleted, doesn't; and one deleted from PMail stays gone.
+    @Test func googleShowsInvitationsTheirOrganizersCanceled() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let events = "/calendar/v3/calendars/jamie@acme.example/events"
+        let transport = StubTransport()
+        transport.on("GET", events) { request in
+            #expect(request.queryValues(named: "showDeleted") == ["true"])
+            func item(_ id: String, me: String, organizerSelf: Bool) -> String {
+                #"{"id": "\#(id)", "status": "cancelled", "summary": "\#(id)", "start": {"dateTime": "2026-11-24T15:00:00Z"}, "#
+                    + #""end": {"dateTime": "2026-11-24T16:00:00Z"}, "organizer": {"email": "\#(organizerSelf ? "jamie@acme.example" : "alex@acme.example")"}, "#
+                    + #""attendees": [{"email": "jamie@acme.example", "self": true, "organizer": \#(organizerSelf), "responseStatus": "\#(me)"}]}"#
+            }
+            return .json(#"{"items": ["# + [item("theirs", me: "accepted", organizerSelf: false), item("declined", me: "declined", organizerSelf: false),
+                                             item("mine", me: "accepted", organizerSelf: true)].joined(separator: ",") + "]}")
+        }
+        transport.on("DELETE", events) { _ in .json(#"{"error": {"code": 410, "message": "Resource has been deleted"}}"#, status: 410) }
+        let file = folder.appendingPathComponent(DismissedEvents.fileName)
+        let week = (WebFixtures.date("2026-11-22T00:00:00Z"), WebFixtures.date("2026-11-29T00:00:00Z"))
+        let calendar = GoogleCalendarService(client: .test(transport), dismissedFile: file)
+        let shown = try await calendar.loadEvents(in: ["jamie@acme.example"], from: week.0, to: week.1)
+        #expect(shown.map(\.id) == ["theirs"] && shown.first?.status == .cancelled)
+        try await calendar.delete(try #require(shown.first), scope: .thisEvent)
+        let after = GoogleCalendarService(client: .test(transport), dismissedFile: file)
+        #expect(try await after.loadEvents(in: ["jamie@acme.example"], from: week.0, to: week.1).isEmpty, "deleted from PMail, it stays gone")
+    }
+
+    /// Outlook puts "Canceled: " before a canceled meeting's title; PMail marks it canceled instead.
+    @Test func microsoftCanceledMeetingsKeepTheirTitle() async throws {
+        let transport = StubTransport()
+        transport.on("GET", "/v1.0/me/calendars/AAMkCal1=/calendarView") { _ in
+            .json(#"""
+            {"value": [{"id": "AAMkGone=", "subject": "Canceled: Budget review", "isCancelled": true,
+                        "start": {"dateTime": "2026-11-24T15:00:00.0000000", "timeZone": "UTC"},
+                        "end": {"dateTime": "2026-11-24T16:00:00.0000000", "timeZone": "UTC"}, "responseStatus": {"response": "accepted"}}]}
+            """#)
+        }
+        let events = try await MicrosoftCalendarService(client: .test(transport))
+            .loadEvents(in: ["AAMkCal1="], from: WebFixtures.date("2026-11-22T00:00:00Z"), to: WebFixtures.date("2026-11-29T00:00:00Z"))
+        #expect(events.map(\.title) == ["Budget review"] && events.first?.status == .cancelled)
+    }
 }

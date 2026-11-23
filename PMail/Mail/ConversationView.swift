@@ -402,7 +402,7 @@ private struct InvitationCard: View {
                 }
             }
         case .cancel:
-            Text("\(organizer) cancelled this event.").font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
+            Text("\(organizer) canceled this event.").font(.pm(12.5)).foregroundStyle(Theme.textSecondary)
         case .reply:
             if let replier = invitation.replier {
                 let name = replier.address.name ?? replier.address.email

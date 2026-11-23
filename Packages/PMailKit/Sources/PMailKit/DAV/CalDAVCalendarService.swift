@@ -281,7 +281,7 @@ public actor CalDAVCalendarService: CalendarService {
 
     /// Takes in an invitation that came by email, when the owner is one of its guests. A new one goes on the main
     /// calendar, waiting for an answer, marked as answered by email (so the server doesn't answer too); a newer
-    /// version replaces it, and a cancellation takes it off. One the server took in itself is the server's to keep.
+    /// version replaces it, and a cancellation marks it canceled. One the server took in itself is the server's to keep.
     public func receive(_ invitation: Invitation) async throws {
         guard invitation.method == .request || invitation.method == .cancel,
               !(invitation.organizer.map { ICalendarEventProperties.isSameMailbox($0.email, ownerEmail) } ?? false),
@@ -312,19 +312,9 @@ public actor CalDAVCalendarService: CalendarService {
                 _ = try await save(incoming, to: url, ifMatch: nil, isNew: true)
             }
         case .cancel:
+            // Kept, marked canceled (the whole event, or the times it names), until the owner deletes it.
             guard var calendar = found?.calendar, let found else { return }
-            let occurrences = incoming.components.filter { $0.name == "VEVENT" }.compactMap { $0.property("RECURRENCE-ID") }
-            if occurrences.isEmpty {
-                try await client.delete(found.url, ifMatch: found.etag)
-                resources[found.url.path(percentEncoded: true)] = nil
-                return
-            }
-            // Just some times of a repeating event: they're left out of it from now on.
-            guard let main = calendar.components.firstIndex(where: { $0.name == "VEVENT" && $0.property("RECURRENCE-ID") == nil }) else { return }
-            for occurrence in occurrences {
-                calendar.components[main].properties.append(ICalendarLine("EXDATE", parameters: occurrence.parameters, value: occurrence.value))
-                calendar.components.removeAll { $0.name == "VEVENT" && $0.property("RECURRENCE-ID")?.value == occurrence.value }
-            }
+            InvitationText.markCanceled(&calendar, by: incoming)
             _ = try await save(calendar, to: found.url, ifMatch: found.etag)
         default:
             return

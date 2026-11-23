@@ -100,7 +100,47 @@ struct InvitationTests {
         let cancellation = try #require(Invitation.read(Data((try await organizer.invitationText(for: movedEvent, method: .cancel, attendees: nil) ?? "").utf8),
                                                         ownerEmail: "me@example.com"))
         try await mine.receive(cancellation)
-        #expect(try await week(mine).isEmpty)
+        let canceled = try await week(mine)
+        #expect(canceled.count == 1 && canceled.first?.status == .cancelled, "a cancellation keeps the event, marked canceled")
+    }
+
+    /// Canceling one time of a repeating meeting marks just that time canceled, keeping the series' title.
+    @Test func oneCanceledTimeOfARepeatingMeeting() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let series = ICS.calendar("""
+        METHOD:REQUEST
+        BEGIN:VEVENT
+        UID:standup@example.com
+        SEQUENCE:0
+        DTSTAMP:20261120T120000Z
+        DTSTART:20261123T150000Z
+        DTEND:20261123T151500Z
+        RRULE:FREQ=DAILY;COUNT=5
+        SUMMARY:Standup
+        ORGANIZER:mailto:alex@example.com
+        ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com
+        END:VEVENT
+        """)
+        let oneTime = ICS.calendar("""
+        METHOD:CANCEL
+        BEGIN:VEVENT
+        UID:standup@example.com
+        SEQUENCE:1
+        DTSTAMP:20261121T120000Z
+        RECURRENCE-ID:20261125T150000Z
+        ORGANIZER:mailto:alex@example.com
+        ATTENDEE:mailto:me@example.com
+        STATUS:CANCELLED
+        END:VEVENT
+        """)
+        let mine = calendar(folder)
+        try await mine.receive(try #require(Invitation.read(Data(series.utf8), ownerEmail: "me@example.com")))
+        try await mine.receive(try #require(Invitation.read(Data(oneTime.utf8), ownerEmail: "me@example.com")))
+        let times = try await week(mine)
+        #expect(times.count == 5)
+        #expect(times.filter { $0.status == .cancelled }.map(\.start) == [ICS.moment("2026-11-25 15:00")])
+        #expect(times.allSatisfy { $0.title == "Standup" })
     }
 
     @Test func theOrganizerTakesInAnswers() async throws {

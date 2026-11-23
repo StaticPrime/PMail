@@ -25,12 +25,17 @@ public actor GoogleCalendarService: CalendarService {
         var eventID: String
     }
 
-    public init(tokens: any AccessTokenProvider, transport: any HTTPTransport = URLSessionTransport()) {
-        self.init(client: WebClient(tokens: tokens, transport: transport))
+    /// Canceled invitations deleted from PMail, which Google keeps listing.
+    let dismissed: DismissedEvents
+
+    /// `dismissedFile` keeps the canceled invitations deleted from PMail between launches.
+    public init(tokens: any AccessTokenProvider, transport: any HTTPTransport = URLSessionTransport(), dismissedFile: URL? = nil) {
+        self.init(client: WebClient(tokens: tokens, transport: transport), dismissedFile: dismissedFile)
     }
 
-    init(client: WebClient) {
+    init(client: WebClient, dismissedFile: URL? = nil) {
         self.client = client
+        dismissed = DismissedEvents(file: dismissedFile)
     }
 
     static func url(_ path: String, _ query: [(String, String)] = []) throws -> URL {
@@ -112,8 +117,9 @@ public actor GoogleCalendarService: CalendarService {
         let pagesByCalendar = try await WebClient.concurrentMap(calendars) { calendarID -> (String, [JSONValue]) in
             do {
                 let pages = try await client.pages { token in
+                    // Deleted events too, for invitations their organizers canceled (shown marked canceled).
                     var query = [("timeMin", WebDate.utcString(start)), ("timeMax", WebDate.utcString(end)),
-                                 ("singleEvents", "true"), ("orderBy", "startTime"), ("maxResults", "2500")]
+                                 ("singleEvents", "true"), ("orderBy", "startTime"), ("maxResults", "2500"), ("showDeleted", "true")]
                     if let token { query.append(("pageToken", token)) }
                     return try Self.eventsURL(calendarID, nil, query)
                 }
@@ -131,7 +137,8 @@ public actor GoogleCalendarService: CalendarService {
             let defaults = pages.first.flatMap { $0["defaultReminders"].isNull ? nil : Self.popupMinutes($0["defaultReminders"]) }
                 ?? defaultReminders[calendarID] ?? []
             for item in pages.flatMap({ $0["items"].array }) {
-                if let event = Self.event(from: item, calendarID: calendarID, defaultReminders: defaults, colors: colors) {
+                if let event = Self.event(from: item, calendarID: calendarID, defaultReminders: defaults, colors: colors),
+                   await isShown(event) {
                     events.append(event)
                 }
             }
@@ -404,8 +411,18 @@ public actor GoogleCalendarService: CalendarService {
         return result
     }
 
+    /// Whether a listed event shows: every event that isn't deleted, and invitations their organizer canceled (not
+    /// ones the owner declined, which Google lists as deleted once they're removed, or deleted from PMail).
+    private func isShown(_ event: CalendarEvent) async -> Bool {
+        guard event.status == .cancelled else { return true }
+        guard let answer = event.myResponse, answer != .declined else { return false }
+        return await !dismissed.contains(event.id)
+    }
+
     public func delete(_ event: CalendarEvent, scope: RecurrenceScope) async throws {
         let targetID = scope == .allEvents ? (event.seriesID ?? event.id) : event.id
+        // A canceled invitation stays gone once deleted, though Google keeps listing it.
+        if event.status == .cancelled { await dismissed.add(event.id) }
         do {
             try await client.delete(Self.eventsURL(event.calendarID, targetID, [("sendUpdates", "all")]))
         } catch PMailError.notFound {

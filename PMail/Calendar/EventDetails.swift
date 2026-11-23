@@ -163,7 +163,14 @@ struct EventDetailsView: View {
                     Text(event.visibility.name).font(.pm(13)).foregroundStyle(Theme.textPrimary)
                 }
             }
-            if let response = event.myResponse, !(event.organizer?.isSameMailbox(as: model.account.email) ?? false) {
+            if event.status == .cancelled {
+                Divider().overlay(Theme.divider).padding(.vertical, 8)
+                // Called off: nothing to answer, and Delete takes it off the calendar.
+                let who = event.organizer.flatMap { $0.isSameMailbox(as: model.account.email) ? nil : ($0.name ?? $0.email) }
+                Label(who.map { "\($0) canceled this event." } ?? "This event was canceled.", systemImage: "calendar.badge.minus")
+                    .font(.pm(13)).foregroundStyle(Theme.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let response = event.myResponse, !(event.organizer?.isSameMailbox(as: model.account.email) ?? false) {
                 Divider().overlay(Theme.divider).padding(.vertical, 8)
                 // The answer goes to whoever sent the invitation.
                 if response == .needsAction, let organizer = event.organizer {

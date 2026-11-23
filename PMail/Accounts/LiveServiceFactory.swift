@@ -55,7 +55,8 @@ struct LiveServiceFactory: ServiceFactory {
         }
         if account.kind == .google {
             return AccountServices(mail: GoogleMailService(email: account.email, tokens: tokenProvider),
-                                   calendar: calendar(GoogleCalendarService(tokens: tokenProvider),
+                                   calendar: calendar(GoogleCalendarService(tokens: tokenProvider,
+                                                                            dismissedFile: storage(for: account).appendingPathComponent(DismissedEvents.fileName)),
                                                       tasks: GoogleTasksService(tokens: tokenProvider), for: account),
                                    contacts: GoogleContactsService(tokens: tokenProvider))
         }
