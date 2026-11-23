@@ -83,14 +83,18 @@ enum SelfTest {
     /// Reads a value from one of the sample services (they're actors), blocking until it arrives.
     /// The invitation the self-test answers by email.
     static var gardenParty: Invitation?
+    /// The invitation the self-test takes into a calendar, and the ID of its email.
+    static var picnic: Invitation?
+    static var picnicMessage: String?
 
     /// An emailed invitation's iCalendar text, as another calendar would send it.
-    static func invitation(uid: String, title: String, start: Date, end: Date, organizer: String, guest: String) -> String {
+    static func invitation(uid: String, title: String, start: Date, end: Date, organizer: String, guest: String,
+                           method: String = "REQUEST") -> String {
         let format = DateFormatter()
         format.locale = Locale(identifier: "en_US_POSIX")
         format.timeZone = TimeZone(identifier: "UTC")
         format.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
-        return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Example//Calendar//EN", "METHOD:REQUEST", "BEGIN:VEVENT", "UID:\(uid)",
+        return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Example//Calendar//EN", "METHOD:\(method)", "BEGIN:VEVENT", "UID:\(uid)",
                 "DTSTAMP:\(format.string(from: start))", "DTSTART:\(format.string(from: start))", "DTEND:\(format.string(from: end))",
                 "SUMMARY:\(title)", "ORGANIZER:mailto:\(organizer)", "ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:\(guest)",
                 "END:VEVENT", "END:VCALENDAR"].joined(separator: "\r\n") + "\r\n"
@@ -358,6 +362,11 @@ enum SelfTest {
                 calendar.respond(to: demo, with: .accepted)
                 check(calendar.shownEvents().first { $0.title == "Vendor demo" }.map(AnswerLook.init) == .solid, "answering Yes makes it solid")
             }
+            // A declined invitation stays until it's deleted, which anyone invited can do.
+            if let declined = calendar.shownEvents().first(where: { $0.title == "Budget review" }) {
+                calendar.delete(declined, scope: .thisEvent)
+                check(!calendar.shownEvents().contains { $0.title == "Budget review" }, "a declined invitation can be deleted")
+            }
             guard var draft = calendar.newDraft() else { return check(false, "a new event can be started") }
             draft.title = "Self-test sync"
             draft.addsNativeConference = true
@@ -457,7 +466,63 @@ enum SelfTest {
             let last = read { await mailService?.sentMessages.last } ?? nil
             check(last?.calendar?.method == "CANCEL" && last?.to.map(\.name) == ["Alex Kim"], "deleting it calls it off for everyone invited",
                   last?.subject ?? "nothing sent")
-            ((session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService)?.emailing.withLock { $0 = false }
+            // A calendar that doesn't take emailed invitations in itself: PMail does, waiting for an answer.
+            let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
+            let start = AppClock.now().addingTimeInterval(4 * 86_400)
+            let text = Self.invitation(uid: "picnic@example.com", title: "Self-test picnic", start: start, end: start.addingTimeInterval(7_200),
+                                       organizer: "olivia.chen@example.com", guest: session.account.email)
+            guard let invitation = Invitation.read(Data(text.utf8), ownerEmail: session.account.email) else {
+                return check(false, "an invitation to take in is read")
+            }
+            picnic = invitation
+            // Its email waits unread in the inbox, with the invitation attached.
+            let file = Attachment(id: "invite", filename: "invite.ics", mimeType: "text/calendar", size: text.utf8.count, data: Data(text.utf8))
+            let olivia = SampleData.person("Olivia Chen")
+            let now = AppClock.now()
+            picnicMessage = read {
+                await mailService?.deliver(from: olivia, subject: "Invitation: Self-test picnic", text: "Bring a blanket!", attachments: [file], at: now)
+            } ?? nil
+            let calendar = session.calendar
+            Task { await calendar.takeIn(invitation) }
+            wait("the emailed invitation on the calendar") {
+                read { await service?.allEvents.contains { $0.uid == "picnic@example.com" && $0.myResponse == .needsAction } } == true
+            }
+        }
+        step {
+            let mailService = sampleMail
+            guard let picnic else { return check(false, "the invitation taken in") }
+            check(true, "an emailed invitation for the account goes on its calendar, waiting for an answer")
+            session.calendar.answer(picnic, with: .accepted)
+            let message = picnicMessage ?? ""
+            wait("the answer to the emailed invitation, and its email read") {
+                read { await mailService?.sentMessages.last?.subject }??.hasPrefix("Accepted: Self-test picnic") == true
+                    && read { await mailService?.summary(id: message)?.isUnread } == false
+            }
+        }
+        step {
+            let mailService = sampleMail
+            let last = read { await mailService?.sentMessages.last } ?? nil
+            check(last?.calendar?.method == "REPLY" && last?.to.map(\.email) == ["olivia.chen@example.com"],
+                  "answering it emails the organizer", last?.subject ?? "nothing sent")
+            let message = picnicMessage ?? ""
+            check(read { await mailService?.summary(id: message)?.isUnread } == false, "and marks the invitation email read")
+            // The organizer calls it off: the cancellation takes it off the calendar.
+            let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
+            guard let picnic else { return }
+            let text = Self.invitation(uid: picnic.uid, title: "Self-test picnic", start: picnic.event.start, end: picnic.event.end,
+                                       organizer: "olivia.chen@example.com", guest: session.account.email, method: "CANCEL")
+            if let cancellation = Invitation.read(Data(text.utf8), ownerEmail: session.account.email) {
+                let calendar = session.calendar
+                Task { await calendar.takeIn(cancellation) }
+            }
+            wait("the cancelled invitation to go") {
+                read { await service?.allEvents.contains { $0.uid == "picnic@example.com" } } == false
+            }
+        }
+        step {
+            let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
+            check(read { await service?.allEvents.contains { $0.uid == "picnic@example.com" } } == false, "a cancellation takes it off the calendar")
+            service?.emailing.withLock { $0 = false }
         }
         step {
             let calendar = session.calendar

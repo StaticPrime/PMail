@@ -214,6 +214,7 @@ enum SampleData {
                                          isStarred: starred, isImportant: important, isDraft: labels.contains("DRAFT"),
                                          hasAttachments: !attachments.isEmpty, messageIDHeader: "<\(id)@example.com>")
             if let thread, thread != id { summary.references = ["<\(thread)@example.com>"]; summary.inReplyTo = "<\(thread)@example.com>" }
+            if attachments.contains(where: { Invitation.isCalendarFile(mimeType: $0.mimeType, filename: $0.filename) }) { summary.isInvitation = true }
             messages.append(Message(summary: summary, html: html, text: text, attachments: attachments, inline: inline))
         }
         let alex = person("Alex Kim"), priya = person("Priya Shah"), rose = person("Grandma Rose"), sam = person("Sam Rivera")

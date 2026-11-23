@@ -128,5 +128,6 @@ struct InvitationTests {
         let file = try #require(parsed.attachments.first { Invitation.isCalendarFile(mimeType: $0.mimeType, filename: $0.filename) })
         let invitation = try #require(Invitation.read(file.data ?? Data(), ownerEmail: "alex@example.com"))
         #expect(invitation.uid == "abc@example.com" && invitation.method == .request && invitation.event.title == "Roadmap")
+        #expect(parsed.summary(id: "m1").isInvitation == true, "the list knows it's an invitation")
     }
 }

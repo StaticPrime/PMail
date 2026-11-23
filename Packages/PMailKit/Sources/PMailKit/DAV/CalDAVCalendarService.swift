@@ -262,6 +262,92 @@ public actor CalDAVCalendarService: CalendarService {
         _ = try await save(calendar, to: url, ifMatch: current.etag)
     }
 
+    // MARK: Invitations by email
+
+    /// The server may not take in invitations that come by email (iCloud doesn't, unless it's set to), so PMail does.
+    public nonisolated var takesInEmailedInvitations: Bool { true }
+
+    /// The owner's answer to an invitation PMail took in from an email, which PMail emails to the organizer. Nil for
+    /// everything else: the server sends its own invitations, cancellations and answers.
+    public func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? {
+        guard method == .reply else { return nil }
+        let url = try resourceURL(of: event, in: try await collection(event.calendarID))
+        let (calendar, _) = try await editableCalendar(at: url, expectedETag: nil, fresh: true)
+        guard InvitationText.isAnsweredByEmail(calendar) else { return nil }
+        let reader = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
+        let answer = reader.firstEvent(calendarID: event.calendarID, href: nil, etag: nil)?.myResponse ?? event.myResponse
+        return InvitationText.reply(to: calendar.serialized, from: MailAddress(email: ownerEmail), response: answer ?? .needsAction)
+    }
+
+    /// Takes in an invitation that came by email, when the owner is one of its guests. A new one goes on the main
+    /// calendar, waiting for an answer, marked as answered by email (so the server doesn't answer too); a newer
+    /// version replaces it, and a cancellation takes it off. One the server took in itself is the server's to keep.
+    public func receive(_ invitation: Invitation) async throws {
+        guard invitation.method == .request || invitation.method == .cancel,
+              !(invitation.organizer.map { ICalendarEventProperties.isSameMailbox($0.email, ownerEmail) } ?? false),
+              var incoming = InvitationText.vcalendar(invitation.text) else { return }
+        let found = try await resource(withUID: invitation.uid)
+        if let found, !InvitationText.isAnsweredByEmail(found.calendar) { return }
+        switch invitation.method {
+        case .request:
+            guard InvitationText.hasGuest(ownerEmail, in: incoming) else { return }
+            incoming.removeProperties("METHOD")
+            InvitationText.markAnsweredByEmail(&incoming)
+            if let found {
+                let storedSequence = InvitationText.sequence(of: found.calendar)
+                if invitation.sequence < storedSequence { return }
+                // Sent again without a change that matters: the answer already given stays.
+                let reader = ICalendarReader(calendar: found.calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
+                if invitation.sequence == storedSequence,
+                   let answer = reader.firstEvent(calendarID: "", href: nil, etag: nil)?.myResponse, answer != .needsAction {
+                    _ = InvitationText.setAnswer(answer, of: ownerEmail, in: &incoming)
+                }
+                _ = try await save(incoming, to: found.url, ifMatch: found.etag)
+            } else {
+                if collections.isEmpty { _ = try await loadCalendars() }
+                guard let main = collections.values.first(where: { $0.info.isPrimary }) else {
+                    throw PMailError.notSupported("This account has no calendar to add the invitation to.")
+                }
+                let url = main.url.appendingPathComponent(DAVResourceName.name(for: invitation.uid, fileExtension: "ics"))
+                _ = try await save(incoming, to: url, ifMatch: nil, isNew: true)
+            }
+        case .cancel:
+            guard var calendar = found?.calendar, let found else { return }
+            let occurrences = incoming.components.filter { $0.name == "VEVENT" }.compactMap { $0.property("RECURRENCE-ID") }
+            if occurrences.isEmpty {
+                try await client.delete(found.url, ifMatch: found.etag)
+                resources[found.url.path(percentEncoded: true)] = nil
+                return
+            }
+            // Just some times of a repeating event: they're left out of it from now on.
+            guard let main = calendar.components.firstIndex(where: { $0.name == "VEVENT" && $0.property("RECURRENCE-ID") == nil }) else { return }
+            for occurrence in occurrences {
+                calendar.components[main].properties.append(ICalendarLine("EXDATE", parameters: occurrence.parameters, value: occurrence.value))
+                calendar.components.removeAll { $0.name == "VEVENT" && $0.property("RECURRENCE-ID")?.value == occurrence.value }
+            }
+            _ = try await save(calendar, to: found.url, ifMatch: found.etag)
+        default:
+            return
+        }
+    }
+
+    /// The resource holding the event with an iCalendar UID, in any of the account's calendars it can change.
+    private func resource(withUID uid: String) async throws -> (url: URL, etag: String?, calendar: ICalendarComponent)? {
+        if collections.isEmpty { _ = try await loadCalendars() }
+        let query = DAVRequestBody.calendarQuery(uid: uid)
+        for collection in collections.values where !collection.info.isReadOnly {
+            let fetched = (try? await Self.fetchEvents(client: client, calendar: collection.url, query: query)) ?? []
+            for resource in fetched {
+                guard let calendar = ICalendarComponent.parse(resource.text).first(where: { $0.name == "VCALENDAR" }),
+                      calendar.components.contains(where: { $0.name == "VEVENT" && $0.property("UID")?.value == uid }),
+                      let url = URL(string: resource.path, relativeTo: collection.url)?.absoluteURL else { continue }
+                resources[url.path(percentEncoded: true)] = Resource(etag: resource.etag, text: resource.text)
+                return (url, resource.etag, calendar)
+            }
+        }
+        return nil
+    }
+
     // MARK: Resources
 
     private func writer() -> ICalendarWriter {

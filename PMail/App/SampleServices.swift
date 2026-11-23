@@ -339,15 +339,24 @@ actor SampleMailService: MailService {
     func setFailsLikeOffline(_ fails: Bool) { failsLikeOffline = fails }
 
     /// A new message arriving in the inbox, as if from outside (for the self-test).
+    @discardableResult
     func deliver(from: MailAddress, to recipients: [MailAddress]? = nil, subject: String, text: String, html: String? = nil, hints: SenderHints? = nil,
-                 at date: Date) {
+                 attachments: [Attachment] = [], at date: Date) -> String {
         counter += 1
         let id = "arrived-\(counter)"
         let labels = capabilities.usesLabels ? ["INBOX", "CATEGORY_PERSONAL", "UNREAD"] : []
+        let invitation = attachments.contains { Invitation.isCalendarFile(mimeType: $0.mimeType, filename: $0.filename) }
         let summary = MessageSummary(id: id, folderID: capabilities.usesLabels ? nil : role(.inbox), labelIDs: labels, from: from,
                                      to: recipients ?? [account.address], subject: subject, snippet: HTMLText.snippet(from: text), date: date,
-                                     isUnread: true, messageIDHeader: "<\(id)@example.com>", senderHints: hints)
-        messages.append(SampleData.Message(summary: summary, html: html, text: text))
+                                     isUnread: true, hasAttachments: !attachments.isEmpty, messageIDHeader: "<\(id)@example.com>",
+                                     senderHints: hints, isInvitation: invitation ? true : nil)
+        messages.append(SampleData.Message(summary: summary, html: html, text: text, attachments: attachments))
+        return id
+    }
+
+    /// A message as the sample server has it now (for the self-test).
+    func summary(id: String) -> MessageSummary? {
+        messages.first { $0.summary.id == id }?.summary
     }
 }
 
@@ -413,9 +422,24 @@ actor SampleCalendarService: CalendarService {
 
     func setFailsLikeOffline(_ fails: Bool) { failsLikeOffline = fails }
 
-    /// Emails invitations itself, as a calendar with no server does (for the self-test).
+    /// Emails invitations itself and takes in the ones that come by email, as a calendar with no server does (for
+    /// the self-test).
     nonisolated let emailing = OSAllocatedUnfairLock(initialState: false)
     nonisolated var emailsInvitations: Bool { emailing.withLock { $0 } }
+    nonisolated var takesInEmailedInvitations: Bool { emailing.withLock { $0 } }
+
+    func receive(_ invitation: Invitation) async throws {
+        guard emailsInvitations else { return }
+        if invitation.method == .cancel { return events.removeAll { $0.uid == invitation.uid } }
+        guard invitation.method == .request, !events.contains(where: { $0.uid == invitation.uid }),
+              invitation.event.attendees.contains(where: { $0.address.isSameMailbox(as: account.email) }) else { return }
+        counter += 1
+        var event = invitation.event
+        event.id = "sample-invited-\(counter)"
+        event.calendarID = calendars.first(where: \.isPrimary)?.id ?? calendars.first?.id ?? ""
+        event.myResponse = .needsAction
+        events.append(event)
+    }
 
     func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? {
         guard emailsInvitations else { return nil }

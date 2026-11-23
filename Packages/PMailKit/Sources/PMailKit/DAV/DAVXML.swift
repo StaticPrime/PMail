@@ -180,6 +180,14 @@ enum DAVRequestBody {
         return document("c:calendar-query", properties: [.getETag, .calendarData], inner: filter)
     }
 
+    /// A CalDAV calendar-query for the event with an iCalendar UID (RFC 4791 section 9.7.5).
+    static func calendarQuery(uid: String) -> Data {
+        let match = "<c:prop-filter name=\"UID\"><c:text-match collation=\"i;octet\">\(escape(uid))</c:text-match></c:prop-filter>"
+        let events = "<c:comp-filter name=\"VEVENT\">\(match)</c:comp-filter>"
+        let filter = "<c:filter><c:comp-filter name=\"VCALENDAR\">\(events)</c:comp-filter></c:filter>"
+        return document("c:calendar-query", properties: [.getETag, .calendarData], inner: filter)
+    }
+
     static func calendarMultiget(_ hrefs: [String]) -> Data {
         document("c:calendar-multiget", properties: [.getETag, .calendarData], inner: hrefList(hrefs))
     }

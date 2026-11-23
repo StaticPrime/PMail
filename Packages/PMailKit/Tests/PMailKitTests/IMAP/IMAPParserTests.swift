@@ -339,6 +339,17 @@ import Testing
         #expect(body.disposition == "inline" && body.dispositionParameters == ["x": "y"] && body.languages == ["DE"])
     }
 
+    /// An invitation as it usually comes: text/calendar beside the text and HTML, and an invite.ics file.
+    @Test func invitationsAreFoundInTheBodyStructure() throws {
+        let text = #"((("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1)("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 40 2)"#
+            + #"("TEXT" "CALENDAR" ("CHARSET" "UTF-8" "METHOD" "REQUEST") NIL NIL "7BIT" 900 30) "ALTERNATIVE" ("BOUNDARY" "a") NIL NIL)"#
+            + #"("APPLICATION" "ICS" ("NAME" "invite.ics") NIL NIL "BASE64" 1200 NIL ("ATTACHMENT" ("FILENAME" "invite.ics")) NIL NIL) "#
+            + #""MIXED" ("BOUNDARY" "m") NIL NIL)"#
+        #expect(try #require(IMAPBodyPart.parse(try value(text))).hasCalendar)
+        let plain = #"("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1)"#
+        #expect(try #require(IMAPBodyPart.parse(try value(plain))).hasCalendar == false)
+    }
+
     @Test func attachedMessageBodyStructure() throws {
         let text = #"(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 10 1)("MESSAGE" "RFC822" NIL NIL NIL "7BIT" 800 "#
             + #"("Mon, 2 Nov 2026 10:00:00 +0000" "Fwd stuff" (("Sam" NIL "sam" "example.org")) NIL NIL NIL NIL NIL NIL "#

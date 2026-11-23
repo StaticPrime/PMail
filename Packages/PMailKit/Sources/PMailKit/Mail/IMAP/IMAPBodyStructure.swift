@@ -87,6 +87,11 @@ public struct IMAPBodyPart: Sendable, Hashable {
     /// Whether any part is an attachment.
     public var hasAttachments: Bool { leafParts.contains { $0.isAttachment } }
 
+    /// Whether any part is a calendar invitation, answer or cancellation (text/calendar, application/ics or an .ics file).
+    public var hasCalendar: Bool {
+        leafParts.contains { Invitation.isCalendarFile(mimeType: $0.mimeType, filename: $0.filename ?? "") }
+    }
+
     /// The part with a section number, searching inside attached messages too. An attached message and the
     /// multipart inside it share a number; the message itself is the one found.
     public func part(atSection section: String) -> IMAPBodyPart? {

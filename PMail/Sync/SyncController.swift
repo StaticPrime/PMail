@@ -157,7 +157,7 @@ final class SyncController {
             // Mail an earlier PMail kept on this Mac goes back to the server, on its own.
             Task { await putKeptMailBack(of: session) }
             // Invitations, answers and cancellations that came by email, for a calendar with no server to take them.
-            if state != nil, session.services.calendar.emailsInvitations {
+            if state != nil, session.services.calendar.takesInEmailedInvitations {
                 let arrived = result.messages.filter { $0.hasAttachments && !sorted.movedOut.contains($0.id) }
                 if !arrived.isEmpty { Task { await takeInInvitations(from: arrived, in: session) } }
             }
@@ -168,9 +168,9 @@ final class SyncController {
         }
     }
 
-    /// Takes the invitations, answers and cancellations in new mail into an account's calendar when it has no server to
-    /// do that: an invitation shows on the calendar waiting for an answer, an answer goes on the guest, and a
-    /// cancellation takes the event off.
+    /// Takes the invitations, answers and cancellations in new mail into an account's calendar when its server doesn't
+    /// (or it has none): an invitation for the account shows on the calendar waiting for an answer, an answer goes on
+    /// the guest, and a cancellation takes the event off.
     func takeInInvitations(from messages: [MessageSummary], in session: AccountSession) async {
         let mail = session.services.mail
         var changed = false

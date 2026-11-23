@@ -307,6 +307,38 @@ final class MailViewModel {
 
     /// New mail came in, or the server said something changed: counts and the list showing are fetched again
     /// (without clearing what's there).
+    /// Marks an event's invitation email read once it's answered on the calendar: the inbox's unread messages that
+    /// carry the event's invitation (by its UID), or, when none do, the ones from its organizer with its title in the
+    /// subject. PMail may never have opened the message, so it's found by searching for the title.
+    func markInvitationRead(for event: CalendarEvent) async {
+        let title = event.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        let service = self.service
+        let inbox = folder(role: .inbox)?.id ?? "INBOX"
+        guard let page = try? await service.listConversations(ListRequest(folderID: inbox, query: title, pageSize: 25)) else { return }
+        let unread = page.conversations.flatMap(\.messages).filter(\.isUnread)
+        var matches: [MessageSummary] = []
+        if let uid = event.uid {
+            let withFiles = unread.filter { $0.isInvitation == true || ($0.isInvitation == nil && $0.hasAttachments) }
+            for summary in withFiles.prefix(10) {
+                guard let message = try? await service.loadMessage(summary) else { continue }
+                for file in message.attachments where Invitation.isCalendarFile(mimeType: file.mimeType, filename: file.filename) {
+                    var data = file.data
+                    if data == nil { data = try? await service.loadAttachment(file, in: summary) }
+                    if let data, Invitation.read(data, ownerEmail: account.email)?.uid == uid {
+                        matches.append(summary)
+                        break
+                    }
+                }
+            }
+        }
+        if matches.isEmpty, let organizer = event.organizer {
+            matches = unread.filter { $0.from?.isSameMailbox(as: organizer.email) == true && $0.subject.localizedCaseInsensitiveContains(title) }
+        }
+        guard !matches.isEmpty, (try? await service.perform(.markRead, on: matches)) != nil else { return }
+        serverChanged()
+    }
+
     func serverChanged() {
         Task {
             await loadFolders(thenList: false)

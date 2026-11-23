@@ -78,6 +78,8 @@ public final class CalendarWithTasks: CalendarService {
 
     public var emailsInvitations: Bool { calendars.emailsInvitations }
 
+    public var takesInEmailedInvitations: Bool { calendars.takesInEmailedInvitations }
+
     public func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? {
         guard !event.isTask else { return nil }
         return try await calendars.invitationText(for: event, method: method, attendees: attendees)

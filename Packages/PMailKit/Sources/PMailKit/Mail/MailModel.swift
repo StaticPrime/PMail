@@ -127,13 +127,17 @@ public struct MessageSummary: Codable, Sendable, Identifiable, Hashable {
     /// What the message's headers say about its sender, for sorting an inbox into categories on the Mac; nil when
     /// the service didn't read them.
     public var senderHints: SenderHints?
+    /// Whether it carries a calendar invitation, answer or cancellation (an iCalendar part); nil when the service
+    /// can't tell from what it lists.
+    public var isInvitation: Bool?
 
     public init(id: String, threadID: String? = nil, folderID: String? = nil, labelIDs: [String] = [], from: MailAddress? = nil,
                 to: [MailAddress] = [], cc: [MailAddress] = [], subject: String = "", snippet: String = "", date: Date = Date(),
                 isUnread: Bool = false, isStarred: Bool = false, isImportant: Bool = false, isDraft: Bool = false,
                 hasAttachments: Bool = false, messageIDHeader: String? = nil, inReplyTo: String? = nil, references: [String] = [],
-                size: Int? = nil, senderHints: SenderHints? = nil) {
+                size: Int? = nil, senderHints: SenderHints? = nil, isInvitation: Bool? = nil) {
         self.senderHints = senderHints
+        self.isInvitation = isInvitation
         self.id = id
         self.threadID = threadID ?? id
         self.folderID = folderID
@@ -179,6 +183,8 @@ public struct Conversation: Codable, Sendable, Identifiable, Hashable {
     public var isStarred: Bool { messages.contains { $0.isStarred } }
     public var isImportant: Bool { messages.contains { $0.isImportant } }
     public var hasAttachments: Bool { messages.contains { $0.hasAttachments } }
+    /// Whether any of its messages carries a calendar invitation, answer or cancellation.
+    public var isInvitation: Bool { messages.contains { $0.isInvitation == true } }
     public var hasDraft: Bool { messages.contains { $0.isDraft } }
     public var labelIDs: Set<String> { Set(messages.flatMap(\.labelIDs)) }
 

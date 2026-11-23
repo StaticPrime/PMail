@@ -243,6 +243,7 @@ public actor IMAPMailService: MailService {
         let inReplyTo = envelope?.inReplyTo ?? headers["in-reply-to"].flatMap(MessageIDs.first(in:))
         let messageID = envelope?.messageID
         let threadID = response.threadID ?? references.first ?? inReplyTo ?? messageID ?? id.rawValue
+        let isInvitation: Bool? = response.bodyStructure?.hasCalendar
         return MessageSummary(id: id.rawValue, threadID: threadID, folderID: id.mailbox, labelIDs: keywordLabelIDs(response.flags),
                               from: envelope?.from.first,
                               to: envelope?.to ?? [], cc: envelope?.cc ?? [], subject: envelope?.subject ?? "", snippet: snippet,
@@ -250,7 +251,7 @@ public actor IMAPMailService: MailService {
                               isUnread: !response.hasFlag("\\Seen"), isStarred: response.hasFlag("\\Flagged"),
                               isDraft: response.hasFlag("\\Draft"), hasAttachments: response.bodyStructure?.hasAttachments ?? false,
                               messageIDHeader: messageID, inReplyTo: inReplyTo, references: references, size: response.size,
-                              senderHints: senderHints(from: headers))
+                              senderHints: senderHints(from: headers), isInvitation: isInvitation)
     }
 
     // MARK: Reading

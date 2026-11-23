@@ -99,6 +99,7 @@ final class AccountSession: Identifiable {
         mail.session = self
         calendar.contacts = contacts
         calendar.mailer = invitationMailer
+        calendar.mailModel = mail
     }
 
     /// Emails invitations, answers and cancellations for a calendar with no server to send them.

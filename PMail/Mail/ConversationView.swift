@@ -344,7 +344,11 @@ private struct InvitationCard: View {
                 Color.clear.frame(height: 0)
             }
         }
-        .task(id: message.id) { invitation = await load() }
+        .task(id: message.id) {
+            invitation = await load()
+            // An invitation for the account goes on its calendar as it's read, if it isn't there yet.
+            if let invitation { await mail.session?.calendar.takeIn(invitation) }
+        }
     }
 
     private func load() async -> Invitation? {
@@ -442,11 +446,11 @@ private struct AttachmentStrip: View {
                 .foregroundStyle(Theme.textPrimary)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 180, maximum: 200), spacing: 12, alignment: .leading)], alignment: .leading, spacing: 12) {
                 ForEach(message.attachments) { attachment in
-                    AttachmentCard(attachment: attachment) { open in
-                        Task { await save(attachment, open: open) }
-                    } saveAs: {
-                        Task { await saveAs(attachment) }
-                    }
+                    let isCalendarFile = Invitation.isCalendarFile(mimeType: attachment.mimeType, filename: attachment.filename)
+                    AttachmentCard(attachment: attachment,
+                                   save: { open in Task { await save(attachment, open: open) } },
+                                   saveAs: { Task { await saveAs(attachment) } },
+                                   showInCalendar: isCalendarFile ? { Task { await showInCalendar(attachment) } } : nil)
                 }
             }
         }
@@ -460,6 +464,20 @@ private struct AttachmentStrip: View {
             app.report(error, doing: "Downloading “\(attachment.filename)”")
             return nil
         }
+    }
+
+    /// Shows a calendar file's event in PMail's calendar (taking an invitation for the account in first), rather than
+    /// handing the file to another calendar app.
+    private func showInCalendar(_ attachment: Attachment) async {
+        guard let data = await data(for: attachment), let calendar = mail.session?.calendar,
+              let invitation = Invitation.read(data, ownerEmail: mail.account.email) else {
+            app.show("PMail couldn’t read the event in “\(attachment.filename)”.")
+            return
+        }
+        await calendar.takeIn(invitation)
+        app.show(.calendar)
+        calendar.go(to: invitation.event.start)
+        if let event = await calendar.event(withUID: invitation.uid, near: invitation.event) { calendar.selectedEventID = event.id }
     }
 
     /// Saves to Downloads under a name not already taken, and opens it or offers to show it.
@@ -503,6 +521,8 @@ private struct AttachmentCard: View {
     let attachment: Attachment
     let save: (_ open: Bool) -> Void
     let saveAs: () -> Void
+    /// For a calendar file: shows its event in PMail's calendar, which a click does instead of saving it.
+    var showInCalendar: (() -> Void)?
     @State private var hovering = false
 
     var body: some View {
@@ -537,15 +557,19 @@ private struct AttachmentCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .shadow(color: .black.opacity(hovering ? 0.12 : 0), radius: 3, y: 1)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { save(true) }
-        .onTapGesture { save(false) }
+        .onTapGesture(count: 2) { if let showInCalendar { showInCalendar() } else { save(true) } }
+        .onTapGesture { if let showInCalendar { showInCalendar() } else { save(false) } }
         .onHover { hovering = $0 }
         .contextMenu {
-            Button("Open") { save(true) }
+            if let showInCalendar {
+                Button("Show in Calendar") { showInCalendar() }
+            } else {
+                Button("Open") { save(true) }
+            }
             Button("Save to Downloads") { save(false) }
             Button("Save As…") { saveAs() }
         }
-        .help("Click to save to Downloads, double-click to open")
+        .help(showInCalendar == nil ? "Click to save to Downloads, double-click to open" : "Click to show it in the calendar")
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
     }

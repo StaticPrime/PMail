@@ -446,13 +446,18 @@ public protocol CalendarService: AnyObject, Sendable {
     /// Whether PMail emails this calendar's invitations, answers and cancellations itself.
     var emailsInvitations: Bool { get }
 
+    /// Whether invitations that come by email are taken into this calendar (`receive`): a calendar kept on this Mac,
+    /// or a calendar server's (which may not take them in itself). Providers' calendars take theirs in themselves.
+    var takesInEmailedInvitations: Bool { get }
+
     /// The iCalendar text to email about an event: an invitation (REQUEST) to its guests, its cancellation (CANCEL) for
     /// some guests or, when `attendees` is nil, everyone, or the owner's answer (REPLY). Nil when there's nothing to send.
     /// Ask for a cancellation before deleting the event.
     func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String?
 
-    /// Takes in an invitation that came by email: a REQUEST adds its event, waiting for an answer (or updates it), a
-    /// CANCEL takes it off, and a REPLY puts a guest's answer on an event of the owner's.
+    /// Takes in an invitation that came by email, when the owner is one of its guests: a REQUEST adds its event,
+    /// waiting for an answer (or updates it), a CANCEL takes it off, and a REPLY puts a guest's answer on an event of
+    /// the owner's. `invitationText(for:method: .reply…)` then gives the answer to email, where PMail sends it.
     func receive(_ invitation: Invitation) async throws
 }
 
@@ -463,6 +468,8 @@ extension CalendarService {
     }
 
     public var emailsInvitations: Bool { false }
+
+    public var takesInEmailedInvitations: Bool { false }
 
     public func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? { nil }
 

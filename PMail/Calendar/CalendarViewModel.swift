@@ -513,6 +513,8 @@ final class CalendarViewModel {
     @ObservationIgnored weak var contacts: ContactsViewModel?
     /// Emails invitations, answers and cancellations when the calendar has no server to send them.
     @ObservationIgnored weak var mailer: InvitationMailer?
+    /// The account's mail, whose invitation emails are marked read once they're answered here.
+    @ObservationIgnored weak var mailModel: MailViewModel?
     /// Saves waiting out their Undo pause, by draft.
     @ObservationIgnored private var undoableSaves: [UUID: Task<Void, Never>] = [:]
 
@@ -759,8 +761,13 @@ final class CalendarViewModel {
             do {
                 try await service.respond(to: event, with: response)
                 changeCount += 1
-                // The answer goes to the organizer by email when no server sends it.
-                if service.emailsInvitations, let organizer = event.organizer, !organizer.isSameMailbox(as: account.email),
+                // Answered here, the invitation email needn't wait unread.
+                if let mailModel, event.organizer.map({ !$0.isSameMailbox(as: account.email) }) ?? false {
+                    Task { await mailModel.markInvitationRead(for: event) }
+                }
+                // The answer goes to the organizer by email when no server sends it (a calendar kept on this Mac, or
+                // an invitation PMail took in from an email).
+                if service.takesInEmailedInvitations, let organizer = event.organizer, !organizer.isSameMailbox(as: account.email),
                    let reply = try? await service.invitationText(for: event, method: .reply, attendees: nil) {
                     mailer?.send(.reply, text: reply, about: event, to: [organizer], answer: response)
                 }
@@ -810,7 +817,7 @@ final class CalendarViewModel {
             if let event = await event(withUID: invitation.uid, near: invitation.event) {
                 return respond(to: event, with: response)
             }
-            if service.emailsInvitations {
+            if service.takesInEmailedInvitations {
                 do {
                     try await service.receive(invitation)
                 } catch {
@@ -835,6 +842,17 @@ final class CalendarViewModel {
 
     /// Answers given by email to invitations the calendar doesn't have, by UID, for the message to show.
     var answeredByEmail: [String: AttendeeResponse] = [:]
+
+    /// Takes an invitation from an email into the calendar, when the calendar takes them in: one it doesn't have yet,
+    /// or a cancellation of one it has. It goes in only when the account is one of its guests.
+    func takeIn(_ invitation: Invitation) async {
+        guard service.takesInEmailedInvitations, invitation.method == .request || invitation.method == .cancel else { return }
+        let existing = await event(withUID: invitation.uid, near: invitation.event)
+        if invitation.method == .request ? existing != nil : existing == nil { return }
+        guard (try? await service.receive(invitation)) != nil else { return }
+        changeCount += 1
+        reload()
+    }
 
     /// The account's answer to an invitation, as far as PMail knows: the calendar's copy, or an answer sent by email.
     func currentAnswer(to invitation: Invitation) -> AttendeeResponse? {

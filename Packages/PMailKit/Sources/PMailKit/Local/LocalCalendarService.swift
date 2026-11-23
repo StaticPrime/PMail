@@ -85,8 +85,10 @@ public actor LocalCalendarService: CalendarService {
 
     // MARK: Invitations by email
 
-    /// No server sends this calendar's invitations, so PMail emails them.
+    /// No server sends this calendar's invitations, so PMail emails them, and takes in the ones that come by email.
     public nonisolated var emailsInvitations: Bool { true }
+
+    public nonisolated var takesInEmailedInvitations: Bool { true }
 
     public func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? {
         let (_, calendar, _) = try file(of: event)
@@ -113,8 +115,9 @@ public actor LocalCalendarService: CalendarService {
         switch invitation.method {
         case .request:
             guard var incoming = InvitationText.vcalendar(invitation.text) else { return }
-            // The owner's own invitation, copied back to them, changes nothing.
+            // The owner's own invitation, copied back to them, changes nothing; nor does one they aren't invited to.
             if invitation.organizer.map({ ICalendarEventProperties.isSameMailbox($0.email, ownerEmail) }) ?? false { return }
+            guard InvitationText.hasGuest(ownerEmail, in: incoming) else { return }
             incoming.removeProperties("METHOD")
             if let stored {
                 let storedSequence = InvitationText.sequence(of: stored)

@@ -349,7 +349,10 @@ struct MessageRow: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                if conversation.hasAttachments {
+                if conversation.isInvitation {
+                    Image(systemName: "calendar").font(.system(size: 13)).foregroundStyle(Theme.textTertiary).padding(.trailing, 8)
+                        .help("Calendar invitation").accessibilityLabel("Calendar invitation")
+                } else if conversation.hasAttachments {
                     Image(systemName: "paperclip").font(.system(size: 13)).foregroundStyle(Theme.textTertiary).padding(.trailing, 8)
                 }
             }

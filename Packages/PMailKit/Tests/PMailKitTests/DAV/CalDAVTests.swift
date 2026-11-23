@@ -268,4 +268,79 @@ import Testing
         await #expect(throws: PMailError.self) { _ = try await service.create(event, addingConference: false) }
         #expect(transport.sent("PUT", "/").isEmpty)
     }
+
+    // MARK: Invitations that come by email
+
+    static func invitation(uid: String, guest: String = "pug@icloud.com", sequence: Int = 0, method: String = "REQUEST") -> String {
+        ICS.calendar("""
+        METHOD:\(method)
+        BEGIN:VEVENT
+        UID:\(uid)
+        SEQUENCE:\(sequence)
+        DTSTAMP:20261121T120000Z
+        DTSTART:20261124T150000Z
+        DTEND:20261124T160000Z
+        SUMMARY:Garden party
+        LOCATION:Olivia's garden
+        ORGANIZER;CN=Olivia Chen:mailto:olivia@gmail.example
+        ATTENDEE;CN=Olivia Chen;PARTSTAT=ACCEPTED:mailto:olivia@gmail.example
+        ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:\(guest)
+        END:VEVENT
+        """)
+    }
+
+    /// An invitation emailed to the owner goes on their main calendar, waiting for an answer, marked so the server
+    /// doesn't answer too; PMail then has the answer to email. One for someone else, or one the server took in itself,
+    /// is left alone, and a cancellation takes PMail's copy off.
+    @Test func invitationsThatComeByEmailAreTakenIn() async throws {
+        let transport = Self.iCloudLikeServer()
+        var stored: String?
+        let lock = NSLock()
+        // Searching by UID finds what's been saved (PMail's copy), or the server's own copy of "theirs".
+        transport.on("REPORT", "/123456/calendars/work") { request in
+            let body = request.bodyText
+            if body.contains("theirs@example.com") {
+                return DAVStub.multistatus(DAVStub.response("/123456/calendars/work/theirs.ics",
+                                                            DAVStub.calendarData(Self.invitation(uid: "theirs@example.com"), etag: "\"t1\"")))
+            }
+            guard body.contains("party@example.com"), let text = lock.withLock({ stored }) else { return DAVStub.multistatus() }
+            return DAVStub.multistatus(DAVStub.response("/123456/calendars/work/party%40example.com.ics", DAVStub.calendarData(text, etag: "\"p1\"")))
+        }
+        transport.on("PUT", "/123456/calendars/work/") { request in
+            lock.withLock { stored = request.bodyText }
+            return DAVStub.saved(etag: "\"p1\"")
+        }
+        transport.on("GET", "/123456/calendars/work/party") { _ in
+            StubTransport.Response(status: 200, body: Data((lock.withLock { stored } ?? "").utf8), headers: ["ETag": "\"p2\""])
+        }
+        transport.on("DELETE", "/123456/calendars/work/") { _ in .status(204) }
+        let service = try Self.service(transport)
+        #expect(service.takesInEmailedInvitations && !service.emailsInvitations)
+
+        let party = try #require(Invitation.read(Data(Self.invitation(uid: "party@example.com").utf8), ownerEmail: "pug@me.com"))
+        try await service.receive(party)
+        let put = try #require(transport.sent("PUT", "/123456/calendars/work/").first)
+        #expect(DAVStub.header(put, "If-None-Match") == "*", "a new resource, on the main calendar")
+        #expect(put.bodyText.contains("ORGANIZER;CN=Olivia Chen;SCHEDULE-AGENT=CLIENT:mailto:olivia@gmail.example"))
+        #expect(!put.bodyText.contains("METHOD:"))
+
+        // On the calendar, waiting for an answer; once answered, the answer to email has no server parameters.
+        let event = CalendarEvent(calendarID: "/123456/calendars/work/", start: ICS.moment("2026-11-24 15:00"), end: ICS.moment("2026-11-24 16:00"),
+                                  myResponse: .needsAction, uid: "party@example.com", resourceHref: "/123456/calendars/work/party%40example.com.ics")
+        try await service.respond(to: event, with: .accepted)
+        let reply = try #require(try await service.invitationText(for: event, method: .reply, attendees: nil))
+        #expect(reply.contains("METHOD:REPLY") && reply.contains("PARTSTAT=ACCEPTED") && !reply.contains("SCHEDULE-AGENT"))
+        #expect(try await service.invitationText(for: event, method: .request, attendees: nil) == nil, "the server sends the organizer's own")
+
+        // Not for the owner, or already the server's: nothing's saved.
+        let saves = transport.sent("PUT", "/123456/calendars/").count
+        try await service.receive(try #require(Invitation.read(Data(Self.invitation(uid: "other@example.com", guest: "sam@example.com").utf8), ownerEmail: "pug@me.com")))
+        try await service.receive(try #require(Invitation.read(Data(Self.invitation(uid: "theirs@example.com", sequence: 3).utf8), ownerEmail: "pug@me.com")))
+        #expect(transport.sent("PUT", "/123456/calendars/").count == saves)
+
+        // A cancellation takes PMail's copy off.
+        try await service.receive(try #require(Invitation.read(Data(Self.invitation(uid: "party@example.com", sequence: 1, method: "CANCEL").utf8),
+                                                               ownerEmail: "pug@me.com")))
+        #expect(transport.sent("DELETE", "/123456/calendars/work/party").count == 1)
+    }
 }

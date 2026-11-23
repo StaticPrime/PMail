@@ -81,7 +81,8 @@ public struct ParsedMessage: Sendable, Hashable {
                        labelIDs: labelIDs, from: from, to: to, cc: cc, subject: subject, snippet: snippet, date: date ?? Date(),
                        isUnread: isUnread, isStarred: isStarred, hasAttachments: !attachments.isEmpty,
                        messageIDHeader: messageID, inReplyTo: inReplyTo, references: references, size: size,
-                       senderHints: senderHints)
+                       senderHints: senderHints,
+                       isInvitation: (attachments + inlineParts).contains { Invitation.isCalendarFile(mimeType: $0.mimeType, filename: $0.filename) })
     }
 
     /// The whole message for the reading pane.

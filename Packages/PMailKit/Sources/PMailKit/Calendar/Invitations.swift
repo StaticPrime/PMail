@@ -131,6 +131,30 @@ public enum InvitationText {
         return found
     }
 
+    /// Marks a copy of an emailed invitation, kept on a calendar server, as one PMail answers by email itself
+    /// (SCHEDULE-AGENT=CLIENT on its ORGANIZER), so the server doesn't send answers of its own.
+    static func markAnsweredByEmail(_ calendar: inout ICalendarComponent) {
+        for event in calendar.components.indices where calendar.components[event].name == "VEVENT" {
+            for index in calendar.components[event].properties.indices where calendar.components[event].properties[index].name == "ORGANIZER" {
+                calendar.components[event].properties[index].setParameter("SCHEDULE-AGENT", "CLIENT")
+            }
+        }
+    }
+
+    /// Whether a copy on a calendar server is one PMail took in from an email and answers by email itself.
+    static func isAnsweredByEmail(_ calendar: ICalendarComponent) -> Bool {
+        calendar.components.first { $0.name == "VEVENT" }?.property("ORGANIZER")?.parameter("SCHEDULE-AGENT")?.uppercased() == "CLIENT"
+    }
+
+    /// Whether an address is one of the calendar's guests (not its organizer).
+    static func hasGuest(_ email: String, in calendar: ICalendarComponent) -> Bool {
+        calendar.components.contains { component in
+            component.name == "VEVENT" && component.properties("ATTENDEE").contains { line in
+                ICalendarEventProperties.address(of: line).map { ICalendarEventProperties.isSameMailbox($0.email, email) } ?? false
+            }
+        }
+    }
+
     static func sequence(of calendar: ICalendarComponent) -> Int {
         let main = calendar.components.first { $0.name == "VEVENT" && $0.property("RECURRENCE-ID") == nil }
             ?? calendar.components.first { $0.name == "VEVENT" }
@@ -141,9 +165,18 @@ public enum InvitationText {
         calendar.components.first { $0.name == "VEVENT" }?.property("ORGANIZER").flatMap(ICalendarEventProperties.address(of:))
     }
 
-    /// The method's iCalendar line, in place of any the document had.
+    /// The method's iCalendar line, in place of any the document had. The scheduling parameters a calendar server
+    /// keeps on its copy (SCHEDULE-AGENT and the like) stay out of what's sent.
     static func withMethod(_ method: Invitation.Method, _ calendar: ICalendarComponent) -> ICalendarComponent {
         var calendar = calendar
+        for event in calendar.components.indices where calendar.components[event].name == "VEVENT" {
+            for index in calendar.components[event].properties.indices
+            where ["ORGANIZER", "ATTENDEE"].contains(calendar.components[event].properties[index].name) {
+                for parameter in ["SCHEDULE-AGENT", "SCHEDULE-STATUS", "SCHEDULE-FORCE-SEND"] {
+                    calendar.components[event].properties[index].setParameter(parameter, nil)
+                }
+            }
+        }
         calendar.removeProperties("METHOD")
         let position = (calendar.properties.firstIndex { $0.name == "PRODID" }).map { $0 + 1 } ?? calendar.properties.count
         calendar.properties.insert(ICalendarLine("METHOD", value: method.rawValue), at: position)
