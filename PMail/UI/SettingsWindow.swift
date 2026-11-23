@@ -86,9 +86,28 @@ final class SettingsWindowController: NSWindowController {
 }
 
 extension View {
-    /// A settings pane: grouped sections at a fixed width, as tall as they need.
+    /// A settings pane: grouped sections at a fixed width, as tall as they need up to what fits on the screen, and
+    /// scrolling past that. The window follows the pane's height as it changes.
     func settingsPane() -> some View {
-        formStyle(.grouped).frame(width: 520).fixedSize()
+        SettingsPaneHeight { formStyle(.grouped).frame(width: 520) }
+    }
+}
+
+/// Sizes a settings pane to its content's height, up to `tallest`, in one pass: a short pane gets a window that fits
+/// it exactly, and a tall one a window that stays on the screen, with its sections scrolling inside.
+private struct SettingsPaneHeight: Layout {
+    /// The tallest a pane gets: what fits on the screen below the window's title and toolbar, and no taller than a
+    /// settings window usually is.
+    static var tallest: CGFloat { min(720, max(360, (NSScreen.main?.visibleFrame.height ?? 900) - 160)) }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let pane = subviews.first else { return .zero }
+        let content = pane.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
+        return CGSize(width: proposal.width ?? content.width, height: min(content.height, Self.tallest))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
     }
 }
 
@@ -204,9 +223,7 @@ private struct AccountSettings: View {
                 categoriesSection(mail)
             }
         }
-        .formStyle(.grouped)
-        // The pane holds a lot: a fixed height that fits on the screen, scrolling inside.
-        .frame(width: 520, height: min(620, (NSScreen.main?.visibleFrame.height ?? 800) - 160))
+        .settingsPane()
         .task(id: account) {
             saving?.cancel()
             draft = account.flatMap { id in app.accounts.accounts.first { $0.id == id } }
