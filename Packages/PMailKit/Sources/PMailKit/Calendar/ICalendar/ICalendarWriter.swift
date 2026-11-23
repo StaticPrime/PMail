@@ -338,6 +338,7 @@ struct ICalendarWriter {
         if let index = calendar.components.firstIndex(where: { isOverride($0, of: series, key: key, reader: reader) }) {
             var override = calendar.components[index]
             guard setOwnerResponse(response, in: &override) else { throw notInvited }
+            noteAnswer(response, in: &override, reader: reader)
             stamp(&override, significant: false)
             calendar.components[index] = override
         } else {
@@ -352,6 +353,7 @@ struct ICalendarWriter {
             then.end = Date(timeIntervalSince1970: TimeInterval(instance.end))
             writeTimes(of: then, form: timeForm(for: then, existing: timing.start, repeats: false, resolver: reader.resolver), into: &override)
             guard setOwnerResponse(response, in: &override) else { throw notInvited }
+            noteAnswer(response, in: &override, reader: reader)
             stamp(&override, significant: false)
             let last = calendar.components.lastIndex { belongs($0, to: series) } ?? masterIndex
             calendar.components.insert(override, at: last + 1)
@@ -378,6 +380,7 @@ struct ICalendarWriter {
         for index in calendar.components.indices where belongs(calendar.components[index], to: series) {
             var component = calendar.components[index]
             if setOwnerResponse(response, in: &component) {
+                noteAnswer(response, in: &component, reader: reader)
                 stamp(&component, significant: false)
                 calendar.components[index] = component
                 found = true
@@ -387,6 +390,41 @@ struct ICalendarWriter {
             throw PMailError.notSupported("You aren’t on this event’s guest list, so there’s no invitation to answer.")
         }
         finish(&calendar)
+    }
+
+    // MARK: Answers and their times
+
+    /// Notes on a VEVENT the start (in UTC) the owner's answer was just given for; an answer set back to waiting has none.
+    private func noteAnswer(_ response: AttendeeResponse, in component: inout ICalendarComponent, reader: ICalendarReader) {
+        component.removeProperties(InvitationText.answeredProperty)
+        guard response != .needsAction, let timing = reader.timing(of: component) else { return }
+        let start = Date(timeIntervalSince1970: TimeInterval(timing.zone.instant(from: timing.start.wall)))
+        component.properties.append(ICalendarLine(InvitationText.answeredProperty, value: utcText(start)))
+    }
+
+    /// Sets back to waiting the owner's answers given for a start their VEVENT no longer has: it moved since, by
+    /// whoever (the server or another app taking the organizer's change in). True when there were any.
+    func resetAnswersOutlivedByTheirTime(in calendar: inout ICalendarComponent) -> Bool {
+        let reader = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
+        var changed = false
+        for index in calendar.components.indices where calendar.components[index].name == "VEVENT" {
+            var component = calendar.components[index]
+            guard let noted = component.property(InvitationText.answeredProperty)?.value.trimmingCharacters(in: .whitespaces),
+                  let timing = reader.timing(of: component) else { continue }
+            let start = Date(timeIntervalSince1970: TimeInterval(timing.zone.instant(from: timing.start.wall)))
+            guard utcText(start) != noted else { continue }
+            component.removeProperties(InvitationText.answeredProperty)
+            if setOwnerResponse(.needsAction, in: &component), let owner = ownerEmail {
+                for line in component.properties.indices where component.properties[line].name == "ATTENDEE" {
+                    guard let address = ICalendarEventProperties.address(of: component.properties[line]),
+                          ICalendarEventProperties.isSameMailbox(address.email, owner) else { continue }
+                    component.properties[line].setParameter("RSVP", "TRUE")
+                }
+            }
+            calendar.components[index] = component
+            changed = true
+        }
+        return changed
     }
 
     // MARK: Fields

@@ -264,9 +264,37 @@ public actor CalDAVCalendarService: CalendarService {
     public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope) async throws {
         let collection = try await collection(event.calendarID)
         let url = try resourceURL(of: event, in: collection)
-        var (calendar, current) = try await editableCalendar(at: url, expectedETag: nil, fresh: true)
-        try writer().respond(response, to: event, in: &calendar, scope: scope)
-        _ = try await save(calendar, to: url, ifMatch: current.etag)
+        try await changeNewest(at: url) { calendar in
+            try self.writer().respond(response, to: event, in: &calendar, scope: scope)
+        }
+    }
+
+    /// How many more times an answer or an emailed invitation is tried on the newest version, when something else
+    /// changed the event first (Calendar on a Mac taking in the same email, say).
+    static let conflictRetries = 3
+
+    /// Whether saving failed because something else got there first: the event changed (412), or another copy with its
+    /// UID was made meanwhile (403 or 409 on making one).
+    static func isConflict(_ error: any Error) -> Bool {
+        if case PMailError.conflict = error { return true }
+        if case let PMailError.http(status, _) = error { return status == 403 || status == 409 }
+        return false
+    }
+
+    /// Makes a change on a resource as it is now on the server, and when something else changes it before the change
+    /// is saved, makes it again on that.
+    private func changeNewest(at url: URL, _ change: (inout ICalendarComponent) throws -> Void) async throws {
+        var attempt = 0
+        while true {
+            var (calendar, current) = try await editableCalendar(at: url, expectedETag: nil, fresh: true)
+            try change(&calendar)
+            do {
+                _ = try await save(calendar, to: url, ifMatch: current.etag)
+                return
+            } catch PMailError.conflict where attempt < Self.conflictRetries {
+                attempt += 1
+            }
+        }
     }
 
     public func replyText(for event: CalendarEvent, response: AttendeeResponse, scope: RecurrenceScope) async throws -> String? {
@@ -325,32 +353,73 @@ public actor CalDAVCalendarService: CalendarService {
     /// Takes in an invitation that came by email, when the owner is one of its guests. A new one goes on the main
     /// calendar, waiting for an answer, marked as answered by email (so the server doesn't answer too). A newer
     /// version updates the calendar's copy, whoever put it there (PMail, the server, another app), its time moving
-    /// asking again; a cancellation marks it canceled.
+    /// asking again; a cancellation marks it canceled. Another app may be taking in the same email (Calendar on a Mac,
+    /// say) and change the copy meanwhile: then PMail goes on from the copy as it is now.
     public func receive(_ invitation: Invitation) async throws {
         guard invitation.method == .request || invitation.method == .cancel,
               !(invitation.organizer.map { ICalendarEventProperties.isSameMailbox($0.email, ownerEmail) } ?? false),
               var incoming = InvitationText.vcalendar(invitation.text) else { return }
-        let found = try await resource(withUID: invitation.uid)
-        switch invitation.method {
-        case .request:
+        if invitation.method == .request {
             guard InvitationText.hasGuest(ownerEmail, in: incoming) else { return }
             incoming.removeProperties("METHOD")
             InvitationText.noteVersion(&incoming)
+        }
+        var firstSeen: Found?
+        var attempt = 0
+        while true {
+            let found = try await resource(withUID: invitation.uid)
+            if attempt == 0 { firstSeen = found }
+            do {
+                try await take(invitation, incoming, over: found, firstSeen: firstSeen)
+                return
+            } catch let error where Self.isConflict(error) && attempt < Self.conflictRetries {
+                attempt += 1
+            }
+        }
+    }
+
+    /// A calendar's copy of an event, found by its UID: where it is, its version, and the copy as PMail last read it
+    /// before (when it had, since launching), which may be older.
+    struct Found {
+        var url: URL
+        var etag: String?
+        var calendar: ICalendarComponent
+        var before: ICalendarComponent?
+    }
+
+    /// Takes an emailed invitation's version (or cancellation) onto the calendar's copy as found (or as a new copy).
+    private func take(_ invitation: Invitation, _ incoming: ICalendarComponent, over found: Found?, firstSeen: Found?) async throws {
+        switch invitation.method {
+        case .request:
             guard let found else {
-                InvitationText.markAnsweredByEmail(&incoming)
+                var copy = incoming
+                InvitationText.markAnsweredByEmail(&copy)
                 if collections.isEmpty { _ = try await loadCalendars() }
                 guard let main = collections.values.first(where: { $0.info.isPrimary }) else {
                     throw PMailError.notSupported("This account has no calendar to add the invitation to.")
                 }
                 let url = main.url.appendingPathComponent(DAVResourceName.name(for: invitation.uid, fileExtension: "ics"))
-                _ = try await save(incoming, to: url, ifMatch: nil, isNew: true)
+                _ = try await save(copy, to: url, ifMatch: nil, isNew: true)
                 return
             }
-            guard InvitationText.isNewer(incoming, than: found.calendar) else { return }
-            let reader = ICalendarReader(calendar: found.calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
-            InvitationText.carryAnswer(of: ownerEmail, from: found.calendar, into: &incoming,
-                                       answer: reader.firstEvent(calendarID: "", href: nil, etag: nil)?.myResponse)
-            try await update(found, to: incoming)
+            if InvitationText.isNewer(incoming, than: found.calendar) {
+                var newer = incoming
+                InvitationText.carryAnswer(of: ownerEmail, from: found.calendar, into: &newer, answer: answer(in: found.calendar))
+                try await update(found, to: newer)
+                return
+            }
+            // Already this version, something else having taken it in: an answer given for a time the event no longer
+            // has waits again, as if PMail had taken the change in itself. PMail's note of the time says so; failing
+            // that, an earlier copy PMail saw (before something else saved first, or when it last read the calendar)
+            // with the old time and the same answer.
+            var calendar = found.calendar
+            var outlived = writer().resetAnswersOutlivedByTheirTime(in: &calendar)
+            let earlier = [firstSeen.flatMap { $0.etag != found.etag ? $0.calendar : nil }, found.before].compactMap { $0 }
+            if !outlived, let now = answer(in: found.calendar), now != .needsAction,
+               earlier.contains(where: { InvitationText.timesDiffer($0, found.calendar) && answer(in: $0) == now }) {
+                outlived = InvitationText.resetAnswer(of: ownerEmail, in: &calendar)
+            }
+            if outlived { try await update(found, to: calendar) }
         case .cancel:
             guard var calendar = found?.calendar, let found,
                   InvitationText.sequence(of: incoming) >= InvitationText.sequence(of: calendar) else { return }
@@ -361,11 +430,16 @@ public actor CalDAVCalendarService: CalendarService {
         }
     }
 
+    /// The owner's answer on a calendar's first event.
+    private func answer(in calendar: ICalendarComponent) -> AttendeeResponse? {
+        ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone).firstEvent(calendarID: "", href: nil, etag: nil)?.myResponse
+    }
+
     /// Saves a newer version of an emailed invitation over the calendar's copy. PMail's own copy stays answered by
     /// email. A copy the server or another app put there keeps the server answering for it, and is changed without the
     /// server sending anything for the owner (Schedule-Reply: F); if the server won't take the change, PMail's own copy
     /// replaces it.
-    private func update(_ found: (url: URL, etag: String?, calendar: ICalendarComponent), to calendar: ICalendarComponent) async throws {
+    private func update(_ found: Found, to calendar: ICalendarComponent) async throws {
         var newer = calendar
         if InvitationText.isAnsweredByEmail(found.calendar) {
             InvitationText.markAnsweredByEmail(&newer)
@@ -385,7 +459,7 @@ public actor CalDAVCalendarService: CalendarService {
     }
 
     /// The resource holding the event with an iCalendar UID, in any of the account's calendars it can change.
-    private func resource(withUID uid: String) async throws -> (url: URL, etag: String?, calendar: ICalendarComponent)? {
+    private func resource(withUID uid: String) async throws -> Found? {
         if collections.isEmpty { _ = try await loadCalendars() }
         let query = DAVRequestBody.calendarQuery(uid: uid)
         for collection in collections.values where !collection.info.isReadOnly {
@@ -394,8 +468,11 @@ public actor CalDAVCalendarService: CalendarService {
                 guard let calendar = ICalendarComponent.parse(resource.text).first(where: { $0.name == "VCALENDAR" }),
                       calendar.components.contains(where: { $0.name == "VEVENT" && $0.property("UID")?.value == uid }),
                       let url = URL(string: resource.path, relativeTo: collection.url)?.absoluteURL else { continue }
-                resources[url.path(percentEncoded: true)] = Resource(etag: resource.etag, text: resource.text)
-                return (url, resource.etag, calendar)
+                let path = url.path(percentEncoded: true)
+                let before = resources[path].flatMap { $0.etag == resource.etag ? nil : $0.text }
+                    .flatMap { ICalendarComponent.parse($0).first { $0.name == "VCALENDAR" } }
+                resources[path] = Resource(etag: resource.etag, text: resource.text)
+                return Found(url: url, etag: resource.etag, calendar: calendar, before: before)
             }
         }
         return nil

@@ -229,6 +229,25 @@ public enum InvitationText {
     /// Where a copy keeps when the invitation it came from was sent.
     static let versionProperty = "X-PMAIL-INVITED"
 
+    /// Where a copy keeps the start (in UTC) the owner's answer was given for, from PMail: an answer whose event has
+    /// moved since, whoever moved it (the server or another app taking the organizer's change in), waits again.
+    static let answeredProperty = "X-PMAIL-ANSWERED"
+
+    /// Sets the owner's answer back to waiting, asked for again (RSVP), on every VEVENT. False when they aren't on it.
+    @discardableResult
+    static func resetAnswer(of owner: String, in calendar: inout ICalendarComponent) -> Bool {
+        guard setAnswer(.needsAction, of: owner, in: &calendar) else { return false }
+        for event in calendar.components.indices where calendar.components[event].name == "VEVENT" {
+            calendar.components[event].removeProperties(answeredProperty)
+            for index in calendar.components[event].properties.indices where calendar.components[event].properties[index].name == "ATTENDEE" {
+                guard let address = ICalendarEventProperties.address(of: calendar.components[event].properties[index]),
+                      ICalendarEventProperties.isSameMailbox(address.email, owner) else { continue }
+                calendar.components[event].properties[index].setParameter("RSVP", "TRUE")
+            }
+        }
+        return true
+    }
+
     /// Notes, on a version about to be kept, when the invitation it came from was sent.
     static func noteVersion(_ calendar: inout ICalendarComponent) {
         for index in calendar.components.indices where calendar.components[index].name == "VEVENT" {
@@ -257,17 +276,16 @@ public enum InvitationText {
     /// moved, else the answer they already gave.
     static func carryAnswer(of owner: String, from stored: ICalendarComponent, into incoming: inout ICalendarComponent, answer: AttendeeResponse?) {
         if timesDiffer(stored, incoming) {
-            if setAnswer(.needsAction, of: owner, in: &incoming) {
-                for event in incoming.components.indices where incoming.components[event].name == "VEVENT" {
-                    for index in incoming.components[event].properties.indices where incoming.components[event].properties[index].name == "ATTENDEE" {
-                        guard let address = ICalendarEventProperties.address(of: incoming.components[event].properties[index]),
-                              ICalendarEventProperties.isSameMailbox(address.email, owner) else { continue }
-                        incoming.components[event].properties[index].setParameter("RSVP", "TRUE")
-                    }
-                }
-            }
+            resetAnswer(of: owner, in: &incoming)
         } else if let answer, answer != .needsAction {
             _ = setAnswer(answer, of: owner, in: &incoming)
+            // Still for the same times, as noted on the copy.
+            for event in incoming.components.indices where incoming.components[event].name == "VEVENT" {
+                let time = incoming.components[event].property("RECURRENCE-ID")?.value
+                guard let noted = stored.components.first(where: { $0.name == "VEVENT" && $0.property("RECURRENCE-ID")?.value == time })?
+                    .property(answeredProperty) else { continue }
+                incoming.components[event].setProperty(noted)
+            }
         }
     }
 

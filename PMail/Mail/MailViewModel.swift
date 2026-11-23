@@ -320,10 +320,16 @@ final class MailViewModel {
         guard !title.isEmpty else { return }
         let service = self.service
         let inbox = folder(role: .inbox)?.id ?? "INBOX"
-        guard let page = try? await service.listConversations(ListRequest(folderID: inbox, query: title, pageSize: 50)) else { return }
+        let searched = (try? await service.listConversations(ListRequest(folderID: inbox, query: title, pageSize: 50)))?.conversations ?? []
+        // The newest mail too, with the title in its subject: a server's search may not know a message that only just
+        // arrived (iCloud's often doesn't).
+        let newest = (try? await service.listConversations(ListRequest(folderID: inbox, pageSize: 50)))?.conversations ?? []
+        let lowered = title.lowercased()
+        var seen = Set<String>()
+        let found = searched.flatMap(\.messages) + newest.flatMap(\.messages).filter { $0.subject.lowercased().contains(lowered) }
         // Messages known to carry an invitation are opened first, then ones that might (the list doesn't say for
         // every account); ones known not to carry one never are.
-        let candidates = page.conversations.flatMap(\.messages).filter { $0.isUnread && $0.isInvitation != false }
+        let candidates = found.filter { seen.insert($0.id).inserted && $0.isUnread && $0.isInvitation != false }
             .sorted { first, second in
                 func rank(_ message: MessageSummary) -> Int { message.isInvitation == true ? 0 : message.hasAttachments ? 1 : 2 }
                 return rank(first) < rank(second)

@@ -1115,7 +1115,11 @@ final class CalendarViewModel {
         guard service.takesInEmailedInvitations, invitation.method == .request || invitation.method == .cancel else { return }
         let existing = await event(withUID: invitation.uid, near: invitation.event)
         if invitation.method == .request {
-            if let existing, !Self.differs(existing, from: invitation.event) { return }
+            // Unchanged and still waiting for an answer, there's nothing to do. An answered copy is looked at again: an
+            // answer given before something else (Calendar on a Mac, say) took a move in waits again.
+            if let existing, !Self.differs(existing, from: invitation.event), existing.myResponse == .needsAction || existing.myResponse == nil {
+                return
+            }
         } else {
             guard let existing, existing.status != .cancelled else { return }
         }
