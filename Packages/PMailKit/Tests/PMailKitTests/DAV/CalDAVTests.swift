@@ -330,7 +330,7 @@ import Testing
         try await service.respond(to: event, with: .accepted)
         let reply = try #require(try await service.invitationText(for: event, method: .reply, attendees: nil))
         #expect(reply.contains("METHOD:REPLY") && reply.contains("PARTSTAT=ACCEPTED") && !reply.contains("SCHEDULE-AGENT"))
-        #expect(try await service.invitationText(for: event, method: .request, attendees: nil) == nil, "the server sends the organizer's own")
+        #expect(try await service.invitationText(for: event, method: .request, attendees: nil) == nil, "the organizer sends their own")
 
         // Not for the owner, or no newer than the calendar's copy: nothing's saved.
         let saves = transport.sent("PUT", "/123456/calendars/").count

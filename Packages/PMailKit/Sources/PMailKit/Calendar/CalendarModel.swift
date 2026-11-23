@@ -56,12 +56,29 @@ public struct Attendee: Codable, Sendable, Hashable {
     public var response: AttendeeResponse
     public var isOptional: Bool
     public var isOrganizer: Bool
+    /// A guest of a meeting the account organizes that PMail invites by email, because the calendar's server doesn't
+    /// (iCalendar's SCHEDULE-AGENT=CLIENT): PMail emails them the invitation, its changes and its cancellation.
+    public var invitedByEmail: Bool
 
-    public init(address: MailAddress, response: AttendeeResponse = .needsAction, isOptional: Bool = false, isOrganizer: Bool = false) {
+    public init(address: MailAddress, response: AttendeeResponse = .needsAction, isOptional: Bool = false, isOrganizer: Bool = false,
+                invitedByEmail: Bool = false) {
         self.address = address
         self.response = response
         self.isOptional = isOptional
         self.isOrganizer = isOrganizer
+        self.invitedByEmail = invitedByEmail
+    }
+
+    enum CodingKeys: String, CodingKey { case address, response, isOptional, isOrganizer, invitedByEmail }
+
+    /// Guests kept before PMail invited any by email read as the server's to invite.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(address: try c.decode(MailAddress.self, forKey: .address),
+                  response: try c.decodeIfPresent(AttendeeResponse.self, forKey: .response) ?? .needsAction,
+                  isOptional: try c.decodeIfPresent(Bool.self, forKey: .isOptional) ?? false,
+                  isOrganizer: try c.decodeIfPresent(Bool.self, forKey: .isOrganizer) ?? false,
+                  invitedByEmail: try c.decodeIfPresent(Bool.self, forKey: .invitedByEmail) ?? false)
     }
 }
 

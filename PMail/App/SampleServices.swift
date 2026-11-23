@@ -542,7 +542,7 @@ actor SampleCalendarService: CalendarService {
     }
 
     func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? {
-        guard emailsInvitations else { return nil }
+        guard emailsInvitations || invitesNoOne.withLock({ $0 }) else { return nil }
         let document = ICalendar.document(for: event, ownerEmail: account.email)
         switch method {
         case .request: return InvitationText.request(from: document)
@@ -575,8 +575,18 @@ actor SampleCalendarService: CalendarService {
         if saved.type == .event || account.kind != .google || event.calendarID != "primary" {
             (saved.declinesInvitations, saved.declineMessage, saved.declinesExisting) = (false, nil, false)
         }
+        // Inviting no one itself, as iCloud for meetings saved from PMail: the guests are PMail's to invite by email.
+        if invitesNoOne.withLock({ $0 }) {
+            for index in saved.attendees.indices where !saved.attendees[index].address.isSameMailbox(as: account.email) {
+                saved.attendees[index].invitedByEmail = true
+            }
+        }
         return saved
     }
+
+    /// Keeps meetings without sending their invitations, as iCloud does for meetings saved from PMail (for the
+    /// self-test).
+    nonisolated let invitesNoOne = OSAllocatedUnfairLock(initialState: false)
 
     func loadCalendars() async throws -> [CalendarInfo] {
         await pause()

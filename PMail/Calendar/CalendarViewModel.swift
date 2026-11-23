@@ -885,7 +885,11 @@ final class CalendarViewModel {
             throw error
         }
         changeCount += 1
-        if service.emailsInvitations { Task { await emailInvitations(for: saved, before: draft.original) } }
+        // Invitations PMail emails: all of them on a calendar without a server, else those to guests the server doesn't
+        // invite (iCloud's, for meetings saved from PMail).
+        if service.emailsInvitations || saved.attendees.contains(where: \.invitedByEmail) || (draft.original?.attendees.contains(where: \.invitedByEmail) ?? false) {
+            Task { await emailInvitations(for: saved, before: draft.original) }
+        }
         // Out of office or focus time that PMail declines meetings for: the ones already planned, if it says so.
         if saved.type == .outOfOffice || saved.type == .focusTime { Task { await declinePeriodSaved(saved) } }
         // A repeating event's other times come with the next load.
@@ -970,10 +974,11 @@ final class CalendarViewModel {
                 app?.show(LocalID.isLocal(event.id) ? done : waitingText)
                 return
             }
-            // Called off for everyone invited; asked for while the event's still there.
-            let guests = guestsToTell(about: event)
+            // Called off for everyone PMail invites by email (everyone, on a calendar without a server); asked for while
+            // the event's still there.
+            let guests = Self.invitedByEmail(guestsToTell(about: event), in: event, all: service.emailsInvitations)
             let wholeEvent = scope == .allEvents || !event.isRecurring
-            let cancellation = service.emailsInvitations && !guests.isEmpty && wholeEvent
+            let cancellation = !guests.isEmpty && wholeEvent
                 ? try? await service.invitationText(for: event, method: .cancel, attendees: nil) : nil
             do {
                 try await service.delete(event, scope: scope)
@@ -981,8 +986,7 @@ final class CalendarViewModel {
                 app?.show(done)
                 if let cancellation { mailer?.send(.cancel, text: cancellation, about: event, to: guests) }
                 // One time of a repeating meeting: guests get the series without it.
-                if service.emailsInvitations, !guests.isEmpty, !wholeEvent,
-                   let update = try? await service.invitationText(for: event, method: .request, attendees: nil) {
+                if !guests.isEmpty, !wholeEvent, let update = try? await service.invitationText(for: event, method: .request, attendees: nil) {
                     mailer?.send(.request, text: update, about: event, to: guests)
                 }
             } catch {
@@ -1046,14 +1050,25 @@ final class CalendarViewModel {
         return event.attendees.filter { !$0.isOrganizer && !$0.address.isSameMailbox(as: account.email) }.map(\.address)
     }
 
-    /// Emails a saved meeting's invitation, for a calendar with no server to send it: to every guest when something
-    /// they'd want to know changed (or it's new), else to guests just added; guests taken off get a cancellation.
+    /// The guests PMail invites by email: all of them on a calendar without a server (`all`), else the ones the
+    /// server leaves to PMail.
+    static func invitedByEmail(_ guests: [MailAddress], in event: CalendarEvent, all: Bool) -> [MailAddress] {
+        all ? guests : guests.filter { guest in event.attendees.contains { $0.invitedByEmail && $0.address.isSameMailbox(as: guest.email) } }
+    }
+
+    /// Emails a saved meeting's invitation to the guests PMail invites by email (everyone, for a calendar with no
+    /// server to send it): to each of them when something they'd want to know changed (or it's new), else to those just
+    /// added; guests taken off get a cancellation.
     private func emailInvitations(for saved: CalendarEvent, before original: CalendarEvent?) async {
         guard let mailer else { return }
-        let guests = guestsToTell(about: saved)
+        let all = service.emailsInvitations
+        let current = guestsToTell(about: saved)
+        let guests = Self.invitedByEmail(current, in: saved, all: all)
         let earlier = original.map(guestsToTell(about:)) ?? []
         let added = guests.filter { guest in !earlier.contains { $0.isSameMailbox(as: guest.email) } }
-        let removed = earlier.filter { guest in !guests.contains { $0.isSameMailbox(as: guest.email) } }
+        let removed = original.map { Self.invitedByEmail(earlier, in: $0, all: all) }?.filter { guest in
+            !current.contains { $0.isSameMailbox(as: guest.email) }
+        } ?? []
         let matters = original.map { old in
             old.title != saved.title || old.start != saved.start || old.end != saved.end || old.isAllDay != saved.isAllDay
                 || old.location != saved.location || old.notes != saved.notes || old.recurrence != saved.recurrence
@@ -1112,7 +1127,13 @@ final class CalendarViewModel {
     /// a change to one it has (whatever changed: the time, place, guests, description…), or a cancellation, which
     /// marks it canceled. It goes in only when the account is one of its guests.
     func takeIn(_ invitation: Invitation) async {
-        guard service.takesInEmailedInvitations, invitation.method == .request || invitation.method == .cancel else { return }
+        guard service.takesInEmailedInvitations, invitation.method != .other else { return }
+        // A guest's answer to a meeting the account organizes goes on their line.
+        if invitation.method == .reply {
+            guard (try? await service.receive(invitation)) != nil else { return }
+            changeCount += 1
+            return reload()
+        }
         let existing = await event(withUID: invitation.uid, near: invitation.event)
         if invitation.method == .request {
             // Unchanged and still waiting for an answer, there's nothing to do. An answered copy is looked at again: an
@@ -1190,6 +1211,10 @@ final class CalendarViewModel {
         changeCount += 1
         for (id, saved) in result.saved {
             if let index = events.firstIndex(where: { $0.id == id }) { events[index] = saved }
+            // A meeting made offline: its guests PMail invites by email get their invitations now.
+            if LocalID.isLocal(id), !service.emailsInvitations, saved.attendees.contains(where: \.invitedByEmail) {
+                Task { await emailInvitations(for: saved, before: nil) }
+            }
         }
         events.removeAll { result.deleted.contains($0.id) }
         for refusal in result.refused {

@@ -57,7 +57,7 @@ enum ICalendarEventProperties {
         guard let address = address(of: line) else { return nil }
         let isOrganizer = organizer.map { isSameMailbox($0.email, address.email) } ?? false
         return Attendee(address: address, response: response(ofPartstat: line.parameter("PARTSTAT")), isOptional: isOptional(line),
-                        isOrganizer: isOrganizer)
+                        isOrganizer: isOrganizer, invitedByEmail: line.parameter("SCHEDULE-AGENT")?.uppercased() == "CLIENT")
     }
 
     static func status(of component: ICalendarComponent) -> CalendarEvent.Status {

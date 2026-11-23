@@ -598,6 +598,41 @@ enum SelfTest {
             service?.emailing.withLock { $0 = false }
         }
         step {
+            // A calendar server that keeps meetings without inviting anyone (iCloud, for meetings saved from PMail): PMail
+            // emails the invitation, and the cancellation, to those guests itself.
+            let calendar = session.calendar
+            let mailService = sampleMail
+            ((session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService)?.invitesNoOne.withLock { $0 = true }
+            guard var draft = calendar.newDraft() else { return check(false, "a meeting can be started") }
+            draft.title = "Self-test uninvited meeting"
+            draft.guests = [SampleData.person("Zoe Anderson")]
+            Task { try? await calendar.save(draft) }
+            wait("the invitation the server didn't send") {
+                read { await mailService?.sentMessages.last?.subject }??.hasPrefix("Invitation: Self-test uninvited meeting") == true
+            }
+        }
+        step {
+            let calendar = session.calendar
+            let mailService = sampleMail
+            let last = read { await mailService?.sentMessages.last } ?? nil
+            check(last?.calendar?.method == "REQUEST" && last?.to.map(\.name) == ["Zoe Anderson"],
+                  "guests a calendar server doesn't invite get PMail’s invitation by email", last?.subject ?? "nothing sent")
+            guard let made = calendar.events.first(where: { $0.title == "Self-test uninvited meeting" }) else {
+                return check(false, "the meeting is on the calendar")
+            }
+            check(made.attendees.contains { $0.invitedByEmail && $0.address.name == "Zoe Anderson" }, "and the meeting says PMail invites them")
+            calendar.delete(made, scope: .thisEvent)
+            wait("the cancellation the server didn't send") {
+                read { await mailService?.sentMessages.last?.subject }??.hasPrefix("Canceled: Self-test uninvited meeting") == true
+            }
+        }
+        step {
+            let mailService = sampleMail
+            let last = read { await mailService?.sentMessages.last } ?? nil
+            check(last?.calendar?.method == "CANCEL" && last?.to.map(\.name) == ["Zoe Anderson"], "and the cancellation when it's deleted")
+            ((session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService)?.invitesNoOne.withLock { $0 = false }
+        }
+        step {
             // Following someone's calendar: it shows under Other calendars, on, with its events.
             let calendar = session.calendar
             check(calendar.canSubscribeToPeople, "a Google account can follow other people’s calendars")
