@@ -6,8 +6,8 @@ import Testing
     static let api = "/v1.0/me"
     static let utcPreference = "outlook.timezone=\"UTC\""
 
-    private func service(_ transport: StubTransport, pauses: WebTestPauses = WebTestPauses(), declinedFile: URL? = nil) -> MicrosoftCalendarService {
-        MicrosoftCalendarService(client: .test(transport, pauses: pauses), declinedFile: declinedFile)
+    private func service(_ transport: StubTransport, pauses: WebTestPauses = WebTestPauses()) -> MicrosoftCalendarService {
+        MicrosoftCalendarService(client: .test(transport, pauses: pauses))
     }
 
     // MARK: Calendars
@@ -300,47 +300,28 @@ import Testing
         #expect(transport.requests.first?.bodyJSONValue == ["comment": ""])
     }
 
-    /// Outlook takes a declined meeting off the calendar, so it's kept and still shown, declined, until the calendar has
-    /// it again. Once it's gone from there, the answer can't be changed.
-    @Test func declinedMeetingsStayOnTheCalendar() async throws {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("PMailKitTests-declined-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let file = folder.appendingPathComponent(DeclinedMeetings.fileName)
+    /// Outlook takes a meeting you decline off the calendar, and PMail keeps nothing of it: once it's gone, the answer
+    /// can't be changed here, and says why. The organizer can send it again.
+    @Test func declinedMeetingsArentKept() async throws {
         let transport = StubTransport()
         transport.on("POST", "\(Self.api)/events/AAMkInvite=/decline") { _ in .status(202) }
         transport.on("POST", "\(Self.api)/events/AAMkInvite=/accept") { _ in
             .json(#"{"error": {"code": "ErrorItemNotFound", "message": "The specified object was not found in the store."}}"#, status: 404)
         }
-        let listsItAgain = Switch()
-        transport.on("GET", "\(Self.api)/calendars/AAMkCal1=/calendarView") { _ in
-            guard listsItAgain.isOn else { return .json(#"{"value": []}"#) }
-            return .json(#"""
-            {"value": [{"id": "AAMkResent=", "subject": "Budget review", "iCalUId": "uid-budget",
-                        "start": {"dateTime": "2026-11-25T15:00:00.0000000", "timeZone": "UTC"},
-                        "end": {"dateTime": "2026-11-25T16:00:00.0000000", "timeZone": "UTC"},
-                        "responseStatus": {"response": "notResponded"}}]}
-            """#)
-        }
+        transport.on("GET", "\(Self.api)/calendars/AAMkCal1=/calendarView") { _ in .json(#"{"value": []}"#) }
         let start = WebFixtures.date("2026-11-25T15:00:00Z")
         let invite = CalendarEvent(id: "AAMkInvite=", calendarID: "AAMkCal1=", title: "Budget review", start: start,
                                    end: start.addingTimeInterval(3_600), myResponse: .needsAction, uid: "uid-budget")
-        try await service(transport, declinedFile: file).respond(to: invite, with: .declined)
-
-        // After relaunching: Outlook has taken it off the calendar, and PMail still shows it, declined.
-        let calendar = service(transport, declinedFile: file)
+        let calendar = service(transport)
+        try await calendar.respond(to: invite, with: .declined)
         let week = (WebFixtures.date("2026-11-22T00:00:00Z"), WebFixtures.date("2026-11-29T00:00:00Z"))
-        let shown = try await calendar.loadEvents(in: ["AAMkCal1="], from: week.0, to: week.1)
-        #expect(shown.map(\.id) == ["AAMkInvite="] && shown.first?.myResponse == .declined && shown.first?.title == "Budget review")
-        #expect(try await calendar.loadEvents(in: ["AAMkCal2="], from: week.0, to: week.1).isEmpty, "only on its own calendar")
-        await #expect(throws: PMailError.self) { try await calendar.respond(to: invite, with: .accepted) }
-        #expect(try await calendar.loadEvents(in: ["AAMkCal1="], from: week.0, to: week.1).first?.myResponse == .declined, "still declined")
-
-        // The organizer sends it again: the calendar's own copy shows, waiting for an answer, and the kept one goes.
-        listsItAgain.isOn = true
-        let resent = try await calendar.loadEvents(in: ["AAMkCal1="], from: week.0, to: week.1)
-        #expect(resent.map(\.id) == ["AAMkResent="] && resent.first?.myResponse == .needsAction)
-        listsItAgain.isOn = false
-        #expect(try await calendar.loadEvents(in: ["AAMkCal1="], from: week.0, to: week.1).isEmpty)
+        #expect(try await calendar.loadEvents(in: ["AAMkCal1="], from: week.0, to: week.1).isEmpty, "gone from the calendar, and not kept")
+        await #expect {
+            try await calendar.respond(to: invite, with: .accepted)
+        } throws: { error in
+            guard case let PMailError.notSupported(reason) = error else { return false }
+            return reason.contains("isn’t on your calendar any more")
+        }
     }
 
     @Test func throttledCalendarRequestsAreRetried() async throws {

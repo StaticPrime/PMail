@@ -108,30 +108,18 @@ struct AnswerEachTimeTests {
                 == ["\(events)/weekly", "\(events)/weekly_20261123T153000Z"])
     }
 
-    @Test func outlookDecliningEveryTimeKeepsTheTimesItTakesOff() async throws {
-        let folder = temporaryFolder()
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let start = Date().addingTimeInterval(2 * 86_400)
-        func time(_ id: String, _ offset: TimeInterval) -> String {
-            let begins = WebDate.utcString(start.addingTimeInterval(offset)).replacingOccurrences(of: "Z", with: "")
-            let ends = WebDate.utcString(start.addingTimeInterval(offset + 1_800)).replacingOccurrences(of: "Z", with: "")
-            return #"{"id": "\#(id)", "subject": "Weekly", "seriesMasterId": "AAMkSeries=", "type": "occurrence", "#
-                + #""start": {"dateTime": "\#(begins)", "timeZone": "UTC"}, "end": {"dateTime": "\#(ends)", "timeZone": "UTC"}}"#
-        }
+    @Test func outlookAnswersEveryTimeOnTheSeries() async throws {
         let transport = StubTransport()
-        transport.on("GET", "/v1.0/me/events/AAMkSeries=/instances") { _ in
-            .json(#"{"value": [\#(time("AAMkOcc1=", 0)), \#(time("AAMkOcc2=", 7 * 86_400))]}"#)
-        }
         transport.on("POST", "/v1.0/me/events/AAMkSeries=/decline") { _ in .status(202) }
-        transport.on("GET", "/v1.0/me/calendars/AAMkCal1=/calendarView") { _ in .json(#"{"value": []}"#) }
-        let calendar = MicrosoftCalendarService(client: .test(transport), declinedFile: folder.appendingPathComponent("declined.json"))
+        transport.on("POST", "/v1.0/me/events/AAMkOcc1=/accept") { _ in .status(202) }
+        let calendar = MicrosoftCalendarService(client: .test(transport))
+        let start = Date().addingTimeInterval(2 * 86_400)
         let first = CalendarEvent(id: "AAMkOcc1=", calendarID: "AAMkCal1=", title: "Weekly", start: start, end: start.addingTimeInterval(1_800),
                                   seriesID: "AAMkSeries=", myResponse: .needsAction)
+        try await calendar.respond(to: first, with: .accepted, comment: nil, scope: .thisEvent)
         try await calendar.respond(to: first, with: .declined, comment: nil, scope: .allEvents)
-        #expect(transport.sent("POST", "/v1.0/me/events/AAMkSeries=/decline").count == 1, "the series is declined")
-        let shown = try await calendar.loadEvents(in: ["AAMkCal1="], from: start.addingTimeInterval(-86_400), to: start.addingTimeInterval(14 * 86_400))
-        #expect(shown.map(\.id).sorted() == ["AAMkOcc1=", "AAMkOcc2="] && shown.allSatisfy { $0.myResponse == .declined },
-                "its times still show, as No")
+        #expect(transport.requests.compactMap { $0.url?.path } == ["/v1.0/me/events/AAMkOcc1=/accept", "/v1.0/me/events/AAMkSeries=/decline"],
+                "one time on its own, every time on the series")
     }
 
     @Test func waitingAnswersShowOnEveryTimeTheyreFor() throws {

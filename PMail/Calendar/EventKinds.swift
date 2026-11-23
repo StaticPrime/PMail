@@ -42,13 +42,13 @@ func eventTitleString(_ event: CalendarEvent) -> String {
 }
 
 /// How an event shows on the calendar for the answer you gave its invitation: solid for Yes (and for your own
-/// events), outlined while it waits for an answer, see-through with "(Maybe)" after the title for Maybe, and
-/// see-through and struck through for No. A canceled event is see-through and struck through, with "(Canceled)".
+/// events), outlined while it waits for an answer, and see-through with "(Maybe)" after the title for Maybe. An
+/// invitation you said No to isn't on the calendar at all. A canceled event is see-through and struck through, with
+/// "(Canceled)".
 enum AnswerLook: Equatable {
     case solid
     case pending
     case maybe
-    case declined
     case canceled
 
     init(_ event: CalendarEvent) {
@@ -59,22 +59,22 @@ enum AnswerLook: Equatable {
         switch event.myResponse {
         case .needsAction?: self = .pending
         case .tentative?: self = .maybe
-        case .declined?: self = .declined
-        case .accepted?, nil: self = .solid
+        // Declined invitations aren't shown.
+        case .accepted?, .declined?, nil: self = .solid
         }
     }
 
-    /// Whether the event's color shows only faintly (Maybe, No and canceled).
-    var isFaint: Bool { self == .maybe || self == .declined || self == .canceled }
-    /// How strongly the event's color fills it: none while it waits for an answer, faintly for Maybe, No and canceled.
+    /// Whether the event's color shows only faintly (Maybe and canceled).
+    var isFaint: Bool { self == .maybe || self == .canceled }
+    /// How strongly the event's color fills it: none while it waits for an answer, faintly for Maybe and canceled.
     var fillOpacity: Double {
         switch self {
         case .solid: 1
         case .pending: 0
-        case .maybe, .declined, .canceled: 0.32
+        case .maybe, .canceled: 0.32
         }
     }
-    var isStruckThrough: Bool { self == .declined || self == .canceled }
+    var isStruckThrough: Bool { self == .canceled }
 
     /// What goes after the title.
     var titleNote: String {
@@ -86,13 +86,13 @@ enum AnswerLook: Equatable {
     }
 
     /// The color for the event's words on its fill: white on a solid color, the event's color on an outline, and the
-    /// usual text colors on a faint one (dimmer for No).
+    /// usual text colors on a faint one (dimmer for canceled).
     func textColor(on color: Color) -> Color {
         switch self {
         case .solid: .white
         case .pending: color
         case .maybe: Theme.textPrimary
-        case .declined, .canceled: Theme.textSecondary
+        case .canceled: Theme.textSecondary
         }
     }
 
@@ -102,13 +102,12 @@ enum AnswerLook: Equatable {
         case .solid: ""
         case .pending: ", not answered yet"
         case .maybe: ", maybe"
-        case .declined: ", declined"
         case .canceled: ", canceled"
         }
     }
 }
 
-/// An event's color as a dot in lists: filled for Yes, a ring while it waits for an answer, faint for Maybe and No.
+/// An event's color as a dot in lists: filled for Yes, a ring while it waits for an answer, faint for Maybe and canceled.
 struct AnswerDot: View {
     let look: AnswerLook
     let color: Color

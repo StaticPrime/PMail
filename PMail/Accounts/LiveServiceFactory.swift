@@ -61,9 +61,10 @@ struct LiveServiceFactory: ServiceFactory {
                                                       tasks: GoogleTasksService(tokens: tokenProvider), for: account),
                                    contacts: GoogleContactsService(tokens: tokenProvider))
         }
+        // Earlier versions kept the meetings declined here on the Mac; declined meetings aren't kept any more.
+        try? FileManager.default.removeItem(at: storage(for: account).appendingPathComponent(MicrosoftCalendarService.oldDeclinedFileName))
         return AccountServices(mail: MicrosoftMailService(email: account.email, tokens: tokenProvider),
                                calendar: calendar(MicrosoftCalendarService(tokens: tokenProvider,
-                                                                           declinedFile: storage(for: account).appendingPathComponent(DeclinedMeetings.fileName),
                                                                            followedFile: storage(for: account).appendingPathComponent(FollowedCalendars.fileName)),
                                                   tasks: MicrosoftTasksService(tokens: tokenProvider), for: account),
                                contacts: MicrosoftContactsService(tokens: tokenProvider))

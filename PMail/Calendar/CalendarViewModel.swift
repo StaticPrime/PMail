@@ -462,11 +462,12 @@ final class CalendarViewModel {
 
     // MARK: Events
 
-    /// Events from the calendars that are on (canceled ones too, marked), matching the search if there is one.
+    /// Events from the calendars that are on (canceled ones too, marked), matching the search if there is one. An
+    /// invitation the account said No to isn't shown: saying No takes it off the calendar.
     func shownEvents(matching search: String = "") -> [CalendarEvent] {
         let words = search.lowercased().split(separator: " ").map(String.init)
         return events.filter { event in
-            guard !hiddenCalendarIDs.contains(event.calendarID) else { return false }
+            guard !hiddenCalendarIDs.contains(event.calendarID), event.myResponse != .declined else { return false }
             guard !words.isEmpty else { return true }
             let text = [event.title, event.location ?? "", event.notes ?? "", event.attendees.map(\.address.displayName).joined(separator: " ")]
                 .joined(separator: " ").lowercased()
@@ -624,12 +625,13 @@ final class CalendarViewModel {
         }
     }
 
-    /// The events of a calendar as one iCalendar file: from a year back to two years ahead, each series once.
+    /// The events of a calendar as one iCalendar file: from a year back to two years ahead, each series once, without
+    /// the invitations the account said No to (as the calendar shows them).
     func exportDocument(for calendar: CalendarInfo) async throws -> String {
         let now = today()
         let start = self.calendar.date(byAdding: .year, value: -1, to: now) ?? now
         let end = self.calendar.date(byAdding: .year, value: 2, to: now) ?? now
-        let events = try await service.loadEvents(in: [calendar.id], from: start, to: end).filter { !$0.isTask }
+        let events = try await service.loadEvents(in: [calendar.id], from: start, to: end).filter { !$0.isTask && $0.myResponse != .declined }
         return ICalendar.exportDocument(for: events, ownerEmail: account.email, through: end)
     }
 
@@ -1007,6 +1009,8 @@ final class CalendarViewModel {
         for index in events.indices where events[index].id == event.id || (series != nil && events[index].seriesID == series) {
             events[index].myResponse = response
         }
+        // Said No to, it leaves the calendar, and its details close.
+        if response == .declined, selectedEventID == event.id { selectedEventID = nil }
         changeCount += 1
         let service = self.service
         let later = CalendarChange.answer(event, response: response, scope: scope)
