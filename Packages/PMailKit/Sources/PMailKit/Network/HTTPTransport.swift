@@ -8,14 +8,20 @@ public protocol HTTPTransport: Sendable {
 /// Real requests through URLSession.
 public struct URLSessionTransport: HTTPTransport {
     private let session: URLSession
+    /// Whether URLSession follows redirects itself. Without, a redirect comes back as the answer, for a client that
+    /// follows it its own way: WebDAV's re-sends the same method, body and sign-in, where URLSession leaves the
+    /// sign-in behind (and the server then refuses it, as if the password were wrong).
+    private let followsRedirects: Bool
 
-    public init(session: URLSession = URLSession(configuration: .ephemeral)) {
+    public init(session: URLSession = URLSession(configuration: .ephemeral), followsRedirects: Bool = true) {
         self.session = session
+        self.followsRedirects = followsRedirects
     }
 
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = followsRedirects ? try await session.data(for: request)
+                : try await session.data(for: request, delegate: RedirectsReturned.shared)
             guard let http = response as? HTTPURLResponse else { throw PMailError.protocolError("not an HTTP response") }
             return (data, http)
         } catch let error as PMailError {
@@ -29,6 +35,16 @@ public struct URLSessionTransport: HTTPTransport {
             if error is CancellationError { throw PMailError.cancelled }
             throw PMailError.connectionFailed(nsError.localizedDescription)
         }
+    }
+}
+
+/// Turns down every redirect, so the redirect itself is the answer.
+private final class RedirectsReturned: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static let shared = RedirectsReturned()
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest) async -> URLRequest? {
+        nil
     }
 }
 

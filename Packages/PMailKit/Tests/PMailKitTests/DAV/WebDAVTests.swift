@@ -75,6 +75,28 @@ import Testing
         #expect(transport.sent("PROPFIND", "/loop").count == WebDAVClient.maximumRedirects + 1)
     }
 
+    /// A server behind a proxy that names its own address over http stays on https; another host over http is refused.
+    @Test func redirectsNeverLeaveHTTPS() async throws {
+        let transport = StubTransport()
+        transport.on("PROPFIND", "/.well-known/caldav") { _ in
+            StubTransport.Response(status: 301, body: Data(), headers: ["Location": "http://dav.example.com/dav/cal/"])
+        }
+        transport.on("PROPFIND", "/dav/cal") { _ in DAVStub.multistatus(DAVStub.response("/dav/cal/", "<d:displayname>Calendars</d:displayname>")) }
+        transport.on("PROPFIND", "/elsewhere") { _ in
+            StubTransport.Response(status: 302, body: Data(), headers: ["Location": "http://other.example.net/dav/cal/"])
+        }
+        let client = WebDAVClient(credential: DAVStub.password, transport: transport)
+        let answer = try await client.propfind(try #require(URL(string: "https://dav.example.com/.well-known/caldav")), depth: 0,
+                                               properties: [.displayName])
+        #expect(answer.baseURL.absoluteString == "https://dav.example.com/dav/cal/")
+        let followed = try #require(transport.sent("PROPFIND", "/dav/cal").first)
+        #expect(followed.url?.scheme == "https" && DAVStub.header(followed, "Authorization") != nil)
+        await #expect(throws: PMailError.self) {
+            _ = try await client.propfind(try #require(URL(string: "https://dav.example.com/elsewhere")), depth: 0, properties: [.displayName])
+        }
+        #expect(transport.requests.allSatisfy { $0.url?.scheme == "https" }, "nothing ever went over http")
+    }
+
     @Test func refusedTokensAreRefreshedOnce() async throws {
         let transport = StubTransport()
         transport.on("GET", "/card.vcf") { request in

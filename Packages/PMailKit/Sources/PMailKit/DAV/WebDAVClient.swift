@@ -24,8 +24,9 @@ struct WebDAVClient: Sendable {
         var etag: String?
     }
 
-    /// Sends a request, following up to five redirects (re-sending the same method and body to the new address) and
-    /// trying once more with a fresh token when a token is turned down. Throws for anything but a 2xx answer.
+    /// Sends a request, following up to five redirects (re-sending the same method, body and sign-in to the new
+    /// address, which is why the transport mustn't follow them itself) and trying once more with a fresh token when a
+    /// token is turned down. Throws for anything but a 2xx answer.
     func send(_ method: String, to url: URL, headers: [String: String] = [:], body: Data? = nil) async throws -> Response {
         var address = url
         var redirects = 0
@@ -38,12 +39,16 @@ struct WebDAVClient: Sendable {
             let status = response.statusCode
             if [301, 302, 307, 308].contains(status) {
                 guard let location = response.value(forHTTPHeaderField: "Location"),
-                      let next = URL(string: location, relativeTo: address)?.absoluteURL else {
+                      var next = URL(string: location, relativeTo: address)?.absoluteURL else {
                     throw PMailError.protocolError("the server sent PMail elsewhere without saying where")
                 }
                 guard redirects < Self.maximumRedirects else { throw PMailError.protocolError("the server kept sending PMail elsewhere") }
                 if address.scheme?.lowercased() == "https" && next.scheme?.lowercased() != "https" {
-                    throw PMailError.connectionFailed("The server tried to move the connection off a secure one.")
+                    // A server behind a proxy may name its own address over http: on the same host, it stays https.
+                    guard let secure = Self.secured(next, like: address) else {
+                        throw PMailError.connectionFailed("The server tried to move the connection off a secure one.")
+                    }
+                    next = secure
                 }
                 redirects += 1
                 address = next
@@ -75,6 +80,15 @@ struct WebDAVClient: Sendable {
         } catch {
             throw PMailError.connectionFailed(error.localizedDescription)
         }
+    }
+
+    /// An http address on the same host as a secure one, over https (at the secure one's port); nil for another host.
+    static func secured(_ url: URL, like secure: URL) -> URL? {
+        guard url.scheme?.lowercased() == "http", let host = url.host?.lowercased(), host == secure.host?.lowercased(),
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        parts.scheme = "https"
+        parts.port = secure.port
+        return parts.url
     }
 
     static func error(status: Int) -> PMailError {

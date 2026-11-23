@@ -36,7 +36,8 @@ public actor CalDAVCalendarService: CalendarService {
     /// invitation's copy again, since not every server answers a query by UID.
     private var pathsByUID: [String: String] = [:]
 
-    public init(serverURL: URL, credential: Credential, ownerEmail: String, transport: any HTTPTransport = URLSessionTransport()) {
+    /// The transport must hand redirects back (WebDAV follows them itself, keeping the sign-in).
+    public init(serverURL: URL, credential: Credential, ownerEmail: String, transport: any HTTPTransport = URLSessionTransport(followsRedirects: false)) {
         self.init(serverURL: serverURL, credential: credential, ownerEmail: ownerEmail, transport: transport, timeZone: .current)
     }
 

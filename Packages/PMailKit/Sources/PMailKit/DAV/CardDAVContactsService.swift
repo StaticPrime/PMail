@@ -23,7 +23,8 @@ public actor CardDAVContactsService: ContactsService {
     /// Whether the cards have been read at least once, so the groups are known.
     private var hasLoaded = false
 
-    public init(serverURL: URL, credential: Credential, transport: any HTTPTransport = URLSessionTransport()) {
+    /// The transport must hand redirects back (WebDAV follows them itself, keeping the sign-in).
+    public init(serverURL: URL, credential: Credential, transport: any HTTPTransport = URLSessionTransport(followsRedirects: false)) {
         self.serverURL = serverURL
         client = WebDAVClient(credential: credential, transport: transport)
     }
