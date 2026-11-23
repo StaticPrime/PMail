@@ -165,14 +165,12 @@ private struct CalendarSidebar: View {
             .padding(.leading, 26)
             .padding(.vertical, 4)
             ForEach(model.otherCalendars) { calendar in
-                CalendarToggleRow(name: calendar.name, color: model.color(for: calendar), isOn: model.isVisible(calendar)) {
-                    model.toggle(calendar)
-                }
-                .contextMenu {
-                    if calendar.canUnsubscribe == true {
-                        Button("Unsubscribe from “\(calendar.name)”") { model.unsubscribe(calendar) }
+                CalendarRow(app: app, model: model, calendar: calendar)
+                    .contextMenu {
+                        if calendar.canUnsubscribe == true {
+                            Button("Unsubscribe from “\(calendar.name)”") { model.unsubscribe(calendar) }
+                        }
                     }
-                }
             }
         }
         .padding(.bottom, 12)
@@ -199,12 +197,44 @@ private struct CalendarSidebar: View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title).font(.pm(14, .medium)).foregroundStyle(Theme.textPrimary).padding(.leading, 26).padding(.vertical, 8)
             ForEach(calendars) { calendar in
-                CalendarToggleRow(name: calendar.name, color: model.color(for: calendar), isOn: model.isVisible(calendar)) {
-                    model.toggle(calendar)
-                }
+                CalendarRow(app: app, model: model, calendar: calendar)
             }
         }
         .padding(.bottom, 12)
+    }
+}
+
+/// A calendar in the sidebar: its box to show or hide it, and, while pointed at, ⋯ for showing just it, its settings
+/// and its color.
+private struct CalendarRow: View {
+    let app: AppModel
+    let model: CalendarViewModel
+    let calendar: CalendarInfo
+    @State private var hovering = false
+    @State private var showsMenu = false
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            CalendarToggleRow(name: calendar.name, color: model.color(for: calendar), isOn: model.isVisible(calendar)) {
+                model.toggle(calendar)
+            }
+            if hovering || showsMenu {
+                IconButton(symbol: "ellipsis", help: "Options for “\(calendar.name)”", size: 26, iconSize: 12) { showsMenu = true }
+                    .padding(.trailing, 10)
+                    .popover(isPresented: $showsMenu, arrowEdge: .trailing) {
+                        CalendarRowMenu(app: app, model: model, calendar: calendar) { showsMenu = false }
+                    }
+            }
+        }
+        .onHover { hovering = $0 }
+        #if DEBUG
+        // `-PMCalendarMenu Family` opens that calendar's ⋯ menu.
+        .onAppear {
+            if UserDefaults.standard.string(forKey: "PMCalendarMenu") == calendar.name {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showsMenu = true }
+            }
+        }
+        #endif
     }
 }
 

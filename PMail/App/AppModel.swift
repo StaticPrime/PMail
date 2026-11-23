@@ -84,6 +84,8 @@ final class AppModel {
 
     let accounts: AccountsController
     let oauth: OAuthConfiguration
+    /// The calendar Settings ▸ Calendar shows next, when asked from a calendar's ⋯ menu.
+    var calendarSettingsTarget: CalendarSettingsTarget?
     /// Keeps every account up to date in the background (made once the window exists).
     var sync: SyncController?
     var module: Module = .mail

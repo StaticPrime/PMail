@@ -127,7 +127,9 @@ final class CalendarViewModel {
     @ObservationIgnored var formatting: MailFormatting
     @ObservationIgnored var today: () -> Date
 
-    private(set) var calendars: [CalendarInfo] = []
+    private(set) var calendars: [CalendarInfo] = [] {
+        didSet { forgetColorsChangedElsewhere() }
+    }
     private(set) var hiddenCalendarIDs: Set<String>
     var mode: Mode { didSet { defaults.set(mode.rawValue, forKey: "CalendarMode"); loadIfNeeded() } }
     @ObservationIgnored let defaults: UserDefaults
@@ -165,6 +167,8 @@ final class CalendarViewModel {
         miniMonth = CalendarGrid(calendar: calendar).startOfMonth(now)
         mode = Mode(rawValue: defaults.string(forKey: "CalendarMode") ?? "") ?? .week
         hiddenCalendarIDs = Set(defaults.stringArray(forKey: "HiddenCalendars-\(account.id.uuidString)") ?? [])
+        preferences = defaults.data(forKey: "CalendarPreferences-\(account.id.uuidString)")
+            .flatMap { try? JSONDecoder().decode(CalendarPreferences.self, from: $0) } ?? CalendarPreferences()
     }
 
     var calendar: Calendar { grid.calendar }
@@ -480,10 +484,140 @@ final class CalendarViewModel {
 
     /// The event's color: its own, or its calendar's.
     func color(for event: CalendarEvent) -> Color {
-        Theme.color(hexString: event.colorHex) ?? Theme.color(hexString: calendarInfo(event.calendarID)?.colorHex) ?? Theme.accent
+        Theme.color(hexString: event.colorHex) ?? Theme.color(hexString: calendarInfo(event.calendarID).map(colorHex(of:))) ?? Theme.accent
     }
 
-    func color(for calendar: CalendarInfo) -> Color { Theme.color(hexString: calendar.colorHex) ?? Theme.accent }
+    func color(for calendar: CalendarInfo) -> Color { Theme.color(hexString: colorHex(of: calendar)) ?? Theme.accent }
+
+    /// A calendar's color: the one chosen here (exactly, whatever the provider keeps of it), else the provider's.
+    func colorHex(of calendar: CalendarInfo) -> String {
+        guard let chosen = preferences.colors[calendar.id], !chosen.wasChanged(in: calendar) else { return calendar.colorHex }
+        return chosen.hex
+    }
+
+    // MARK: Calendar settings
+
+    /// What PMail keeps on this Mac about each calendar, by ID: the color chosen and the notifications new events get
+    /// where the provider doesn't keep them.
+    struct CalendarPreferences: Codable {
+        var colors: [String: ChosenColor] = [:]
+        var eventReminders: [String: [Int]] = [:]
+        var allDayReminders: [String: [AllDayReminder]] = [:]
+    }
+
+    /// A color chosen here, with the color the provider gave the calendar once it was saved (on Outlook, the nearest
+    /// of its own). The calendar shows the one chosen until the provider's changes: then it was changed somewhere else.
+    struct ChosenColor: Codable, Hashable {
+        var hex: String
+        var provider: String?
+
+        func wasChanged(in calendar: CalendarInfo) -> Bool {
+            provider.map { $0.caseInsensitiveCompare(calendar.colorHex) != .orderedSame } ?? false
+        }
+    }
+
+    private(set) var preferences = CalendarPreferences()
+
+    private func savePreferences() {
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: "CalendarPreferences-\(account.id.uuidString)")
+    }
+
+    /// Colors chosen here for calendars whose color has since been changed somewhere else give way to it.
+    private func forgetColorsChangedElsewhere() {
+        let changed = calendars.filter { preferences.colors[$0.id]?.wasChanged(in: $0) == true }
+        guard !changed.isEmpty else { return }
+        for calendar in changed { preferences.colors[calendar.id] = nil }
+        savePreferences()
+    }
+
+    /// Notes the color the provider gave a calendar after a new one was chosen, from a fresh list of calendars.
+    private func noteProviderColor(of calendarID: String, in loaded: [CalendarInfo]) {
+        guard preferences.colors[calendarID]?.provider == nil, let now = loaded.first(where: { $0.id == calendarID }) else { return }
+        preferences.colors[calendarID]?.provider = now.colorHex
+        savePreferences()
+    }
+
+    /// The notifications new events on a calendar get: the provider's defaults for the calendar where it keeps them,
+    /// else the ones chosen in its settings here (and all-day events' always those).
+    func defaultReminders(for calendarID: String, allDay: Bool) -> [Reminder] {
+        if allDay { return (preferences.allDayReminders[calendarID] ?? []).filter { $0.minutesBefore >= 0 }.map { Reminder(minutes: $0.minutesBefore) } }
+        if let calendar = calendarInfo(calendarID), service.settingsSupport(for: calendar).eventReminders, let minutes = calendar.defaultReminders {
+            return minutes.map { Reminder(minutes: $0) }
+        }
+        return (preferences.eventReminders[calendarID] ?? [10]).map { Reminder(minutes: $0) }
+    }
+
+    /// Shows just one calendar, hiding the account's others.
+    func showOnly(_ calendar: CalendarInfo) {
+        hiddenCalendarIDs = Set(calendars.map(\.id)).subtracting([calendar.id])
+        defaults.set(Array(hiddenCalendarIDs), forKey: "HiddenCalendars-\(account.id.uuidString)")
+    }
+
+    /// Gives a calendar a color: shown here at once, and kept by the provider where it keeps colors.
+    func setColor(_ calendar: CalendarInfo, to hex: String) {
+        let keeps = service.settingsSupport(for: calendar).color
+        let current = calendarInfo(calendar.id) ?? calendar
+        preferences.colors[calendar.id] = ChosenColor(hex: hex, provider: keeps ? nil : current.colorHex)
+        savePreferences()
+        changeCount += 1
+        guard keeps else { return }
+        let service = self.service
+        Task {
+            do {
+                var settings = try await service.loadSettings(for: calendar)
+                settings.colorHex = hex
+                try await service.saveSettings(settings, for: calendar)
+                if let loaded = try? await service.loadCalendars() {
+                    noteProviderColor(of: calendar.id, in: loaded)
+                    calendars = loaded
+                    await cache?.save(calendars: loaded)
+                }
+            } catch {
+                app?.report(error, doing: "Saving “\(calendar.name)”’s color")
+            }
+        }
+    }
+
+    /// What the provider keeps of a calendar's settings.
+    func settingsSupport(for calendar: CalendarInfo) -> CalendarSettingsSupport { service.settingsSupport(for: calendar) }
+
+    /// A calendar's settings: the provider's, with what's kept on this Mac.
+    func settings(for calendar: CalendarInfo) async throws -> CalendarSettings {
+        var settings = try await service.loadSettings(for: calendar)
+        let support = service.settingsSupport(for: calendar)
+        if let chosen = preferences.colors[calendar.id], !chosen.wasChanged(in: calendarInfo(calendar.id) ?? calendar) { settings.colorHex = chosen.hex }
+        if !support.eventReminders { settings.eventReminders = preferences.eventReminders[calendar.id] ?? [10] }
+        settings.allDayReminders = preferences.allDayReminders[calendar.id] ?? []
+        return settings
+    }
+
+    /// Saves a calendar's settings: what the provider keeps goes to it, and the rest is kept on this Mac.
+    func saveSettings(_ settings: CalendarSettings, for calendar: CalendarInfo) async throws {
+        let support = service.settingsSupport(for: calendar)
+        let current = calendarInfo(calendar.id) ?? calendar
+        if settings.colorHex.caseInsensitiveCompare(colorHex(of: current)) != .orderedSame {
+            preferences.colors[calendar.id] = ChosenColor(hex: settings.colorHex, provider: support.color ? nil : current.colorHex)
+        }
+        if !support.eventReminders { preferences.eventReminders[calendar.id] = settings.eventReminders }
+        preferences.allDayReminders[calendar.id] = settings.allDayReminders
+        savePreferences()
+        changeCount += 1
+        try await service.saveSettings(settings, for: calendar)
+        if let loaded = try? await service.loadCalendars() {
+            if support.color { noteProviderColor(of: calendar.id, in: loaded) }
+            calendars = loaded
+            await cache?.save(calendars: loaded)
+        }
+    }
+
+    /// The events of a calendar as one iCalendar file: from a year back to two years ahead, each series once.
+    func exportDocument(for calendar: CalendarInfo) async throws -> String {
+        let now = today()
+        let start = self.calendar.date(byAdding: .year, value: -1, to: now) ?? now
+        let end = self.calendar.date(byAdding: .year, value: 2, to: now) ?? now
+        let events = try await service.loadEvents(in: [calendar.id], from: start, to: end).filter { !$0.isTask }
+        return ICalendar.exportDocument(for: events, ownerEmail: account.email, through: end)
+    }
 
     // MARK: Making and changing events
 
@@ -505,7 +639,7 @@ final class CalendarViewModel {
                                     : begin.addingTimeInterval(3600))
         var draft = EventDraft(calendarID: calendarInfo.id, start: allDay ? calendar.startOfDay(for: begin) : begin, end: finish,
                                isAllDay: allDay, guests: guests)
-        draft.reminders = allDay ? [] : [Reminder(minutes: 10)]
+        draft.reminders = defaultReminders(for: calendarInfo.id, allDay: allDay)
         if type != .event {
             guard type != .task || defaultTaskList != nil else { return nil }
             retype(&draft, as: type)

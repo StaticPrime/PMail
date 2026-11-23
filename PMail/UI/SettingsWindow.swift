@@ -4,18 +4,20 @@ import ServiceManagement
 import SwiftUI
 
 /// PMail ▸ Settings, in panes along a toolbar so none grows taller than the screen: General (new mail, opening at
-/// login, the keyboard), Mail (Undo Send, inbox categories), Junk Mail (junk and blocked senders' mail), Privacy (remote
-/// content), Accounts (each account's settings, blocked senders and sender categories) and Signing In.
+/// login, the keyboard), Mail (Undo Send, inbox categories), Calendar (each calendar's settings), Junk Mail (junk and
+/// blocked senders' mail), Privacy (remote content), Accounts (each account's settings, blocked senders and sender
+/// categories) and Signing In.
 final class SettingsWindowController: NSWindowController {
     private static var shared: SettingsWindowController?
 
     enum Pane: Int, CaseIterable {
-        case general, mail, junk, privacy, accounts, signingIn
+        case general, mail, calendar, junk, privacy, accounts, signingIn
 
         var title: String {
             switch self {
             case .general: "General"
             case .mail: "Mail"
+            case .calendar: "Calendar"
             case .junk: "Junk Mail"
             case .privacy: "Privacy"
             case .accounts: "Accounts"
@@ -27,6 +29,7 @@ final class SettingsWindowController: NSWindowController {
             switch self {
             case .general: "gearshape"
             case .mail: "envelope"
+            case .calendar: "calendar"
             case .junk: "xmark.bin"
             case .privacy: "hand.raised"
             case .accounts: "person.crop.circle"
@@ -38,6 +41,7 @@ final class SettingsWindowController: NSWindowController {
             switch self {
             case .general: AnyView(GeneralSettings(app: app))
             case .mail: AnyView(MailSettings(app: app))
+            case .calendar: AnyView(CalendarSettingsPane(app: app))
             case .junk: AnyView(JunkMailSettingsPane(app: app))
             case .privacy: AnyView(PrivacySettingsPane())
             case .accounts: AnyView(AccountSettings(app: app))

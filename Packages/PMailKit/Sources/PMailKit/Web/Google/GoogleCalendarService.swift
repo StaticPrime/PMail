@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// A Google account's calendars, through Google's calendar API. New events can get a Google Meet meeting of their own.
 /// Out of office and focus time are Google's own kinds of event where the calendar takes them (a Workspace account's
@@ -54,12 +55,69 @@ public actor GoogleCalendarService: CalendarService {
             try Self.url("users/me/calendarList", [("maxResults", "250")] + (token.map { [("pageToken", $0)] } ?? []))
         }
         var calendars: [CalendarInfo] = []
+        var owned = Set<String>()
         for item in pages.flatMap({ $0["items"].array }) {
             guard let calendar = Self.calendar(from: item) else { continue }
             defaultReminders[calendar.id] = Self.popupMinutes(item["defaultReminders"])
+            if item["accessRole"].string == "owner" { owned.insert(calendar.id) }
             calendars.append(calendar)
         }
+        let ownedNow = owned
+        ownedCalendars.withLock { $0 = ownedNow }
         return calendars
+    }
+
+    /// The calendars the account owns, as last listed: only a calendar's owner can change its own name, description
+    /// and time zone. Kept where the settings pane can ask without waiting.
+    private nonisolated let ownedCalendars = OSAllocatedUnfairLock<Set<String>>(initialState: [])
+
+    // MARK: Settings
+
+    /// Every calendar on the list keeps its name (for the account's own, the calendar's name; for others, the name it
+    /// shows here), color, default notifications and email notices; the account's own keep a description and time zone.
+    public nonisolated func settingsSupport(for calendar: CalendarInfo) -> CalendarSettingsSupport {
+        let owns = calendar.isPrimary || ownedCalendars.withLock { $0.contains(calendar.id) }
+        return CalendarSettingsSupport(name: true, description: owns, timeZone: owns, color: true, eventReminders: true, emailNotices: true)
+    }
+
+    public func loadSettings(for calendar: CalendarInfo) async throws -> CalendarSettings {
+        let entry = try await client.get(Self.url("users/me/calendarList/\(WebURL.segment(calendar.id))"))
+        let notices = Set(entry["notificationSettings"]["notifications"].array.compactMap { item -> EmailNotice? in
+            item["method"].string == "email" ? EmailNotice(rawValue: item["type"].string ?? "") : nil
+        })
+        let owner = entry["accessRole"].string == "owner" ? "You" : (calendar.id.contains("@") && !calendar.id.contains("calendar.google.com") ? calendar.id : nil)
+        return CalendarSettings(name: entry["summaryOverride"].nonEmpty ?? entry["summary"].nonEmpty ?? calendar.name,
+                                description: entry["description"].string ?? "", timeZone: entry["timeZone"].nonEmpty,
+                                colorHex: WebColor.hex(entry["backgroundColor"].string) ?? calendar.colorHex, owner: owner,
+                                eventReminders: Self.popupMinutes(entry["defaultReminders"]), emailNotices: notices)
+    }
+
+    /// The calendar's own name, description and time zone (the account's own calendars), then its place on the list:
+    /// the name it shows here (others' calendars), color, default notifications and email notices.
+    public func saveSettings(_ settings: CalendarSettings, for calendar: CalendarInfo) async throws {
+        let listURL = try Self.url("users/me/calendarList/\(WebURL.segment(calendar.id))", [("colorRgbFormat", "true")])
+        let current = try await client.get(Self.url("users/me/calendarList/\(WebURL.segment(calendar.id))"))
+        let owns = current["accessRole"].string == "owner"
+        if owns {
+            // Only what changed, so a calendar that refuses one change (a new time zone, say) still takes the others.
+            var body: [String: JSONValue] = [:]
+            if settings.name != (current["summary"].string ?? "") { body["summary"] = .string(settings.name) }
+            if settings.description != (current["description"].string ?? "") { body["description"] = .string(settings.description) }
+            if let zone = settings.timeZone, zone != current["timeZone"].string { body["timeZone"] = .string(zone) }
+            if !body.isEmpty { _ = try await client.patch(Self.url("calendars/\(WebURL.segment(calendar.id))"), .object(body)) }
+        }
+        var entry: [String: JSONValue] = [
+            "backgroundColor": .string(settings.colorHex.lowercased()), "foregroundColor": .string(WebColor.textColor(on: settings.colorHex)),
+            "defaultReminders": .array(settings.eventReminders.map { .object(["method": .string("popup"), "minutes": .number(Double($0))]) }),
+            "notificationSettings": .object(["notifications": .array((settings.emailNotices ?? []).sorted { $0.rawValue < $1.rawValue }.map {
+                .object(["type": .string($0.rawValue), "method": .string("email")])
+            })]),
+        ]
+        // Others' calendars are renamed for this account's list only; the account's own too where the list already
+        // gives it a name of its own, which would hide the new one.
+        if !owns || current["summaryOverride"].nonEmpty != nil { entry["summaryOverride"] = .string(settings.name) }
+        _ = try await client.patch(listURL, .object(entry))
+        defaultReminders[calendar.id] = settings.eventReminders
     }
 
     // MARK: Subscriptions
@@ -101,7 +159,7 @@ public actor GoogleCalendarService: CalendarService {
         return CalendarInfo(id: id, name: item["summaryOverride"].nonEmpty ?? item["summary"].nonEmpty ?? id,
                             colorHex: WebColor.hex(item["backgroundColor"].string) ?? "#1A73E8", isPrimary: primary,
                             isReadOnly: readOnly, nativeConference: meet ? .meet : nil, isOther: !primary && readOnly,
-                            canUnsubscribe: !primary && readOnly)
+                            canUnsubscribe: !primary && readOnly, defaultReminders: popupMinutes(item["defaultReminders"]))
     }
 
     /// Minutes before the start of the pop-up reminders in a list of reminders.

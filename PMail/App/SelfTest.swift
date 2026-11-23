@@ -85,6 +85,8 @@ enum SelfTest {
     static var gardenParty: Invitation?
     /// Why following a calendar was refused.
     static var subscribeRefusal: String?
+    /// The main calendar, exported.
+    static var exportedCalendar: String?
     /// The invitation the self-test takes into a calendar, and the ID of its email.
     static var picnic: Invitation?
     static var picnicMessage: String?
@@ -639,6 +641,90 @@ enum SelfTest {
                   "importing adds them to the calendar chosen")
             for event in imported { calendar.delete(event, scope: .thisEvent) }
             wait("the imported events deleted") { !calendar.events.contains { $0.title.hasPrefix("Imported ") } }
+        }
+        step {
+            // A calendar's color, chosen from its ⋯ menu: shown at once, and kept by the provider.
+            let calendar = session.calendar
+            guard let family = calendar.calendars.first(where: { $0.id == "family" }) else { return check(false, "the Family calendar") }
+            calendar.setColor(family, to: "#8E24AA")
+            check(calendar.colorHex(of: family) == "#8E24AA", "a calendar’s new color shows at once")
+            // Display this only, then everything again.
+            calendar.showOnly(family)
+            check(calendar.calendars.filter(calendar.isVisible).map(\.id) == ["family"], "Display This Only hides the account’s other calendars")
+            for other in calendar.calendars where !calendar.isVisible(other) { calendar.toggle(other) }
+            let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
+            wait("the color kept by the provider") { read { await service?.keptSettings("family")?.colorHex } == "#8E24AA" }
+        }
+        step {
+            // Changed somewhere else afterwards, the calendar takes that color.
+            let calendar = session.calendar
+            wait("the provider's color noted") { calendar.preferences.colors["family"]?.provider != nil }
+        }
+        step {
+            let calendar = session.calendar
+            let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
+            _ = read { await service?.recolorElsewhere("family", to: "#039BE5") }
+            calendar.refreshQuietly()
+            wait("the color changed elsewhere") { calendar.calendars.first { $0.id == "family" }.map(calendar.colorHex(of:)) == "#039BE5" }
+        }
+        step {
+            check(session.calendar.preferences.colors["family"] == nil, "a color changed somewhere else replaces the one chosen here")
+        }
+        step {
+            // Settings ▸ Calendar: what the provider keeps goes to it, and new events start with the notifications chosen.
+            let calendar = session.calendar
+            guard let primary = calendar.calendars.first(where: { $0.id == "primary" }) else { return check(false, "the main calendar") }
+            Task {
+                guard var settings = try? await calendar.settings(for: primary) else { return }
+                settings.description = "Self-test description"
+                settings.eventReminders = [30, 1_440]
+                settings.allDayReminders = [AllDayReminder(daysBefore: 1, minuteOfDay: 17 * 60)]
+                settings.emailNotices = [.dailyAgenda]
+                try? await calendar.saveSettings(settings, for: primary)
+            }
+            let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
+            wait("the calendar’s settings saved") {
+                read { await service?.keptSettings("primary")?.description } == "Self-test description"
+                    && calendar.calendars.first { $0.id == "primary" }?.defaultReminders == [30, 1_440]
+            }
+        }
+        step {
+            let calendar = session.calendar
+            let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
+            let kept = read { await service?.keptSettings("primary") } ?? nil
+            check(kept?.eventReminders == [30, 1_440] && kept?.emailNotices == [.dailyAgenda], "a calendar’s settings go to its provider")
+            check(calendar.newDraft()?.reminders.map(\.minutes) == [30, 1_440], "new events start with its notifications")
+            check(calendar.newDraft(allDay: true)?.reminders.map(\.minutes) == [7 * 60], "and new all-day events with theirs (a day before at 5 PM)")
+            // Exporting it: a weekly event, with its second time deleted, goes once, as it is.
+            guard var draft = calendar.newDraft() else { return check(false, "a new event can be started") }
+            draft.title = "Self-test export"
+            draft.repeatRule = RepeatRule(frequency: .weekly, weekdays: [calendar.calendar.component(.weekday, from: draft.start)], end: .after(3))
+            Task {
+                do { try await calendar.save(draft) } catch { check(false, "saving a repeating event to export", "\(error)") }
+            }
+            wait("the weekly event to export") { calendar.events.filter { $0.title == "Self-test export" }.count == 3 }
+        }
+        step {
+            let calendar = session.calendar
+            let times = calendar.events.filter { $0.title == "Self-test export" }.sorted { $0.start < $1.start }
+            if let second = times[safe: 1] { calendar.delete(second, scope: .thisEvent) }
+            wait("its second time deleted") { calendar.events.filter { $0.title == "Self-test export" }.count == 2 }
+        }
+        step {
+            let calendar = session.calendar
+            guard let primary = calendar.calendars.first(where: { $0.id == "primary" }) else { return check(false, "the main calendar") }
+            Task { exportedCalendar = try? await calendar.exportDocument(for: primary) }
+            wait("the exported calendar") { exportedCalendar != nil }
+        }
+        step {
+            let calendar = session.calendar
+            let text = exportedCalendar ?? ""
+            check(text.hasPrefix("BEGIN:VCALENDAR") && text.components(separatedBy: "SUMMARY:Design review").count == 2,
+                  "exporting a calendar writes its events")
+            check(text.components(separatedBy: "SUMMARY:Self-test export").count == 2 && text.contains("EXDATE") && text.contains("UNTIL="),
+                  "a repeating event goes once, without the time deleted")
+            if let one = calendar.events.first(where: { $0.title == "Self-test export" }) { calendar.delete(one, scope: .allEvents) }
+            wait("the exported event deleted") { !calendar.events.contains { $0.title == "Self-test export" } }
         }
         step {
             let calendar = session.calendar

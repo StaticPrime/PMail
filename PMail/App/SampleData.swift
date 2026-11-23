@@ -402,9 +402,9 @@ enum SampleData {
     static func calendars(for account: Account) -> [CalendarInfo] {
         switch account.kind {
         case .google:
-            [CalendarInfo(id: "primary", name: account.name, colorHex: "#129EE0", isPrimary: true, nativeConference: .meet),
-             CalendarInfo(id: "family", name: "Family", colorHex: "#2FB57A", nativeConference: .meet),
-             CalendarInfo(id: "puppy", name: "Waffles", colorHex: "#F06B1F", nativeConference: .meet),
+            [CalendarInfo(id: "primary", name: account.name, colorHex: "#129EE0", isPrimary: true, nativeConference: .meet, defaultReminders: [10]),
+             CalendarInfo(id: "family", name: "Family", colorHex: "#2FB57A", nativeConference: .meet, defaultReminders: [10]),
+             CalendarInfo(id: "puppy", name: "Waffles", colorHex: "#F06B1F", nativeConference: .meet, defaultReminders: [10]),
              CalendarInfo(id: "holidays", name: "Holidays", colorHex: "#188038", isReadOnly: true, isOther: true)]
         case .microsoft:
             [CalendarInfo(id: "calendar", name: "Calendar", colorHex: "#3B5BDB", isPrimary: true, nativeConference: .teams),

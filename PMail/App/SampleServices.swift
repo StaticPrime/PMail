@@ -442,6 +442,45 @@ actor SampleCalendarService: CalendarService {
 
     nonisolated var canSubscribeToPeople: Bool { account.kind == .google || account.kind == .microsoft }
 
+    /// Each calendar's settings as the sample server keeps them.
+    private var settings: [String: CalendarSettings] = [:]
+
+    nonisolated func settingsSupport(for calendar: CalendarInfo) -> CalendarSettingsSupport {
+        guard !calendar.isReadOnly else { return CalendarSettingsSupport(color: account.kind == .google) }
+        return account.kind == .google
+            ? CalendarSettingsSupport(name: true, description: true, timeZone: true, color: true, eventReminders: true, emailNotices: true)
+            : CalendarSettingsSupport(name: true, color: true)
+    }
+
+    func loadSettings(for calendar: CalendarInfo) async throws -> CalendarSettings {
+        await pause()
+        if let kept = settings[calendar.id] { return kept }
+        let current = calendars.first { $0.id == calendar.id } ?? calendar
+        return CalendarSettings(name: current.name, description: "", timeZone: account.kind == .google ? "America/New_York" : nil,
+                                colorHex: current.colorHex, owner: calendar.isOther ? nil : "You", eventReminders: current.defaultReminders ?? [10],
+                                emailNotices: account.kind == .google ? [.changedEvents, .canceledEvents, .responses] : nil)
+    }
+
+    func saveSettings(_ new: CalendarSettings, for calendar: CalendarInfo) async throws {
+        await pause()
+        settings[calendar.id] = new
+        if let index = calendars.firstIndex(where: { $0.id == calendar.id }) {
+            let support = settingsSupport(for: calendar)
+            if support.name { calendars[index].name = new.name }
+            if support.eventReminders { calendars[index].defaultReminders = new.eventReminders }
+            calendars[index].colorHex = new.colorHex
+        }
+    }
+
+    /// Changes a calendar's color as if somewhere else had (for the self-test).
+    func recolorElsewhere(_ id: String, to hex: String) {
+        guard let index = calendars.firstIndex(where: { $0.id == id }) else { return }
+        calendars[index].colorHex = hex
+    }
+
+    /// A calendar's settings as kept (for the self-test).
+    func keptSettings(_ id: String) -> CalendarSettings? { settings[id] }
+
     /// Follows someone's calendar: one with a lunch every weekday, for anyone at example.com (others haven't shared).
     func subscribe(toCalendarOf email: String) async throws -> CalendarInfo {
         await pause()

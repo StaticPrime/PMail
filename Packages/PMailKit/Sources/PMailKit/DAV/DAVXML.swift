@@ -38,6 +38,7 @@ struct DAVProperty: Sendable, Hashable {
     static let addressData = DAVProperty(DAVNamespace.cardDAV, "address-data")
     static let calendarColor = DAVProperty(DAVNamespace.appleICal, "calendar-color")
     static let calendarOrder = DAVProperty(DAVNamespace.appleICal, "calendar-order")
+    static let calendarDescription = DAVProperty(DAVNamespace.calDAV, "calendar-description")
     static let getCTag = DAVProperty(DAVNamespace.calendarServer, "getctag")
 }
 
@@ -186,6 +187,17 @@ enum DAVRequestBody {
         let events = "<c:comp-filter name=\"VEVENT\">\(match)</c:comp-filter>"
         let filter = "<c:filter><c:comp-filter name=\"VCALENDAR\">\(events)</c:comp-filter></c:filter>"
         return document("c:calendar-query", properties: [.getETag, .calendarData], inner: filter)
+    }
+
+    /// A PROPPATCH setting properties to text values.
+    static func propertyUpdate(_ values: [(DAVProperty, String)]) -> Data {
+        let declarations = DAVNamespace.prefixes.map { " xmlns:\($0.prefix)=\"\($0.namespace)\"" }.joined()
+        let props = values.map { property, value -> String in
+            let name = DAVNamespace.prefixes.first { $0.namespace == property.namespace }.map { "\($0.prefix):\(property.name)" } ?? property.name
+            return "<\(name)>\(escape(value))</\(name)>"
+        }.joined()
+        let xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<d:propertyupdate\(declarations)><d:set><d:prop>\(props)</d:prop></d:set></d:propertyupdate>"
+        return Data(xml.utf8)
     }
 
     static func calendarMultiget(_ hrefs: [String]) -> Data {

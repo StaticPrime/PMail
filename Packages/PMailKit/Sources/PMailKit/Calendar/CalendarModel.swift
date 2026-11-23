@@ -19,9 +19,12 @@ public struct CalendarInfo: Codable, Sendable, Identifiable, Hashable {
     /// A calendar the account follows (another person's, or one from a web address) and can stop following; nil for
     /// any other.
     public var canUnsubscribe: Bool?
+    /// The notifications new timed events on it get, in minutes before they start, where the provider keeps them for
+    /// the calendar (nil where it doesn't).
+    public var defaultReminders: [Int]?
 
     public init(id: String, name: String, colorHex: String = "#1A73E8", isPrimary: Bool = false, isReadOnly: Bool = false,
-                nativeConference: Conference.Kind? = nil, isOther: Bool = false, canUnsubscribe: Bool = false) {
+                nativeConference: Conference.Kind? = nil, isOther: Bool = false, canUnsubscribe: Bool = false, defaultReminders: [Int]? = nil) {
         self.id = id
         self.name = name
         self.colorHex = colorHex
@@ -30,6 +33,7 @@ public struct CalendarInfo: Codable, Sendable, Identifiable, Hashable {
         self.nativeConference = nativeConference
         self.isOther = isOther
         self.canUnsubscribe = canUnsubscribe ? true : nil
+        self.defaultReminders = defaultReminders
     }
 }
 
@@ -459,6 +463,17 @@ public protocol CalendarService: AnyObject, Sendable {
     /// Ask for a cancellation before deleting the event.
     func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String?
 
+    // A calendar's settings (its pane in Settings ▸ Calendar). What the provider doesn't keep, PMail keeps on this Mac.
+
+    /// What the provider keeps of a calendar's settings.
+    func settingsSupport(for calendar: CalendarInfo) -> CalendarSettingsSupport
+
+    /// A calendar's settings as the provider has them.
+    func loadSettings(for calendar: CalendarInfo) async throws -> CalendarSettings
+
+    /// Saves what the provider keeps of a calendar's settings.
+    func saveSettings(_ settings: CalendarSettings, for calendar: CalendarInfo) async throws
+
     // Subscriptions: other calendars the account follows, listed under "Other calendars".
 
     /// Whether another person's calendar can be followed by their address.
@@ -488,6 +503,14 @@ extension CalendarService {
     public var takesInEmailedInvitations: Bool { false }
 
     public var canSubscribeToPeople: Bool { false }
+
+    public func settingsSupport(for calendar: CalendarInfo) -> CalendarSettingsSupport { CalendarSettingsSupport() }
+
+    public func loadSettings(for calendar: CalendarInfo) async throws -> CalendarSettings {
+        CalendarSettings(name: calendar.name, colorHex: calendar.colorHex)
+    }
+
+    public func saveSettings(_ settings: CalendarSettings, for calendar: CalendarInfo) async throws {}
 
     public func subscribe(toCalendarOf email: String) async throws -> CalendarInfo {
         throw PMailError.notSupported("This account can’t follow other people’s calendars.")

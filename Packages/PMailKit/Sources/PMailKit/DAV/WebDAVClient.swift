@@ -112,6 +112,17 @@ struct WebDAVClient: Sendable {
         _ = try await send("DELETE", to: url, headers: headers)
     }
 
+    /// Sets properties of a resource (a calendar's name, description and color). The server answers for each one; if
+    /// it refused any, it set none (the change is all or nothing), and that's an error.
+    func proppatch(_ url: URL, _ values: [(DAVProperty, String)]) async throws {
+        let response = try await send("PROPPATCH", to: url, headers: ["Content-Type": "application/xml; charset=utf-8"],
+                                      body: DAVRequestBody.propertyUpdate(values))
+        guard let answer = try? DAVMultistatus(parsing: response.body, baseURL: response.url), let result = answer.responses.first else { return }
+        guard values.allSatisfy({ result.property($0.0) != nil }) else {
+            throw PMailError.notSupported("The server didn’t accept these settings, so it kept the ones it had.")
+        }
+    }
+
     /// A resource's current ETag, for servers that don't send one back when saving.
     func etag(of url: URL) async throws -> String? {
         try await propfind(url, depth: 0, properties: [.getETag]).responses.lazy.compactMap { $0.property(.getETag)?.trimmedText }.first

@@ -38,11 +38,14 @@ import Testing
         }
         let calendars = try await service(transport).loadCalendars()
         #expect(calendars == [
-            CalendarInfo(id: "jamie@gmail.com", name: "jamie@gmail.com", colorHex: "#9FE1E7", isPrimary: true, nativeConference: .meet),
-            CalendarInfo(id: "family123@group.calendar.google.com", name: "Rivera family", colorHex: "#F83A22", nativeConference: .meet),
+            CalendarInfo(id: "jamie@gmail.com", name: "jamie@gmail.com", colorHex: "#9FE1E7", isPrimary: true, nativeConference: .meet,
+                         defaultReminders: [10]),
+            CalendarInfo(id: "family123@group.calendar.google.com", name: "Rivera family", colorHex: "#F83A22", nativeConference: .meet,
+                         defaultReminders: []),
             CalendarInfo(id: "en.usa#holiday@group.v.calendar.google.com", name: "Holidays in United States", colorHex: "#16A765",
-                         isReadOnly: true, isOther: true, canUnsubscribe: true),
-            CalendarInfo(id: "alex@example.com", name: "Alex Kim", colorHex: "#CABDBF", isReadOnly: true, isOther: true, canUnsubscribe: true),
+                         isReadOnly: true, isOther: true, canUnsubscribe: true, defaultReminders: []),
+            CalendarInfo(id: "alex@example.com", name: "Alex Kim", colorHex: "#CABDBF", isReadOnly: true, isOther: true, canUnsubscribe: true,
+                         defaultReminders: []),
         ])
         #expect(transport.requests.map { $0.query("pageToken") } == [nil, "p2"])
     }

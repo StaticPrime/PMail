@@ -297,6 +297,13 @@ enum WebText {
 
 /// Colors as "#RRGGBB".
 enum WebColor {
+    /// Black or white, whichever reads better on a background color ("#RRGGBB").
+    static func textColor(on hex: String) -> String {
+        let value = Int(hex.trimmingCharacters(in: CharacterSet(charactersIn: "#")).prefix(6), radix: 16) ?? 0
+        let (red, green, blue) = (Double((value >> 16) & 0xFF), Double((value >> 8) & 0xFF), Double(value & 0xFF))
+        return (0.299 * red + 0.587 * green + 0.114 * blue) > 160 ? "#000000" : "#ffffff"
+    }
+
     /// "#16a766" or "16A766" as "#16A766"; nil for anything that isn't a six-digit hex color.
     static func hex(_ text: String?) -> String? {
         guard var value = text?.trimmingCharacters(in: .whitespaces) else { return nil }

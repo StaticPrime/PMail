@@ -61,6 +61,52 @@ public actor MicrosoftCalendarService: CalendarService {
         return items.compactMap { Self.calendar(from: $0, ownerAddress: me) } + (await followed.calendars())
     }
 
+    // MARK: Settings
+
+    /// Outlook keeps a calendar's name (the account's own, but not its default calendar's, which Outlook doesn't let
+    /// anyone rename) and color, from its own set of colors (the nearest to the one chosen; PMail shows the one chosen).
+    public nonisolated func settingsSupport(for calendar: CalendarInfo) -> CalendarSettingsSupport {
+        guard FollowedCalendars.email(from: calendar.id) == nil else { return CalendarSettingsSupport() }
+        return CalendarSettingsSupport(name: !calendar.isReadOnly && !calendar.isOther && !calendar.isPrimary, color: true)
+    }
+
+    public func loadSettings(for calendar: CalendarInfo) async throws -> CalendarSettings {
+        guard FollowedCalendars.email(from: calendar.id) == nil else { return CalendarSettings(name: calendar.name, colorHex: calendar.colorHex) }
+        let json = try await client.get(Self.url("calendars/\(WebURL.segment(calendar.id))", [("$select", "name,hexColor,owner,canEdit")]),
+                                        headers: Self.headers)
+        let owner = calendar.isOther ? (json["owner"]["name"].nonEmpty ?? json["owner"]["address"].nonEmpty) : "You"
+        return CalendarSettings(name: json["name"].nonEmpty ?? calendar.name, colorHex: WebColor.hex(json["hexColor"].string) ?? calendar.colorHex,
+                                owner: owner)
+    }
+
+    public func saveSettings(_ settings: CalendarSettings, for calendar: CalendarInfo) async throws {
+        guard FollowedCalendars.email(from: calendar.id) == nil else { return }
+        var body: [String: JSONValue] = ["color": .string(Self.nearestColorName(settings.colorHex))]
+        if settingsSupport(for: calendar).name, settings.name != calendar.name { body["name"] = .string(settings.name) }
+        _ = try await client.patch(Self.url("calendars/\(WebURL.segment(calendar.id))"), .object(body), headers: Self.headers)
+    }
+
+    /// Outlook's calendar colors, roughly.
+    static let colorNames: [(name: String, hex: String)] = [
+        ("lightBlue", "#5B9BD5"), ("lightGreen", "#70AD47"), ("lightOrange", "#ED7D31"), ("lightGray", "#A5A5A5"), ("lightYellow", "#FFC000"),
+        ("lightTeal", "#4BACC6"), ("lightPink", "#E36C9F"), ("lightBrown", "#A5643A"), ("lightRed", "#E74856"),
+    ]
+
+    /// The Outlook color nearest a color.
+    static func nearestColorName(_ hex: String) -> String {
+        func parts(_ hex: String) -> (Double, Double, Double) {
+            let value = Int(hex.trimmingCharacters(in: CharacterSet(charactersIn: "#")).prefix(6), radix: 16) ?? 0
+            return (Double((value >> 16) & 0xFF), Double((value >> 8) & 0xFF), Double(value & 0xFF))
+        }
+        let wanted = parts(hex)
+        return colorNames.min { first, second in
+            let a = parts(first.hex), b = parts(second.hex)
+            let da = pow(a.0 - wanted.0, 2) + pow(a.1 - wanted.1, 2) + pow(a.2 - wanted.2, 2)
+            let db = pow(b.0 - wanted.0, 2) + pow(b.1 - wanted.1, 2) + pow(b.2 - wanted.2, 2)
+            return da < db
+        }?.name ?? "auto"
+    }
+
     // MARK: Subscriptions
 
     public nonisolated var canSubscribeToPeople: Bool { true }

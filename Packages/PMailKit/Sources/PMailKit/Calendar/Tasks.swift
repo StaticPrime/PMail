@@ -82,6 +82,22 @@ public final class CalendarWithTasks: CalendarService {
         try await calendars.respond(to: event, with: response)
     }
 
+    // MARK: Settings
+
+    public func settingsSupport(for calendar: CalendarInfo) -> CalendarSettingsSupport {
+        calendar.isTaskList || CalendarFeeds.isFeed(calendar.id) ? CalendarSettingsSupport() : calendars.settingsSupport(for: calendar)
+    }
+
+    public func loadSettings(for calendar: CalendarInfo) async throws -> CalendarSettings {
+        if calendar.isTaskList || CalendarFeeds.isFeed(calendar.id) { return CalendarSettings(name: calendar.name, colorHex: calendar.colorHex) }
+        return try await calendars.loadSettings(for: calendar)
+    }
+
+    public func saveSettings(_ settings: CalendarSettings, for calendar: CalendarInfo) async throws {
+        guard !calendar.isTaskList, !CalendarFeeds.isFeed(calendar.id) else { return }
+        try await calendars.saveSettings(settings, for: calendar)
+    }
+
     // MARK: Subscriptions
 
     public var canSubscribeToPeople: Bool { calendars.canSubscribeToPeople }

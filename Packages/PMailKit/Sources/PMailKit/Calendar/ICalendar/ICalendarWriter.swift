@@ -47,6 +47,77 @@ struct ICalendarWriter {
         return calendar
     }
 
+    // MARK: Exporting
+
+    /// A repeating series as it is, for exporting: one VEVENT that repeats from the first of the times given, with the
+    /// times that were moved or changed as overrides, and the times its rule gives before `end` that weren't given
+    /// (they were deleted) left out with EXDATE. Times before the first one given aren't known, so a rule that ends
+    /// after so many times (COUNT) ends at the last time given instead. Nil when the times don't fit a rule PMail reads.
+    func exportedSeries(_ occurrences: [CalendarEvent], uid: String, through end: Date) -> ICalendarComponent? {
+        let sorted = occurrences.sorted { ($0.occurrenceDate ?? $0.start) < ($1.occurrenceDate ?? $1.start) }
+        guard let first = sorted.first, let last = sorted.last,
+              let rules = sorted.first(where: { !recurrenceLines($0.recurrence).isEmpty })?.recurrence else { return nil }
+        // The series: the first time at its original start, with the details of the first time that wasn't moved.
+        let template = sorted.first { ($0.occurrenceDate ?? $0.start) == $0.start } ?? first
+        var series = template
+        series.start = first.occurrenceDate ?? first.start
+        if series.isAllDay {
+            var days = Calendar(identifier: .gregorian)
+            days.timeZone = localTimeZone
+            let length = days.dateComponents([.day], from: days.startOfDay(for: template.start), to: days.startOfDay(for: template.end)).day ?? 1
+            series.end = days.date(byAdding: .day, value: max(length, 1), to: days.startOfDay(for: series.start)) ?? series.start.addingTimeInterval(86_400)
+        } else {
+            series.end = series.start.addingTimeInterval(template.end.timeIntervalSince(template.start))
+        }
+        series.recurrence = rules.map { endingAt(last.occurrenceDate ?? last.start, rule: $0, allDay: series.isAllDay) }
+        var calendar = newCalendar(for: series, uid: uid)
+        let reader = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
+        guard let written = reader.series.first, written.isRecurring, let master = written.master,
+              let timing = reader.timing(of: master) else { return nil }
+        var given = Set<Int64>()
+        var changed: [CalendarEvent] = []
+        for occurrence in sorted {
+            var lookup = occurrence
+            lookup.id = "export"
+            lookup.uid = uid
+            lookup.seriesID = uid
+            guard let key = reader.key(for: lookup, in: written), reader.generates(written, key: key),
+                  let instance = reader.instance(in: written, key: key) else { return nil }
+            given.insert(key)
+            let moved = ICalendarZone.seconds(of: occurrence.start) != instance.start || ICalendarZone.seconds(of: occurrence.end) != instance.end
+            if moved || Field.allCases.contains(where: { !isSame($0, template, occurrence) }) { changed.append(lookup) }
+        }
+        // The rule's times that weren't given were deleted. The last day is left alone: where a window ends, the
+        // provider and the rule may disagree about a time on its edge.
+        let lower = timing.zone.instant(from: timing.start.wall)
+        let upper = max(ICalendarZone.seconds(of: end) - 86_400, lower + 1)
+        let missing = reader.instances(of: written, in: lower..<upper).compactMap(\.key).filter { !given.contains($0) }
+        if !missing.isEmpty, let index = calendar.components.firstIndex(where: { isMaster($0, of: written) }) {
+            let properties = calendar.components[index].properties
+            let position = properties.lastIndex { ["RRULE", "RDATE", "EXDATE", "EXRULE"].contains($0.name) }.map { $0 + 1 } ?? properties.count
+            calendar.components[index].properties.insert(contentsOf: missing.map { recurrenceValue(key: $0, timing: timing).line("EXDATE") },
+                                                         at: position)
+        }
+        for occurrence in changed { _ = try? update(&calendar, with: occurrence, scope: .thisEvent) }
+        finish(&calendar)
+        return calendar
+    }
+
+    /// A rule that ends after so many times (COUNT) made to end at a time instead (UNTIL): the last time's original
+    /// start, in UTC, or its day for all-day events. Other lines as they are.
+    private func endingAt(_ last: Date, rule text: String, allDay: Bool) -> String {
+        guard var line = recurrenceLines([text]).first, line.name == "RRULE" else { return text }
+        var parts = line.value.split(separator: ";").map(String.init)
+        guard parts.contains(where: { $0.uppercased().hasPrefix("COUNT=") }) else { return text }
+        parts.removeAll { $0.uppercased().hasPrefix("COUNT=") || $0.uppercased().hasPrefix("UNTIL=") }
+        let seconds = ICalendarZone.seconds(of: last)
+        let until = allDay ? WallClockTime(dayNumber: localZone.wall(fromInstant: seconds).dayNumber).dateText
+                           : WallClockTime(seconds: seconds).dateTimeText + "Z"
+        parts.append("UNTIL=" + until)
+        line.value = parts.joined(separator: ";")
+        return line.serialized
+    }
+
     // MARK: Changes
 
     /// Saves an edit of an event into its resource: the whole series, or one occurrence (which gets an override

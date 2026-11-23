@@ -262,6 +262,34 @@ public actor CalDAVCalendarService: CalendarService {
         _ = try await save(calendar, to: url, ifMatch: current.etag)
     }
 
+    // MARK: Settings
+
+    /// The account's own calendars keep their name, description and color on the server.
+    public nonisolated func settingsSupport(for calendar: CalendarInfo) -> CalendarSettingsSupport {
+        let owns = !calendar.isReadOnly && !calendar.isOther
+        return CalendarSettingsSupport(name: owns, description: owns, color: owns)
+    }
+
+    public func loadSettings(for calendar: CalendarInfo) async throws -> CalendarSettings {
+        let collection = try await collection(calendar.id)
+        let answer = try await client.propfind(collection.url, depth: 0, properties: [.displayName, .calendarDescription, .calendarColor])
+        let found = answer.responses.first { $0.href == calendar.id } ?? answer.responses.first
+        let name = found?.property(.displayName)?.trimmedText ?? ""
+        return CalendarSettings(name: name.isEmpty ? calendar.name : name,
+                                description: found?.property(.calendarDescription)?.text ?? "",
+                                colorHex: found?.property(.calendarColor).flatMap { ICalendarColor.normalizedHex($0.trimmedText) } ?? calendar.colorHex,
+                                owner: calendar.isOther ? nil : "You")
+    }
+
+    public func saveSettings(_ settings: CalendarSettings, for calendar: CalendarInfo) async throws {
+        guard settingsSupport(for: calendar).name else { return }
+        let collection = try await writableCollection(calendar.id)
+        try await client.proppatch(collection.url, [(.displayName, settings.name), (.calendarDescription, settings.description),
+                                                    (.calendarColor, settings.colorHex.uppercased() + "FF")])
+        collections[calendar.id]?.info.name = settings.name
+        collections[calendar.id]?.info.colorHex = settings.colorHex
+    }
+
     // MARK: Invitations by email
 
     /// The server may not take in invitations that come by email (iCloud doesn't, unless it's set to), so PMail does.
