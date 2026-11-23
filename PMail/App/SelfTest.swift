@@ -86,6 +86,8 @@ enum SelfTest {
     /// The invitation the self-test takes into a calendar, and the ID of its email.
     static var picnic: Invitation?
     static var picnicMessage: String?
+    /// Unread messages with the picnic's title that answering it must leave unread.
+    static var picnicDecoys: [String] = []
 
     /// An emailed invitation's iCalendar text, as another calendar would send it.
     static func invitation(uid: String, title: String, start: Date, end: Date, organizer: String, guest: String,
@@ -482,6 +484,16 @@ enum SelfTest {
             picnicMessage = read {
                 await mailService?.deliver(from: olivia, subject: "Invitation: Self-test picnic", text: "Bring a blanket!", attachments: [file], at: now)
             } ?? nil
+            // Another invitation with the same title (a different event), and a message about it with no invitation.
+            let other = Self.invitation(uid: "another-picnic@example.com", title: "Self-test picnic", start: start.addingTimeInterval(7 * 86_400),
+                                        end: start.addingTimeInterval(7 * 86_400 + 7_200), organizer: "olivia.chen@example.com",
+                                        guest: session.account.email)
+            let otherFile = Attachment(id: "invite", filename: "invite.ics", mimeType: "text/calendar", size: other.utf8.count, data: Data(other.utf8))
+            picnicDecoys = [
+                read { await mailService?.deliver(from: olivia, subject: "Invitation: Self-test picnic", text: "Next week too!", attachments: [otherFile],
+                                                  at: now) } ?? nil,
+                read { await mailService?.deliver(from: olivia, subject: "Re: Self-test picnic", text: "I'll bring lemonade.", at: now) } ?? nil,
+            ].compactMap { $0 }
             let calendar = session.calendar
             Task { await calendar.takeIn(invitation) }
             wait("the emailed invitation on the calendar") {
@@ -506,6 +518,13 @@ enum SelfTest {
                   "answering it emails the organizer", last?.subject ?? "nothing sent")
             let message = picnicMessage ?? ""
             check(read { await mailService?.summary(id: message)?.isUnread } == false, "and marks the invitation email read")
+            let decoys = picnicDecoys
+            let stillUnread = read { () async -> Bool in
+                var all = true
+                for id in decoys where await mailService?.summary(id: id)?.isUnread != true { all = false }
+                return all
+            }
+            check(decoys.count == 2 && stillUnread == true, "but not another event's invitation with the same title, or a message about it with none")
             // The organizer calls it off: the cancellation takes it off the calendar.
             let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
             guard let picnic else { return }
