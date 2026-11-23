@@ -885,8 +885,8 @@ final class CalendarViewModel {
             throw error
         }
         changeCount += 1
-        // Invitations PMail emails: all of them on a calendar without a server, else those to guests the server doesn't
-        // invite (iCloud's, for meetings saved from PMail).
+        // Invitations PMail emails: all of them on a calendar without a server, else those to guests a calendar server on
+        // an IMAP/POP account doesn't invite. Google, Microsoft and iCloud send every one of theirs.
         if service.emailsInvitations || saved.attendees.contains(where: \.invitedByEmail) || (draft.original?.attendees.contains(where: \.invitedByEmail) ?? false) {
             Task { await emailInvitations(for: saved, before: draft.original) }
         }

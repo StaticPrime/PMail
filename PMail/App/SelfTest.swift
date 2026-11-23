@@ -600,8 +600,8 @@ enum SelfTest {
             service?.emailing.withLock { $0 = false }
         }
         step {
-            // A calendar server that keeps meetings without inviting anyone (iCloud, for meetings saved from PMail): PMail
-            // emails the invitation, and the cancellation, to those guests itself.
+            // A calendar server on an IMAP/POP account that keeps meetings without inviting anyone: PMail emails the
+            // invitation, and the cancellation, to those guests itself. (Google, Microsoft and iCloud send their own.)
             let calendar = session.calendar
             let mailService = sampleMail
             ((session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService)?.invitesNoOne.withLock { $0 = true }

@@ -90,8 +90,10 @@ struct LiveServiceFactory: ServiceFactory {
                               labelBook: labelBook, sorter: sorter)
         // Calendars and contacts sign in with the Apple Account (iCloud) or the account's own user name.
         let serverCredential = Credential.password(username: account.serverLoginName ?? incoming.username, password: password)
+        // iCloud sends its meetings' invitations itself, as Google and Microsoft do; PMail invites guests only for the
+        // other accounts (on a calendar kept on this Mac, or those a calendar server doesn't).
         let calendars: any CalendarService = account.calendarServer.map {
-            CalDAVCalendarService(serverURL: $0, credential: serverCredential, ownerEmail: account.email)
+            CalDAVCalendarService(serverURL: $0, credential: serverCredential, ownerEmail: account.email, providerInvites: account.kind == .icloud)
         } ?? LocalCalendarService(folder: place.appendingPathComponent("Calendar", isDirectory: true), ownerEmail: account.email)
         // Tasks are kept on this Mac: these servers keep none PMail can reach.
         let calendar = calendar(calendars, tasks: LocalTaskService(file: place.appendingPathComponent(LocalTaskService.fileName)), for: account)

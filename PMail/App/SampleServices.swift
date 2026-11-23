@@ -575,7 +575,7 @@ actor SampleCalendarService: CalendarService {
         if saved.type == .event || account.kind != .google || event.calendarID != "primary" {
             (saved.declinesInvitations, saved.declineMessage, saved.declinesExisting) = (false, nil, false)
         }
-        // Inviting no one itself, as iCloud for meetings saved from PMail: the guests are PMail's to invite by email.
+        // Inviting no one itself, as some calendar servers on IMAP/POP accounts: the guests are PMail's to invite by email.
         if invitesNoOne.withLock({ $0 }) {
             for index in saved.attendees.indices where !saved.attendees[index].address.isSameMailbox(as: account.email) {
                 saved.attendees[index].invitedByEmail = true
@@ -584,7 +584,7 @@ actor SampleCalendarService: CalendarService {
         return saved
     }
 
-    /// Keeps meetings without sending their invitations, as iCloud does for meetings saved from PMail (for the
+    /// Keeps meetings without sending their invitations, as some calendar servers on IMAP/POP accounts do (for the
     /// self-test).
     nonisolated let invitesNoOne = OSAllocatedUnfairLock(initialState: false)
 

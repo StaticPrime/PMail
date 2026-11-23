@@ -70,6 +70,54 @@ struct CalDAVInvitationsByEmailTests {
         #expect(saved.attendees.allSatisfy { !$0.invitedByEmail })
     }
 
+    // MARK: iCloud, which sends its own
+
+    private func iCloud(_ transport: StubTransport) throws -> CalDAVCalendarService {
+        CalDAVCalendarService(serverURL: try #require(URL(string: "https://caldav.example.com/")), credential: DAVStub.password,
+                              ownerEmail: "pug@me.com", transport: transport, timeZone: ICS.timeZone("America/New_York"), providerInvites: true)
+    }
+
+    @Test func iCloudSendsEveryInvitationItself() async throws {
+        let server = Server(schedules: false)
+        let transport = serve(server)
+        let service = try iCloud(transport)
+        let saved = try await service.create(Self.meeting(), addingConference: false)
+        #expect(server.saves == 1 && !server.text.contains("SCHEDULE-AGENT"), "saved once, every guest left to iCloud")
+        #expect(saved.attendees.allSatisfy { !$0.invitedByEmail })
+        #expect(try await service.invitationText(for: saved, method: .request, attendees: nil) == nil, "PMail never emails one")
+        #expect(try await service.invitationText(for: saved, method: .cancel, attendees: nil) == nil)
+        #expect(transport.sent("GET", "/123456/calendars/work/").count == 1, "read back once, only to note how iCloud kept it")
+    }
+
+    @Test func guestsAnEarlierPMailTookOverGoBackToICloud() async throws {
+        let server = Server(schedules: false)
+        let transport = serve(server)
+        // Taken over by the build that emailed iCloud's invitations itself.
+        _ = try await CalDAVTests.service(transport).create(Self.meeting(), addingConference: false)
+        #expect(server.text.contains("SCHEDULE-AGENT=CLIENT"))
+        let service = try iCloud(transport)
+        var meeting = try #require(try await service.loadEvents(in: ["/123456/calendars/work/"], from: ICS.moment("2026-11-24 00:00"),
+                                                                 to: ICS.moment("2026-11-27 00:00")).first)
+        meeting.title = "Planning (moved room)"
+        _ = try await service.update(meeting, scope: .thisEvent, addingConference: false)
+        #expect(!server.text.contains("SCHEDULE-AGENT"), "iCloud invites them again")
+        // A guest's emailed answer is iCloud's to take in.
+        let saves = server.saves
+        let reply = ICS.calendar("""
+        METHOD:REPLY
+        BEGIN:VEVENT
+        UID:planning@example.com
+        DTSTAMP:20261123T120000Z
+        DTSTART:20261125T150000Z
+        DTEND:20261125T160000Z
+        ORGANIZER:mailto:pug@me.com
+        ATTENDEE;PARTSTAT=ACCEPTED:mailto:zoe@example.com
+        END:VEVENT
+        """)
+        try await service.receive(try #require(Invitation.read(Data(reply.utf8), ownerEmail: "pug@me.com")))
+        #expect(server.saves == saves)
+    }
+
     @Test func aGuestsEmailedAnswerGoesOnTheirLine() async throws {
         let server = Server(schedules: false)
         let transport = serve(server)
