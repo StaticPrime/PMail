@@ -994,22 +994,26 @@ final class CalendarViewModel {
         }
     }
 
-    func respond(to event: CalendarEvent, with response: AttendeeResponse) {
-        respond(to: event, with: response, comment: nil, automatically: false)
+    /// Answers an invitation by hand: one time of a repeating meeting, or all of them.
+    func respond(to event: CalendarEvent, with response: AttendeeResponse, scope: RecurrenceScope) {
+        respond(to: event, with: response, comment: nil, scope: scope, automatically: false)
     }
 
-    /// Answers an invitation: on the calendar at once, then through the provider, with a message for the organizer
-    /// where one's given. Answered by hand, its email is marked read; an answer PMail gave on its own leaves it unread,
-    /// so it's still seen.
-    func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, automatically: Bool) {
-        if let index = events.firstIndex(where: { $0.id == event.id }) { events[index].myResponse = response }
+    /// Answers an invitation (one time of a repeating meeting, or all of them): on the calendar at once, then through
+    /// the provider, with a message for the organizer where one's given. Answered by hand, its email is marked read; an
+    /// answer PMail gave on its own leaves it unread, so it's still seen.
+    func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope, automatically: Bool) {
+        let series = scope == .allEvents ? event.seriesID : nil
+        for index in events.indices where events[index].id == event.id || (series != nil && events[index].seriesID == series) {
+            events[index].myResponse = response
+        }
         changeCount += 1
         let service = self.service
-        let later = CalendarChange.respond(event, response: response)
+        let later = CalendarChange.answer(event, response: response, scope: scope)
         Task {
             if waits(event.id), await keep(later) { return }
             do {
-                try await service.respond(to: event, with: response, comment: comment)
+                try await service.respond(to: event, with: response, comment: comment, scope: scope)
                 changeCount += 1
                 // Answered here, the invitation email needn't wait unread.
                 if !automatically, let mailModel, event.organizer.map({ !$0.isSameMailbox(as: account.email) }) ?? false {
@@ -1018,7 +1022,7 @@ final class CalendarViewModel {
                 // The answer goes to the organizer by email when no server sends it (a calendar kept on this Mac, or
                 // an invitation PMail took in from an email).
                 if service.takesInEmailedInvitations, let organizer = event.organizer, !organizer.isSameMailbox(as: account.email),
-                   var reply = try? await service.invitationText(for: event, method: .reply, attendees: nil) {
+                   var reply = try? await service.replyText(for: event, response: response, scope: scope) {
                     if let comment { reply = InvitationText.withComment(reply, comment: comment) }
                     mailer?.send(.reply, text: reply, about: event, to: [organizer], answer: response, note: comment)
                 }
@@ -1064,6 +1068,8 @@ final class CalendarViewModel {
     /// PMail for a calendar without one, tells the organizer); a calendar without a server takes the invitation in
     /// first; otherwise the answer goes to the organizer by email.
     func answer(_ invitation: Invitation, with response: AttendeeResponse) {
+        // An invitation to a repeating meeting is answered for all of it; one for a single time of it, for that time.
+        let scope: RecurrenceScope = invitation.event.recurrence.isEmpty ? .thisEvent : .allEvents
         Task {
             // The calendar's copy is brought up to this invitation first (added, or updated when this is newer), so the
             // answer goes on the version it's for.
@@ -1078,12 +1084,12 @@ final class CalendarViewModel {
                     }
                 }
                 if let event = await event(withUID: invitation.uid, near: invitation.event, fresh: true) {
-                    respond(to: event, with: response)
+                    respond(to: event, with: response, scope: scope)
                     reload()
                     return
                 }
             } else if let event = await event(withUID: invitation.uid, near: invitation.event) {
-                return respond(to: event, with: response)
+                return respond(to: event, with: response, scope: scope)
             }
             guard let organizer = invitation.organizer,
                   let reply = InvitationText.reply(to: invitation.text, from: account.address, response: response) else {

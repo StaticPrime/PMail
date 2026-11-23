@@ -322,6 +322,54 @@ struct ICalendarWriter {
         return !calendar.components.contains { $0.name == "VEVENT" }
     }
 
+    /// Sets the owner's answer on one time of a repeating event (`thisEvent`): in that time's override, made from the
+    /// series as it is then when there's none yet, leaving the rest of the series as it was. The whole series, or an
+    /// event that doesn't repeat, is answered on every VEVENT.
+    func respond(_ response: AttendeeResponse, to event: CalendarEvent, in calendar: inout ICalendarComponent, scope: RecurrenceScope) throws {
+        guard scope == .thisEvent else { return try respond(response, to: event, in: &calendar) }
+        let reader = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
+        guard let series = reader.series(for: event) else { throw PMailError.notFound }
+        guard series.isRecurring, let key = reader.key(for: event, in: series),
+              let masterIndex = calendar.components.firstIndex(where: { isMaster($0, of: series) }),
+              let timing = reader.timing(of: calendar.components[masterIndex]) else {
+            return try respond(response, to: event, in: &calendar)
+        }
+        let notInvited = PMailError.notSupported("You aren’t on this event’s guest list, so there’s no invitation to answer.")
+        if let index = calendar.components.firstIndex(where: { isOverride($0, of: series, key: key, reader: reader) }) {
+            var override = calendar.components[index]
+            guard setOwnerResponse(response, in: &override) else { throw notInvited }
+            stamp(&override, significant: false)
+            calendar.components[index] = override
+        } else {
+            guard let instance = reader.instance(in: series, key: key) else { throw PMailError.notFound }
+            let master = calendar.components[masterIndex]
+            var override = master
+            override.properties.removeAll { ["RRULE", "RDATE", "EXDATE", "EXRULE", "RECURRENCE-ID"].contains($0.name) }
+            let position = override.properties.firstIndex { $0.name == "DTSTART" } ?? override.properties.count
+            override.properties.insert(recurrenceValue(key: key, timing: timing).line("RECURRENCE-ID"), at: position)
+            var then = reader.fields(of: master, calendarID: event.calendarID)
+            then.start = Date(timeIntervalSince1970: TimeInterval(instance.start))
+            then.end = Date(timeIntervalSince1970: TimeInterval(instance.end))
+            writeTimes(of: then, form: timeForm(for: then, existing: timing.start, repeats: false, resolver: reader.resolver), into: &override)
+            guard setOwnerResponse(response, in: &override) else { throw notInvited }
+            stamp(&override, significant: false)
+            let last = calendar.components.lastIndex { belongs($0, to: series) } ?? masterIndex
+            calendar.components.insert(override, at: last + 1)
+        }
+        finish(&calendar)
+    }
+
+    /// The calendar with just one time of a repeating event (its override) and its time zones, for answering that time
+    /// alone. Nil when the event doesn't repeat or that time has no override.
+    func occurrenceOnly(of event: CalendarEvent, in calendar: ICalendarComponent) -> ICalendarComponent? {
+        let reader = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
+        guard let series = reader.series(for: event), series.isRecurring, let key = reader.key(for: event, in: series),
+              let override = calendar.components.first(where: { isOverride($0, of: series, key: key, reader: reader) }) else { return nil }
+        var only = calendar
+        only.components = calendar.components.filter { $0.name == "VTIMEZONE" } + [override]
+        return only
+    }
+
     /// Sets the owner's answer on every VEVENT of the event (the whole series), as the PARTSTAT of their ATTENDEE.
     func respond(_ response: AttendeeResponse, to event: CalendarEvent, in calendar: inout ICalendarComponent) throws {
         let reader = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)

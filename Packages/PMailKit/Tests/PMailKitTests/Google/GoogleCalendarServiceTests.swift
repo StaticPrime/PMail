@@ -348,7 +348,7 @@ import Testing
         transport.on("PATCH", "\(Self.events)/meet1") { _ in .json(#"{"id": "meet1"}"#) }
         let event = CalendarEvent(id: "meet1", calendarID: Self.primary, start: Date(), end: Date())
         let calendar = service(transport)
-        try await calendar.respond(to: event, with: .declined, comment: "  I have another event at this time. ")
+        try await calendar.respond(to: event, with: .declined, comment: "  I have another event at this time. ", scope: .thisEvent)
         try await calendar.respond(to: event, with: .accepted)
         let patches = transport.sent("PATCH", "\(Self.events)/meet1").map { $0.bodyJSONValue["attendees"].array.last }
         #expect(patches.first??["responseStatus"] == "declined" && patches.first??["comment"] == "I have another event at this time.")

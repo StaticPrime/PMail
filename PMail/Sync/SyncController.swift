@@ -17,6 +17,8 @@ final class SyncController {
     @ObservationIgnored private var pushTask: Task<Void, Never>?
     @ObservationIgnored private var pushAccount: UUID?
     @ObservationIgnored private var lastCheck: [UUID: Date] = [:]
+    /// Accounts asked to check again once the check under way is done, and whether the server pushed.
+    @ObservationIgnored private var checkAgain: [UUID: Bool] = [:]
     @ObservationIgnored private var lastRefresh: [UUID: Date] = [:]
     @ObservationIgnored private var checking: Set<UUID> = []
     @ObservationIgnored private var sending: Set<UUID> = []
@@ -128,10 +130,18 @@ final class SyncController {
     /// `pushed` says the server spoke up, which can also mean mail was read, moved or deleted somewhere else.
     func check(_ session: AccountSession, pushed: Bool = false) async {
         let id = session.id
-        guard !checking.contains(id) else { return }
+        // Asked for while a check is under way (the server pushed, or mail was just sent), it checks once more after,
+        // since the one under way may have asked the server before the news.
+        guard !checking.contains(id) else {
+            checkAgain[id] = (checkAgain[id] ?? false) || pushed
+            return
+        }
         checking.insert(id)
         lastCheck[id] = now()
-        defer { checking.remove(id) }
+        defer {
+            checking.remove(id)
+            if let again = checkAgain.removeValue(forKey: id) { Task { await check(session, pushed: again) } }
+        }
         refreshCalendarAndContacts(of: session, unlessRecent: pushed)
         // Drafts kept on this Mac go to the server's Drafts, on their own.
         Task { await session.mail.sendWaitingDrafts() }

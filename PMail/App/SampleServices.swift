@@ -610,6 +610,7 @@ actor SampleCalendarService: CalendarService {
             occurrence.occurrenceDate = begin
             occurrence.start = begin
             occurrence.end = begin.addingTimeInterval(length)
+            if let answer = occurrenceAnswers[occurrence.id] { occurrence.myResponse = answer }
             return occurrence
         }
     }
@@ -687,18 +688,33 @@ actor SampleCalendarService: CalendarService {
     }
 
     func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
-        await pause()
-        try reach()
-        if let index = events.firstIndex(where: { $0.id == event.id }) { events[index].myResponse = response }
+        try await respond(to: event, with: response, comment: nil, scope: .thisEvent)
     }
 
     /// The messages sent with answers, by event (for the self-test).
     private var answerComments: [String: String] = [:]
+    /// Answers to single times of repeating events made here, by the time's ID.
+    private var occurrenceAnswers: [String: AttendeeResponse] = [:]
 
-    func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws {
-        try await respond(to: event, with: response)
+    func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope) async throws {
+        await pause()
+        try reach()
+        if let seriesID = event.seriesID, let index = events.firstIndex(where: { $0.id == seriesID }) {
+            // A time of a repeating event made here: that time, or the series and every time of it.
+            if scope == .allEvents {
+                events[index].myResponse = response
+                occurrenceAnswers = occurrenceAnswers.filter { !$0.key.hasPrefix(seriesID + "@") }
+            } else {
+                occurrenceAnswers[event.id] = response
+            }
+        } else if let index = events.firstIndex(where: { $0.id == event.id }) {
+            events[index].myResponse = response
+        }
         answerComments[event.id] = comment
     }
+
+    /// The answer given to one time of a repeating event (for the self-test).
+    func answer(forTime id: String) -> AttendeeResponse? { occurrenceAnswers[id] }
 
     func comment(for eventID: String) -> String? { answerComments[eventID] }
 

@@ -453,9 +453,14 @@ public protocol CalendarService: AnyObject, Sendable {
     /// Answers an invitation for the account's owner.
     func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws
 
-    /// Answers an invitation with a message for the organizer, where the calendar passes one on (Google and Microsoft
-    /// do; elsewhere the answer goes without it, and PMail puts it in the answer it emails).
-    func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws
+    /// Answers an invitation: one time of a repeating meeting (`thisEvent`) or the whole of it, with a message for the
+    /// organizer where the calendar passes one on (Google and Microsoft do; elsewhere PMail puts it in the answer it
+    /// emails).
+    func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope) async throws
+
+    /// The answer to email the organizer, for a calendar whose answers PMail emails (one with no server, or an invitation
+    /// taken in from an email): for one time of a repeating meeting, or the whole of it. Nil when nothing's to be emailed.
+    func replyText(for event: CalendarEvent, response: AttendeeResponse, scope: RecurrenceScope) async throws -> String?
 
     /// When people (by email address) are busy in `start..<end`, as far as the provider can tell: each one's busy
     /// times, or why they aren't known. Calendars that can't look people up say so for everyone.
@@ -506,8 +511,12 @@ public protocol CalendarService: AnyObject, Sendable {
 }
 
 extension CalendarService {
-    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws {
+    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope) async throws {
         try await respond(to: event, with: response)
+    }
+
+    public func replyText(for event: CalendarEvent, response: AttendeeResponse, scope: RecurrenceScope) async throws -> String? {
+        try await invitationText(for: event, method: .reply, attendees: nil)
     }
 
     public func freeBusy(for addresses: [String], from start: Date, to end: Date) async throws -> [String: FreeBusy] {

@@ -98,5 +98,8 @@ final class RecordingNotifier: MailNotifier {
     func notify(newMail messages: [MessageSummary], in account: Account) { newMail.append((account.id, messages)) }
     func notify(backFromSnooze conversation: Conversation, in account: Account) { snoozeReturns.append((account.id, conversation)) }
     func removeNotifications(for account: UUID) {}
+
+    /// Forgets the notifications so far (the self-test starts its new-mail steps clean).
+    func forgetNewMail() { newMail = [] }
 }
 #endif

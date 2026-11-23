@@ -77,10 +77,23 @@ public actor LocalCalendarService: CalendarService {
         }
     }
 
+    /// Answers an invitation for the whole series.
     public func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
+        try await respond(to: event, with: response, comment: nil, scope: .allEvents)
+    }
+
+    /// Answers one time of a repeating meeting (in that time's own override) or the whole of it; PMail emails the answer.
+    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope) async throws {
         var (name, calendar, _) = try file(of: event)
-        try writer().respond(response, to: event, in: &calendar)
+        try writer().respond(response, to: event, in: &calendar, scope: scope)
         try store.write(Data(calendar.serialized.utf8), to: name)
+    }
+
+    public func replyText(for event: CalendarEvent, response: AttendeeResponse, scope: RecurrenceScope) async throws -> String? {
+        guard scope == .thisEvent, event.isRecurring else { return try await invitationText(for: event, method: .reply, attendees: nil) }
+        let (_, calendar, _) = try file(of: event)
+        guard let only = writer().occurrenceOnly(of: event, in: calendar) else { return nil }
+        return InvitationText.reply(to: only.serialized, from: MailAddress(email: ownerEmail), response: response)
     }
 
     // MARK: Invitations by email

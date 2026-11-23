@@ -91,9 +91,14 @@ public final class CalendarWithTasks: CalendarService {
         try await calendars.respond(to: event, with: response)
     }
 
-    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws {
+    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope) async throws {
         try Self.refuseFeed(event)
-        try await calendars.respond(to: event, with: response, comment: comment)
+        try await calendars.respond(to: event, with: response, comment: comment, scope: scope)
+    }
+
+    public func replyText(for event: CalendarEvent, response: AttendeeResponse, scope: RecurrenceScope) async throws -> String? {
+        guard !event.isTask else { return nil }
+        return try await calendars.replyText(for: event, response: response, scope: scope)
     }
 
     // MARK: Settings

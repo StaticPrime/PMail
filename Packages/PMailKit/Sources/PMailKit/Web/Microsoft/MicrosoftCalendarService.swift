@@ -510,11 +510,13 @@ public actor MicrosoftCalendarService: CalendarService {
     /// Answers an invitation and sends the answer to the organizer. A declined meeting is kept on this Mac, since
     /// Outlook takes it off the calendar; once it's gone from there, the answer can't be changed.
     public func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
-        try await respond(to: event, with: response, comment: nil)
+        try await respond(to: event, with: response, comment: nil, scope: .thisEvent)
     }
 
-    /// Answers with a message, which Outlook sends the organizer with the answer.
-    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws {
+    /// Answers one time of a repeating meeting or (on the series itself) the whole of it, with a message Outlook sends
+    /// the organizer. Declining a whole series keeps its times of the coming year here, since Outlook takes them all off.
+    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope) async throws {
+        let target = scope == .allEvents ? (event.seriesID ?? event.id) : event.id
         let action: String
         switch response {
         case .accepted: action = "accept"
@@ -523,20 +525,35 @@ public actor MicrosoftCalendarService: CalendarService {
         case .needsAction: throw PMailError.notSupported("An answered invitation can’t be set back to unanswered.")
         }
         let wasDeclined = await declined.contains(id: event.id)
+        // The times a whole series has, read before declining takes them off.
+        let times = scope == .allEvents && target != event.id && response == .declined ? await seriesTimes(of: target, like: event) : []
         do {
             var body: [String: JSONValue] = ["sendResponse": true]
             if let comment = comment?.trimmingCharacters(in: .whitespacesAndNewlines), !comment.isEmpty { body["comment"] = .string(comment) }
-            _ = try await client.post(Self.eventURL(event.id, action), .object(body), headers: Self.headers)
+            _ = try await client.post(Self.eventURL(target, action), .object(body), headers: Self.headers)
         } catch PMailError.notFound where wasDeclined {
             throw PMailError.notSupported("Outlook took this meeting off your calendar when you declined it, so the answer can’t be "
                 + "changed. The organizer can send you the invitation again.")
         }
         if response == .declined {
             await declined.keep(event)
+            for time in times where time.id != event.id { await declined.keep(time) }
         } else if wasDeclined {
             await declined.forget(id: event.id)
         }
-        loaded[EventKey(calendarID: event.calendarID, eventID: event.id)]?.myResponse = response
+        for key in loaded.keys where key.eventID == event.id || (scope == .allEvents && loaded[key]?.seriesID == target) {
+            loaded[key]?.myResponse = response
+        }
+    }
+
+    /// A series' times over the coming year, as this calendar lists them; none when they can't be read.
+    private func seriesTimes(of seriesID: String, like event: CalendarEvent) async -> [CalendarEvent] {
+        let now = Date()
+        guard let url = try? Self.url("events/\(WebURL.segment(seriesID))/instances",
+                                      [("startDateTime", WebDate.utcString(now)), ("endDateTime", WebDate.utcString(now.addingTimeInterval(366 * 86_400))),
+                                       ("$top", "500"), ("$select", Self.eventFields)]),
+              let items = try? await client.graphItems(url, headers: Self.headers) else { return [] }
+        return items.compactMap { Self.event(from: $0, calendarID: event.calendarID) }
     }
 
     /// Looks at a new event again (up to three times, about a second apart) until its meeting's join link is there.

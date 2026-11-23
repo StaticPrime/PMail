@@ -252,14 +252,29 @@ public actor CalDAVCalendarService: CalendarService {
         }
     }
 
-    /// Answers an invitation for the whole series. The answer is made on the newest version on the server, since
-    /// only the owner's own reply changes.
+    /// Answers an invitation for the whole series.
     public func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
+        try await respond(to: event, with: response, comment: nil, scope: .allEvents)
+    }
+
+    /// Answers an invitation: one time of a repeating meeting (in that time's own override) or the whole of it. The
+    /// answer is made on the newest version on the server, since only the owner's own reply changes. A server that
+    /// schedules sends the organizer the answer itself; for an invitation PMail took in, PMail emails it (with the
+    /// message).
+    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope) async throws {
         let collection = try await collection(event.calendarID)
         let url = try resourceURL(of: event, in: collection)
         var (calendar, current) = try await editableCalendar(at: url, expectedETag: nil, fresh: true)
-        try writer().respond(response, to: event, in: &calendar)
+        try writer().respond(response, to: event, in: &calendar, scope: scope)
         _ = try await save(calendar, to: url, ifMatch: current.etag)
+    }
+
+    public func replyText(for event: CalendarEvent, response: AttendeeResponse, scope: RecurrenceScope) async throws -> String? {
+        guard scope == .thisEvent, event.isRecurring else { return try await invitationText(for: event, method: .reply, attendees: nil) }
+        let url = try resourceURL(of: event, in: try await collection(event.calendarID))
+        let (calendar, _) = try await editableCalendar(at: url, expectedETag: nil, fresh: true)
+        guard InvitationText.isAnsweredByEmail(calendar), let only = writer().occurrenceOnly(of: event, in: calendar) else { return nil }
+        return InvitationText.reply(to: only.serialized, from: MailAddress(email: ownerEmail), response: response)
     }
 
     // MARK: Settings

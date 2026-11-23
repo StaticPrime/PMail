@@ -10,6 +10,8 @@ struct EventDetailsView: View {
     let model: CalendarViewModel
     let event: CalendarEvent
     @State private var confirmsDelete = false
+    /// An answer to a repeating meeting, waiting to hear whether it's for this time or all of them.
+    @State private var pendingAnswer: AttendeeResponse?
 
     var body: some View {
         let calendarInfo = model.calendarInfo(event.calendarID)
@@ -211,6 +213,29 @@ struct EventDetailsView: View {
         } message: {
             Text(event.isRecurring ? "It repeats: delete just this one, or every time it happens? This can’t be undone." : "This can’t be undone.")
         }
+        // Answering a repeating meeting: this time, or every time.
+        .confirmationDialog(answerQuestion, isPresented: Binding(get: { pendingAnswer != nil }, set: { if !$0 { pendingAnswer = nil } }),
+                            titleVisibility: .visible) {
+            Button("This Event") { answer(scope: .thisEvent) }
+            Button("All Events") { answer(scope: .allEvents) }
+            Button("Cancel", role: .cancel) { pendingAnswer = nil }
+        } message: {
+            Text("It repeats: answer just this one, or every time it happens?")
+        }
+    }
+
+    private var answerQuestion: String {
+        switch pendingAnswer {
+        case .accepted?: "Going to “\(event.shownTitle)”?"
+        case .declined?: "Not going to “\(event.shownTitle)”?"
+        default: "Maybe going to “\(event.shownTitle)”?"
+        }
+    }
+
+    private func answer(scope: RecurrenceScope) {
+        guard let response = pendingAnswer else { return }
+        pendingAnswer = nil
+        model.respond(to: event, with: response, scope: scope)
     }
 
     private var guests: [Attendee] {
@@ -274,7 +299,9 @@ struct EventDetailsView: View {
     }
 
     private func rsvpButton(_ title: String, _ response: AttendeeResponse, current: AttendeeResponse) -> some View {
-        Button(title) { model.respond(to: event, with: response) }
+        Button(title) {
+            if event.isRecurring { pendingAnswer = response } else { model.respond(to: event, with: response, scope: .thisEvent) }
+        }
             .buttonStyle(.plain)
             .font(.pm(12.5, .medium))
             .foregroundStyle(current == response ? Theme.onSelection : Theme.textSecondary)

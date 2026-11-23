@@ -382,7 +382,7 @@ enum SelfTest {
             check(calendar.shownEvents().first { $0.title == "Product sync" }.map { eventTitleString($0) } == "Product sync (Maybe)",
                   "Maybe shows after the title")
             if let demo = calendar.shownEvents().first(where: { $0.title == "Vendor demo" }) {
-                calendar.respond(to: demo, with: .accepted)
+                calendar.respond(to: demo, with: .accepted, scope: .thisEvent)
                 check(calendar.shownEvents().first { $0.title == "Vendor demo" }.map(AnswerLook.init) == .solid, "answering Yes makes it solid")
             }
             // A declined invitation stays until it's deleted, which anyone invited can do.
@@ -765,7 +765,11 @@ enum SelfTest {
             let me = session.account.address
             let clash = invitationEvent("selftest-clash", "Self-test clash", from: at(day, 10, 30), to: at(day, 11, 30), organizer: zoe, guest: me)
             let free = invitationEvent("selftest-free", "Self-test free", from: at(day, 14), to: at(day, 15), organizer: zoe, guest: me)
-            _ = read { await service?.arrive(clash); await service?.arrive(free) }
+            // A weekly meeting whose first time overlaps too.
+            var weekly = invitationEvent("selftest-weekly", "Self-test weekly sync", from: at(day, 10, 30), to: at(day, 11), organizer: zoe, guest: me)
+            weekly.recurrence = ["RRULE:FREQ=WEEKLY"]
+            let series = weekly
+            _ = read { await service?.arrive(clash); await service?.arrive(free); await service?.arrive(series) }
             Task { await calendar.answerInvitationsAutomatically() }
             wait("the invitation that overlaps answered") { read { await service?.event("selftest-clash")?.myResponse } == .declined }
         }
@@ -776,9 +780,28 @@ enum SelfTest {
                   "an invitation that overlaps an event you’re going to is declined for you, with your message")
             check(read { await service?.event("selftest-free")?.myResponse } == .needsAction, "one that doesn’t is left for you")
             check(read { await service?.event("selftest-waiting")?.myResponse } == .needsAction, "and so are the ones that were waiting already")
+            guard let day = autoAnswerDay else { return }
+            let nextWeek = calendar.calendar.date(byAdding: .day, value: 7, to: day) ?? day
+            let first = "selftest-weekly@\(Int(at(day, 10, 30).timeIntervalSince1970))"
+            let second = "selftest-weekly@\(Int(at(nextWeek, 10, 30).timeIntervalSince1970))"
+            check(read { await service?.answer(forTime: first) } == .declined && (read { await service?.answer(forTime: second) } ?? nil) == nil,
+                  "a repeating invitation is answered just for the time that overlaps")
+            // Answering every time of it by hand.
+            let services = session.services.calendar as? CalendarWithTasks
+            let times = (read { try? await services?.loadEvents(in: ["primary"], from: nextWeek, to: nextWeek.addingTimeInterval(86_400)) } ?? nil) ?? nil
+            guard let later = times?.first(where: { $0.seriesID == "selftest-weekly" }) else { return check(false, "the weekly meeting's next time") }
+            calendar.respond(to: later, with: .accepted, scope: .allEvents)
+            wait("every time of it answered") { read { await service?.event("selftest-weekly")?.myResponse } == .accepted }
+        }
+        step {
+            let calendar = session.calendar
+            let service = (session.services.calendar as? CalendarWithTasks)?.calendars as? SampleCalendarService
+            guard let day = autoAnswerDay else { return }
+            let first = "selftest-weekly@\(Int(at(day, 10, 30).timeIntervalSince1970))"
+            check((read { await service?.answer(forTime: first) } ?? nil) == nil, "answering all of a repeating meeting answers every time of it")
             calendar.setConflictReply(response: nil)
             // Out of office on a calendar that doesn't decline meetings itself: PMail declines the ones already planned.
-            guard let day = autoAnswerDay, var away = calendar.newDraft(type: .outOfOffice) else { return check(false, "out of office can be started") }
+            guard var away = calendar.newDraft(type: .outOfOffice) else { return check(false, "out of office can be started") }
             let planned = invitationEvent("selftest-planned", "Self-test planned", from: at(day, 16), to: at(day, 17),
                                           organizer: SampleData.person("Zoe Anderson"), guest: session.account.address, answer: .accepted)
             _ = read { await service?.arrive(planned) }
@@ -810,9 +833,10 @@ enum SelfTest {
             check(read { await service?.comment(for: "selftest-during") } == "Self-test: away", "and new invitations for that time")
             let vacation = read { await service?.allEvents.first { $0.title == "Self-test vacation" } } ?? nil
             if let vacation { calendar.delete(vacation, scope: .allEvents) }
-            _ = read { await service?.remove(["selftest-busy", "selftest-waiting", "selftest-clash", "selftest-free", "selftest-planned", "selftest-during"]) }
+            _ = read { await service?.remove(["selftest-busy", "selftest-waiting", "selftest-clash", "selftest-free", "selftest-planned", "selftest-during",
+                                               "selftest-weekly"]) }
             let titles: Set = ["Self-test busy", "Self-test waiting", "Self-test clash", "Self-test free", "Self-test planned", "Self-test during",
-                               "Self-test vacation"]
+                               "Self-test vacation", "Self-test weekly sync"]
             wait("the automatic answers' events gone") {
                 read { await service?.allEvents.contains { titles.contains($0.title) } } == false
             }
@@ -884,6 +908,9 @@ enum SelfTest {
             // Focus time on a calendar that can't hold it.
             guard var focus = calendar.newDraft(type: .focusTime) else { return check(false, "focus time can be started") }
             check(!focus.isAllDay && focus.end.timeIntervalSince(focus.start) == 7_200, "focus time starts as two hours")
+            // In the morning, so it's in the week showing whatever the time of day (late at night, the next half hour is tomorrow).
+            let morning = calendar.calendar.date(bySettingHour: 10, minute: 0, second: 0, of: calendar.today()) ?? focus.start
+            (focus.start, focus.end) = (morning, morning.addingTimeInterval(7_200))
             focus.calendarID = "family"
             check(calendar.canDecline(focus) && !calendar.providerDeclines(focus), "other calendars decline meetings through PMail")
             focus.title = "Self-test focus"
@@ -1476,8 +1503,14 @@ enum SelfTest {
         step {
             guard let sync = app.sync else { return check(false, "the background sync runs") }
             let session = session
-            Task { await sync.check(session) }
             let cache = session.storage.cache
+            // The background sync has been checking all along, and may have announced mail earlier steps delivered; this
+            // starts over, as if the inbox had never been checked.
+            notifier?.forgetNewMail()
+            Task {
+                await cache.save(syncState: nil)
+                await sync.check(session)
+            }
             wait("the first check") { (read({ await cache.syncState() }) ?? nil) != nil }
         }
         step {

@@ -24,11 +24,23 @@ public enum CalendarChange: Codable, Sendable, Hashable {
     case create(CalendarEvent, addingConference: Bool)
     case update(CalendarEvent, scope: RecurrenceScope, addingConference: Bool)
     case delete(CalendarEvent, scope: RecurrenceScope)
+    /// An answer as kept before answers had a scope: for the provider's own default (one time on Google and Microsoft,
+    /// the whole series elsewhere). Still read; new answers are `answer`.
     case respond(CalendarEvent, response: AttendeeResponse)
+    /// An answer to one time of a repeating meeting, or the whole of it.
+    case answer(CalendarEvent, response: AttendeeResponse, scope: RecurrenceScope)
 
     public var event: CalendarEvent {
         switch self {
-        case let .create(event, _), let .update(event, _, _), let .delete(event, _), let .respond(event, _): event
+        case let .create(event, _), let .update(event, _, _), let .delete(event, _), let .respond(event, _), let .answer(event, _, _): event
+        }
+    }
+
+    /// The answer a change gives, if it's one.
+    var answer: AttendeeResponse? {
+        switch self {
+        case let .respond(_, response), let .answer(_, response, _): response
+        default: nil
         }
     }
 
@@ -54,13 +66,13 @@ public enum CalendarChange: Codable, Sendable, Hashable {
             if creating != nil { return result.filter { $0.event.id != id } }
             result.removeAll { $0.event.id == id }
             result.append(change)
-        case .respond:
-            if let creating, case let .create(made, adding) = result[creating], case let .respond(_, response) = change {
+        case .respond, .answer:
+            if let creating, case let .create(made, adding) = result[creating], let response = change.answer {
                 var answered = made
                 answered.myResponse = response
                 result[creating] = .create(answered, addingConference: adding)
             } else {
-                result.removeAll { if case .respond = $0 { $0.event.id == id } else { false } }
+                result.removeAll { $0.answer != nil && $0.event.id == id }
                 result.append(change)
             }
         }
@@ -80,6 +92,11 @@ public enum CalendarChange: Codable, Sendable, Hashable {
                 result.removeAll { $0.id == event.id || (scope == .allEvents && event.seriesID != nil && $0.seriesID == event.seriesID) }
             case let .respond(event, response):
                 if let index = result.firstIndex(where: { $0.id == event.id }) { result[index].myResponse = response }
+            case let .answer(event, response, scope):
+                for index in result.indices where result[index].id == event.id
+                    || (scope == .allEvents && event.seriesID != nil && result[index].seriesID == event.seriesID) {
+                    result[index].myResponse = response
+                }
             }
         }
         return result
@@ -304,6 +321,8 @@ extension PendingChanges where Change == CalendarChange {
                     result.deleted.insert(event.id)
                 case let .respond(event, response):
                     try await service.respond(to: event, with: response)
+                case let .answer(event, response, scope):
+                    try await service.respond(to: event, with: response, comment: nil, scope: scope)
                 }
                 result.sent += 1
                 dropFirst()
@@ -331,6 +350,7 @@ extension PendingChanges where Change == CalendarChange {
             case let .update(_, scope, adding): return .update(event, scope: scope, addingConference: adding)
             case let .delete(_, scope): return .delete(event, scope: scope)
             case let .respond(_, response): return .respond(event, response: response)
+            case let .answer(_, response, scope): return .answer(event, response: response, scope: scope)
             }
         }
         save([current[0]] + rest)

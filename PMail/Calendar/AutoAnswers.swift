@@ -23,10 +23,6 @@ extension CalendarViewModel {
         return calendar.isPrimary || (!calendar.isOther && !calendar.isReadOnly && calendar.isOwned != false)
     }
 
-    /// Whether the account's calendar answers one time of a repeating meeting on its own (Google and Microsoft do);
-    /// elsewhere an answer is for the whole series, so repeating invitations are left to the person.
-    var answersEachTime: Bool { account.kind == .google || account.kind == .microsoft }
-
     /// An invitation still waiting for the account's answer, as PMail answers them: a timed meeting someone else organizes.
     func isWaitingInvitation(_ event: CalendarEvent) -> Bool {
         event.myResponse == .needsAction && isMeeting(event)
@@ -131,15 +127,16 @@ extension CalendarViewModel {
             let key = Self.autoAnswerKey(invitation)
             guard seen[key] == nil else { continue }
             seen[key] = invitation.end
-            guard !notingOnly, answersEachTime || !invitation.isRecurring else { continue }
+            guard !notingOnly else { continue }
+            // A repeating meeting is answered a time at a time: just the times that clash.
             if let period = periods.first(where: { Self.overlaps($0, invitation) }) {
-                respond(to: invitation, with: .declined, comment: period.declineMessage, automatically: true)
+                respond(to: invitation, with: .declined, comment: period.declineMessage, scope: .thisEvent, automatically: true)
                 answered.append((invitation, .declined))
             } else if let rule, found.contains(where: { other in
                 other.id != invitation.id && (other.uid == nil || other.uid != invitation.uid) && Self.isConfirmed(other)
                     && Self.overlaps(other, invitation)
             }) {
-                respond(to: invitation, with: rule.response, comment: rule.message, automatically: true)
+                respond(to: invitation, with: rule.response, comment: rule.message, scope: .thisEvent, automatically: true)
                 answered.append((invitation, rule.response))
             }
         }
@@ -162,8 +159,8 @@ extension CalendarViewModel {
         var declined: [(CalendarEvent, AttendeeResponse)] = []
         for event in found where isMeeting(event) && event.myResponse != .declined && periods.contains(where: { Self.overlaps($0, event) }) {
             seen[Self.autoAnswerKey(event)] = event.end
-            guard saved.declinesExisting, answersEachTime || !event.isRecurring else { continue }
-            respond(to: event, with: .declined, comment: saved.declineMessage, automatically: true)
+            guard saved.declinesExisting else { continue }
+            respond(to: event, with: .declined, comment: saved.declineMessage, scope: .thisEvent, automatically: true)
             declined.append((event, .declined))
         }
         saveAutoAnswersSeen(seen, now: now)

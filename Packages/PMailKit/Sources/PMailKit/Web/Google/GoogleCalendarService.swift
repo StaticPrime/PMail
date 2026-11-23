@@ -492,14 +492,15 @@ public actor GoogleCalendarService: CalendarService {
     }
 
     public func respond(to event: CalendarEvent, with response: AttendeeResponse) async throws {
-        try await respond(to: event, with: response, comment: nil)
+        try await respond(to: event, with: response, comment: nil, scope: .thisEvent)
     }
 
-    /// Answers with a message, which Google sends the organizer with the answer. An answer without one clears an
-    /// earlier message, which was for the earlier answer.
-    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?) async throws {
+    /// Answers one time of a repeating meeting or (on the series itself) the whole of it, with a message Google sends
+    /// the organizer. An answer without one clears an earlier message, which was for the earlier answer.
+    public func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope) async throws {
+        let target = scope == .allEvents ? (event.seriesID ?? event.id) : event.id
         // The whole guest list goes back, so read it fresh and change only the owner's answer.
-        let current = try await client.get(Self.eventsURL(event.calendarID, event.id))
+        let current = try await client.get(Self.eventsURL(event.calendarID, target))
         var attendees = current["attendees"].array
         let mine = attendees.firstIndex { $0["self"].bool == true }
             ?? attendees.firstIndex { $0["email"].string?.caseInsensitiveCompare(event.calendarID) == .orderedSame }
@@ -513,10 +514,11 @@ public actor GoogleCalendarService: CalendarService {
             entry["comment"] = nil
         }
         attendees[mine] = .object(entry)
-        let url = try Self.eventsURL(event.calendarID, event.id, [("sendUpdates", "all")])
+        let url = try Self.eventsURL(event.calendarID, target, [("sendUpdates", "all")])
         _ = try await client.patch(url, ["attendees": .array(attendees)])
-        let key = EventKey(calendarID: event.calendarID, eventID: event.id)
-        loaded[key]?.myResponse = response
+        for key in loaded.keys where key.calendarID == event.calendarID && (key.eventID == event.id || (scope == .allEvents && loaded[key]?.seriesID == target)) {
+            loaded[key]?.myResponse = response
+        }
     }
 
     // MARK: Free and busy

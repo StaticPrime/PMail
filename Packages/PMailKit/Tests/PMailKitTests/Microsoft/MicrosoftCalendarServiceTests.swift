@@ -279,7 +279,7 @@ import Testing
             try await calendar.respond(to: event, with: .needsAction)
         }
         // With a message, which Outlook sends the organizer.
-        try await calendar.respond(to: event, with: .declined, comment: "I have another event at this time.")
+        try await calendar.respond(to: event, with: .declined, comment: "I have another event at this time.", scope: .thisEvent)
         #expect(transport.requests.last?.bodyJSONValue == ["sendResponse": true, "comment": "I have another event at this time."])
     }
 
