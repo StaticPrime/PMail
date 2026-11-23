@@ -886,7 +886,8 @@ final class CalendarViewModel {
         }
         changeCount += 1
         // Invitations PMail emails: all of them on a calendar without a server, else those to guests a calendar server on
-        // an IMAP/POP account doesn't invite. Google, Microsoft and iCloud send every one of theirs.
+        // an IMAP/POP account doesn't invite, and on iCloud when the Apple Account's email isn't an iCloud address.
+        // Google, Microsoft and iCloud otherwise send every one of theirs.
         if service.emailsInvitations || saved.attendees.contains(where: \.invitedByEmail) || (draft.original?.attendees.contains(where: \.invitedByEmail) ?? false) {
             Task { await emailInvitations(for: saved, before: draft.original) }
         }
@@ -1057,18 +1058,18 @@ final class CalendarViewModel {
     }
 
     /// Emails a saved meeting's invitation to the guests PMail invites by email (everyone, for a calendar with no
-    /// server to send it): to each of them when something they'd want to know changed (or it's new), else to those just
-    /// added; guests taken off get a cancellation.
+    /// server to send it): to each of them when something they'd want to know changed (or it's new), else to those PMail
+    /// has just started inviting (new guests, and ones the server had and left to PMail); guests taken off get a
+    /// cancellation.
     private func emailInvitations(for saved: CalendarEvent, before original: CalendarEvent?) async {
         guard let mailer else { return }
         let all = service.emailsInvitations
         let current = guestsToTell(about: saved)
         let guests = Self.invitedByEmail(current, in: saved, all: all)
         let earlier = original.map(guestsToTell(about:)) ?? []
-        let added = guests.filter { guest in !earlier.contains { $0.isSameMailbox(as: guest.email) } }
-        let removed = original.map { Self.invitedByEmail(earlier, in: $0, all: all) }?.filter { guest in
-            !current.contains { $0.isSameMailbox(as: guest.email) }
-        } ?? []
+        let invitedBefore = original.map { Self.invitedByEmail(earlier, in: $0, all: all) } ?? []
+        let added = guests.filter { guest in !invitedBefore.contains { $0.isSameMailbox(as: guest.email) } }
+        let removed = invitedBefore.filter { guest in !current.contains { $0.isSameMailbox(as: guest.email) } }
         let matters = original.map { old in
             old.title != saved.title || old.start != saved.start || old.end != saved.end || old.isAllDay != saved.isAllDay
                 || old.location != saved.location || old.notes != saved.notes || old.recurrence != saved.recurrence

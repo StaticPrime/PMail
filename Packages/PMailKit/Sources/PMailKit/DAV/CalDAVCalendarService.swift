@@ -41,26 +41,28 @@ public actor CalDAVCalendarService: CalendarService {
     /// invitation's copy again, since not every server answers a query by UID.
     private var pathsByUID: [String: String] = [:]
 
-    /// The transport must hand redirects back (WebDAV follows them itself, keeping the sign-in). With
-    /// `providerInvites` (iCloud), the server does all of a meeting's invitations: PMail never invites a guest itself.
+    /// The transport must hand redirects back (WebDAV follows them itself, keeping the sign-in). `iCloud` is for
+    /// iCloud's calendar server (see `isICloud`).
     public init(serverURL: URL, credential: Credential, ownerEmail: String, transport: any HTTPTransport = URLSessionTransport(followsRedirects: false),
-                providerInvites: Bool = false) {
-        self.init(serverURL: serverURL, credential: credential, ownerEmail: ownerEmail, transport: transport, timeZone: .current,
-                  providerInvites: providerInvites)
+                iCloud: Bool = false) {
+        self.init(serverURL: serverURL, credential: credential, ownerEmail: ownerEmail, transport: transport, timeZone: .current, iCloud: iCloud)
     }
 
     /// The same, reading all-day and floating times in a given time zone instead of the Mac's.
-    init(serverURL: URL, credential: Credential, ownerEmail: String, transport: any HTTPTransport, timeZone: TimeZone, providerInvites: Bool = false) {
+    init(serverURL: URL, credential: Credential, ownerEmail: String, transport: any HTTPTransport, timeZone: TimeZone, iCloud: Bool = false) {
         self.serverURL = serverURL
         self.ownerEmail = ownerEmail
         client = WebDAVClient(credential: credential, transport: transport)
         localTimeZone = timeZone
-        self.providerInvites = providerInvites
+        isICloud = iCloud
     }
 
-    /// The server sends every invitation, change and cancellation for the account's meetings, and takes in the guests'
-    /// answers (iCloud): PMail never invites a guest itself.
-    public nonisolated let providerInvites: Bool
+    /// iCloud's calendar server, which names the owner by their Apple Account (its principal and email) and knows their
+    /// other addresses as them. It sends a meeting's invitations, changes and cancellations as the Apple Account's email,
+    /// and is left to when that's an iCloud address. Mail sent from iCloud as another provider's address is turned away
+    /// or put in junk, so for an Apple Account with an email elsewhere, PMail emails the invitations itself, from the
+    /// account's address, and takes in the guests' answers.
+    public nonisolated let isICloud: Bool
 
     // MARK: Calendars
 
@@ -117,37 +119,63 @@ public actor CalDAVCalendarService: CalendarService {
     // MARK: Who the owner is to the server
 
     /// The ways a server names the account's owner on events: their principal (and other such names), and their
-    /// addresses other than the account's (iCloud names a meeting's organizer by the Apple Account's main email).
+    /// addresses other than the account's (iCloud names a meeting's organizer by the Apple Account's email); and the
+    /// address it sends their invitations as.
     struct OwnerIdentity: Sendable, Equatable {
         var principalPath: String?
         /// Principal paths and other non-address names, lowercased.
         var names: Set<String> = []
         /// The owner's other addresses, lowercased.
         var otherAddresses: Set<String> = []
+        /// The address the server sends the owner's invitations as (iCloud: the Apple Account's email), the one its
+        /// address set marks preferred, else its first. Nil when it names none.
+        var sendsAs: String?
+
+        /// Whether the server is left to send the owner's invitations: it sends them as an iCloud address (icloud.com,
+        /// me.com or mac.com). Not when it doesn't say which address it sends as.
+        var invitesItself: Bool { sendsAs.map(Self.isICloudAddress) ?? false }
+
+        static func isICloudAddress(_ email: String) -> Bool {
+            guard let at = email.lastIndex(of: "@") else { return false }
+            return ["icloud.com", "me.com", "mac.com"].contains(email[email.index(after: at)...].lowercased())
+        }
     }
 
-    /// Who the owner is to the server: asked once, from their principal's calendar-user-address-set.
+    /// Who the owner is to the server, from their principal's calendar-user-address-set: asked once it answers.
     private func ownerIdentity() async -> OwnerIdentity {
         if let identity { return identity }
         _ = try? await calendarHome()
         let principalPath = principalURL?.path(percentEncoded: true)
         var found = OwnerIdentity(principalPath: principalPath)
         if let principalPath { found.names.insert(principalPath.lowercased()) }
-        if let principalURL, let answer = try? await client.propfind(principalURL, depth: 0, properties: [.calendarUserAddressSet]),
-           let set = answer.responses.first?.property(.calendarUserAddressSet) {
-            for href in set.hrefs {
-                if href.lowercased().hasPrefix("mailto:") {
-                    let email = String(href.dropFirst(7)).trimmingCharacters(in: .whitespaces)
-                    if !ICalendarEventProperties.isSameMailbox(email, ownerEmail) { found.otherAddresses.insert(email.lowercased()) }
-                } else {
-                    found.names.insert((URL(string: href).flatMap { $0.host == nil ? nil : $0.path(percentEncoded: true) } ?? href).lowercased())
-                }
-            }
-            let domains = set.hrefs.filter { $0.lowercased().hasPrefix("mailto:") }.compactMap { $0.split(separator: "@").last.map(String.init) }
-            Self.log.notice("The calendar knows the account by addresses at \(domains.joined(separator: ", "), privacy: .public); the account's own is \(found.otherAddresses.count == domains.count ? "not among them" : "among them", privacy: .public)")
+        // Not answering (offline, say) is asked again next time.
+        guard let principalURL, let answer = try? await client.propfind(principalURL, depth: 0, properties: [.calendarUserAddressSet]) else {
+            return found
         }
+        var addresses: [(email: String, preferred: Bool)] = []
+        for href in answer.responses.first?.property(.calendarUserAddressSet)?.children(DAVNamespace.dav, "href") ?? [] {
+            let text = href.trimmedText
+            guard !text.isEmpty else { continue }
+            if text.lowercased().hasPrefix("mailto:") {
+                let email = String(text.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+                addresses.append((email, ["1", "true"].contains(href.attributes["preferred"]?.lowercased() ?? "")))
+                if !ICalendarEventProperties.isSameMailbox(email, ownerEmail) { found.otherAddresses.insert(email.lowercased()) }
+            } else {
+                found.names.insert((URL(string: text).flatMap { $0.host == nil ? nil : $0.path(percentEncoded: true) } ?? text).lowercased())
+            }
+        }
+        found.sendsAs = (addresses.first(where: \.preferred) ?? addresses.first)?.email
+        let domains = addresses.map { Self.domain(of: $0.email) }
+        let own = addresses.contains { ICalendarEventProperties.isSameMailbox($0.email, ownerEmail) } ? "among them" : "not among them"
+        let sender = found.sendsAs.map(Self.domain(of:)) ?? "none"
+        Self.log.notice("The calendar knows the account by addresses at \(domains.joined(separator: ", "), privacy: .public); the account's own is \(own, privacy: .public); it sends invitations as the one at \(sender, privacy: .public), so \(found.invitesItself ? "it sends them" : "PMail emails them", privacy: .public)")
         identity = found
         return found
+    }
+
+    /// An address's domain, all the Mac's log notes of it.
+    private static func domain(of email: String) -> String {
+        email.split(separator: "@").last.map(String.init) ?? "?"
     }
 
     /// Lines naming the owner another way (their principal, or another of their addresses) name them by the account's
@@ -179,8 +207,9 @@ public actor CalDAVCalendarService: CalendarService {
         }
     }
 
-    /// Names the owner on their own meeting the way Apple's apps do: by their principal on the server, with the account's
-    /// address (EMAIL), so the server knows the organizer is them and which of their addresses to send as.
+    /// Names the owner on their own meeting the way Apple's apps do, by their principal on the server with the account's
+    /// address (EMAIL), when PMail emails its invitations: the server's copy then names the address they came from,
+    /// rather than the Apple Account's.
     static func nameOwner(in calendar: inout ICalendarComponent, owner: String, principalPath: String?) {
         guard let principalPath else { return }
         for event in calendar.components.indices where calendar.components[event].name == "VEVENT" && organizes(calendar.components[event], owner) {
@@ -191,6 +220,34 @@ public actor CalDAVCalendarService: CalendarService {
                 calendar.components[event].properties[index].value = principalPath
                 calendar.components[event].properties[index].setParameter("EMAIL", owner)
             }
+        }
+    }
+
+    /// Lines naming the owner by their principal name them by the account's address instead (a mailto value), as an
+    /// emailed invitation or answer must: the people it goes to answer that address.
+    static func addressOwner(in calendar: inout ICalendarComponent, owner: String) {
+        for event in calendar.components.indices where calendar.components[event].name == "VEVENT" {
+            for index in calendar.components[event].properties.indices {
+                let line = calendar.components[event].properties[index]
+                guard line.name == "ORGANIZER" || line.name == "ATTENDEE", !line.value.lowercased().hasPrefix("mailto:"),
+                      ICalendarEventProperties.address(of: line).map({ ICalendarEventProperties.isSameMailbox($0.email, owner) }) ?? false else { continue }
+                calendar.components[event].properties[index].value = "mailto:" + owner
+                calendar.components[event].properties[index].setParameter("EMAIL", nil)
+            }
+        }
+    }
+
+    /// Readies a meeting PMail changed for saving to iCloud. When iCloud sends invitations as an iCloud address, every
+    /// guest of the owner's meetings is left to it (taking off PMail's mark an earlier save may have put on some).
+    /// Otherwise every guest is PMail's to invite by email, so iCloud sends them nothing as the other address, and the
+    /// owner is named by the account's address, which the invitations come from.
+    private func readyForICloud(_ calendar: inout ICalendarComponent) async {
+        let identity = await ownerIdentity()
+        if identity.invitesItself {
+            Self.leaveGuestsToTheServer(in: &calendar, owner: ownerEmail)
+        } else {
+            Self.inviteGuestsByEmail(in: &calendar, owner: ownerEmail)
+            Self.nameOwner(in: &calendar, owner: ownerEmail, principalPath: identity.principalPath)
         }
     }
 
@@ -240,7 +297,7 @@ public actor CalDAVCalendarService: CalendarService {
         if let refused = failures.first(where: \.needsSignIn) { throw refused }
         if fetched.isEmpty, let failure = failures.first { throw failure }
         var events: [CalendarEvent] = []
-        let identity = providerInvites ? await ownerIdentity() : nil
+        let identity = isICloud ? await ownerIdentity() : nil
         for (collection, items) in fetched {
             for item in items {
                 resources[item.path] = Resource(etag: item.etag, text: item.text)
@@ -293,10 +350,7 @@ public actor CalDAVCalendarService: CalendarService {
         var saved = event
         saved.uid = uid
         var written = writer().newCalendar(for: saved, uid: uid)
-        if providerInvites {
-            Self.leaveGuestsToTheServer(in: &written, owner: ownerEmail)
-            Self.nameOwner(in: &written, owner: ownerEmail, principalPath: await ownerIdentity().principalPath)
-        }
+        if isICloud { await readyForICloud(&written) }
         let (calendar, etag) = await invitationsAfterSaving(written, etag: try await save(written, to: url, ifMatch: nil, isNew: true), at: url)
         let reader = ICalendarReader(calendar: calendar, ownerEmail: ownerEmail, localTimeZone: localTimeZone)
         return reader.firstEvent(calendarID: collection.info.id, href: url.path(percentEncoded: true), etag: etag) ?? saved
@@ -304,14 +358,21 @@ public actor CalDAVCalendarService: CalendarService {
 
     /// After a meeting the owner organizes is saved, the guests the server sent no invitation to (it noted no
     /// SCHEDULE-STATUS for them, or one saying it failed) become PMail's to invite by email (SCHEDULE-AGENT=CLIENT),
-    /// so the server leaves them to PMail from then on, and the app emails them. iCloud doesn't send invitations for
-    /// meetings saved this way; a server that does keeps sending them. The calendar and version as they end up.
+    /// so the server leaves them to PMail from then on, and the app emails them; a server that sends them keeps doing
+    /// so. iCloud's guests are settled before saving (`readyForICloud`), so this only notes how it went. The calendar
+    /// and version as they end up.
     private func invitationsAfterSaving(_ written: ICalendarComponent, etag: String?, at url: URL) async -> (ICalendarComponent, String?) {
-        guard Self.guestsLeftToTheServer(in: written, owner: ownerEmail) > 0 else { return (written, etag) }
-        if providerInvites {
-            await noteHowTheServerKept(at: url)
+        let left = Self.guestsLeftToTheServer(in: written, owner: ownerEmail)
+        if isICloud {
+            let emailed = Self.guestsInvitedByEmail(in: written, owner: ownerEmail)
+            if left > 0 {
+                await noteHowTheServerKept(at: url)
+            } else if emailed > 0 {
+                Self.log.notice("Meeting saved: PMail invites \(emailed, privacy: .public) guests by email, iCloud none")
+            }
             return (written, etag)
         }
+        guard left > 0 else { return (written, etag) }
         for _ in 0...Self.conflictRetries {
             guard let (data, current) = try? await client.get(url),
                   var stored = ICalendarComponent.parse(String(decoding: data, as: UTF8.self)).first(where: { $0.name == "VCALENDAR" }) else {
@@ -370,10 +431,29 @@ public actor CalDAVCalendarService: CalendarService {
         }
     }
 
+    /// Makes every guest of the owner's meetings PMail's to invite by email (SCHEDULE-AGENT=CLIENT), whatever the server
+    /// noted for them before, so the server sends them nothing.
+    static func inviteGuestsByEmail(in calendar: inout ICalendarComponent, owner: String) {
+        for event in calendar.components.indices where calendar.components[event].name == "VEVENT" && organizes(calendar.components[event], owner) {
+            for index in calendar.components[event].properties.indices where calendar.components[event].properties[index].name == "ATTENDEE"
+                && isGuest(calendar.components[event].properties[index], owner) {
+                calendar.components[event].properties[index].setParameter("SCHEDULE-AGENT", "CLIENT")
+                calendar.components[event].properties[index].setParameter("SCHEDULE-STATUS", nil)
+            }
+        }
+    }
+
     /// How many guests of the meetings the owner organizes are left to the server to invite (not PMail's).
     static func guestsLeftToTheServer(in calendar: ICalendarComponent, owner: String) -> Int {
         calendar.components.filter { $0.name == "VEVENT" && organizes($0, owner) }.reduce(0) { count, event in
             count + event.properties("ATTENDEE").filter { isGuest($0, owner) && $0.parameter("SCHEDULE-AGENT")?.uppercased() != "CLIENT" }.count
+        }
+    }
+
+    /// How many guests of the meetings the owner organizes are PMail's to invite by email.
+    static func guestsInvitedByEmail(in calendar: ICalendarComponent, owner: String) -> Int {
+        calendar.components.filter { $0.name == "VEVENT" && organizes($0, owner) }.reduce(0) { count, event in
+            count + event.properties("ATTENDEE").filter { isGuest($0, owner) && $0.parameter("SCHEDULE-AGENT")?.uppercased() == "CLIENT" }.count
         }
     }
 
@@ -418,10 +498,7 @@ public actor CalDAVCalendarService: CalendarService {
         var (calendar, current) = try await editableCalendar(at: url, expectedETag: event.etag, fresh: false)
         let moving = source.info.id != target.info.id && (scope == .allEvents || !event.isRecurring)
         let key = try writer().update(&calendar, with: event, scope: moving ? .allEvents : scope)
-        if providerInvites {
-            Self.leaveGuestsToTheServer(in: &calendar, owner: ownerEmail)
-            Self.nameOwner(in: &calendar, owner: ownerEmail, principalPath: await ownerIdentity().principalPath)
-        }
+        if isICloud { await readyForICloud(&calendar) }
         let savedURL = moving ? target.url.appendingPathComponent(url.lastPathComponent) : url
         var etag: String?
         if moving {
@@ -516,7 +593,8 @@ public actor CalDAVCalendarService: CalendarService {
     public func replyText(for event: CalendarEvent, response: AttendeeResponse, scope: RecurrenceScope) async throws -> String? {
         guard scope == .thisEvent, event.isRecurring else { return try await invitationText(for: event, method: .reply, attendees: nil) }
         let url = try resourceURL(of: event, in: try await collection(event.calendarID))
-        let (calendar, _) = try await editableCalendar(at: url, expectedETag: nil, fresh: true)
+        var (calendar, _) = try await editableCalendar(at: url, expectedETag: nil, fresh: true)
+        Self.addressOwner(in: &calendar, owner: ownerEmail)
         guard InvitationText.isAnsweredByEmail(calendar), let only = writer().occurrenceOnly(of: event, in: calendar) else { return nil }
         return InvitationText.reply(to: only.serialized, from: MailAddress(email: ownerEmail), response: response)
     }
@@ -554,15 +632,15 @@ public actor CalDAVCalendarService: CalendarService {
     /// The server may not take in invitations that come by email (iCloud doesn't, unless it's set to), so PMail does.
     public nonisolated var takesInEmailedInvitations: Bool { true }
 
-    /// The owner's answer to an invitation PMail took in from an email, which PMail emails to the organizer. Nil for
-    /// everything else: the server sends its own invitations, cancellations and answers.
+    /// What PMail emails about an event: the invitation or cancellation of a meeting the owner organizes, for the guests
+    /// PMail invites by email (the app sends it only to those), and the owner's answer to an invitation PMail took in from
+    /// an email. Nil for everything else, which the server sends.
     public func invitationText(for event: CalendarEvent, method: Invitation.Method, attendees: [MailAddress]?) async throws -> String? {
-        // A server that sends its own invitations sends their changes and cancellations too.
-        guard method != .other, !(providerInvites && (method == .request || method == .cancel)) else { return nil }
+        guard method != .other else { return nil }
         let url = try resourceURL(of: event, in: try await collection(event.calendarID))
-        let (calendar, _) = try await editableCalendar(at: url, expectedETag: nil, fresh: true)
-        // A meeting the owner organizes, with guests PMail invites by email: their invitation, or their cancellation.
-        // (Someone else's meeting is theirs to send, and a server that sends its own does.)
+        var (calendar, _) = try await editableCalendar(at: url, expectedETag: nil, fresh: true)
+        Self.addressOwner(in: &calendar, owner: ownerEmail)
+        // A meeting the owner organizes: its invitation, or its cancellation. (Someone else's meeting is theirs to send.)
         switch method {
         case .request, .cancel:
             guard calendar.components.contains(where: { $0.name == "VEVENT" && Self.organizes($0, ownerEmail) }) else { return nil }
@@ -660,12 +738,15 @@ public actor CalDAVCalendarService: CalendarService {
     /// A guest's answer to a meeting the owner organizes, by email: shown on their line, for a guest PMail invites by
     /// email (the server takes in the others' answers itself).
     private func takeAnswer(_ reply: Invitation) async throws {
-        guard !providerInvites, let guest = reply.replier else { return }
+        guard let guest = reply.replier else { return }
         var attempt = 0
         while true {
             guard let found = try await resource(withUID: reply.uid, near: reply.event.start) else { return }
             var calendar = found.calendar
-            let theirs = calendar.components.contains { event in
+            // Whose meeting it is goes by the owner however iCloud names them; only the guest's line changes.
+            var known = calendar
+            if isICloud { Self.recognizeOwner(in: &known, owner: ownerEmail, identity: await ownerIdentity()) }
+            let theirs = known.components.contains { event in
                 event.name == "VEVENT" && Self.organizes(event, ownerEmail) && event.properties("ATTENDEE").contains { line in
                     line.parameter("SCHEDULE-AGENT")?.uppercased() == "CLIENT"
                         && (ICalendarEventProperties.address(of: line).map { ICalendarEventProperties.isSameMailbox($0.email, guest.address.email) } ?? false)
@@ -797,7 +878,7 @@ public actor CalDAVCalendarService: CalendarService {
         guard var calendar = ICalendarComponent.parse(resource.text).first(where: { $0.name == "VCALENDAR" }) else {
             throw PMailError.protocolError("the event on the server couldn’t be read")
         }
-        if providerInvites { Self.recognizeOwner(in: &calendar, owner: ownerEmail, identity: await ownerIdentity()) }
+        if isICloud { Self.recognizeOwner(in: &calendar, owner: ownerEmail, identity: await ownerIdentity()) }
         return (calendar, resource)
     }
 
