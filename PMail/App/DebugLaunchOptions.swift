@@ -24,6 +24,23 @@ enum DebugLaunchOptions {
         AppClock.now = { Date().addingTimeInterval(shift) }
     }
 
+    /// What Other mail account's lookup shows found, for a snapshot: `-PMFoundSettings YES` (servers) or `provider`.
+    static var sampleLookup: (email: String, result: MailSettingsResult)? {
+        switch defaults.string(forKey: "PMFoundSettings") {
+        case "provider"?:
+            return ("pug@dogs.example", .provider(.google))
+        case let value? where !value.isEmpty:
+            let email = "pug@dogs.example"
+            return (email, .servers(FoundMailSettings(
+                incoming: ServerSettings(mailProtocol: .imap, host: "mail.dogs.example", security: .tls, username: email),
+                otherIncoming: ServerSettings(mailProtocol: .pop3, host: "mail.dogs.example", security: .tls, username: email),
+                outgoing: ServerSettings(mailProtocol: .smtp, host: "mail.dogs.example", security: .tls, username: email),
+                source: .triedServers)))
+        default:
+            return nil
+        }
+    }
+
     static var sampleAccounts: [Account] {
         installSampleClock()
         return defaults.bool(forKey: "PMNoAccounts") ? [] : SampleData.accounts
@@ -57,7 +74,8 @@ enum DebugLaunchOptions {
     /// (a role, or a folder's name) and `-PMTab 2` the list; `-PMSearch words` searches; `-PMOpen 1` opens a
     /// conversation; `-PMCompose YES` (or `reply`, `formatted` or `cc`) opens a compose window; `-PMCalendarView month` (or `day`, `week`,
     /// `schedule`), `-PMEvent 3` (the details of the third event this week) and `-PMEventEditor new` (or a number);
-    /// `-PMContact 2` and `-PMContactEditor YES`; `-PMAddAccount YES` (or `google`, `microsoft`, `icloud`, `other`);
+    /// `-PMContact 2` and `-PMContactEditor YES`; `-PMAddAccount YES` (or `google`, `microsoft`, `icloud`, `other`), with
+    /// `-PMFoundSettings YES` (or `provider`) showing settings found for a made-up address in Other's lookup;
     /// `-PMAccountMenu YES`, `-PMSettings YES`, `-PMShowAbout YES`, `-PMShortcuts YES`, `-PMCollapsed YES`;
     /// `-PMWindowWidth`/`-PMWindowHeight` size the window.
     static func setUp(_ delegate: AppDelegate) {
