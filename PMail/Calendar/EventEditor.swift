@@ -17,6 +17,9 @@ struct EventEditor: View {
     @State private var error: String?
     @State private var asksScope = false
     @State private var showsFaceTime = false
+    /// Add Zoom Meeting opened Zoom to schedule one; its copied invitation is pasted here.
+    @State private var showsZoomPaste = false
+    @State private var zoomPaste = ""
     @State private var colorMenu = PopUpMenu()
     @State private var detailsTab = DetailsTab.details
     @State private var guestsTab = GuestsTab.guests
@@ -276,7 +279,7 @@ struct EventEditor: View {
     @ViewBuilder
     private var eventRows: some View {
         if draft.type == .event {
-            conferenceRow
+            if showsConferenceRow { conferenceRow }
             // Over the rows below it, for the places it suggests.
             field(icon: "mappin.and.ellipse") {
                 LocationField(location: $draft.location)
@@ -374,10 +377,18 @@ struct EventEditor: View {
         }
     }
 
-    /// The video meeting: the calendar's own (Meet or Teams) with one click, or a FaceTime link pasted in.
+    /// Whether there's a video meeting to show or offer: none is offered where the account's choice is None.
+    private var showsConferenceRow: Bool {
+        draft.conference != nil || draft.addsNativeConference || showsFaceTime || showsZoomPaste
+            || model.videoMeetingOffer(for: draft.calendarID) != .noMeeting
+    }
+
+    /// The video meeting the event has, or the one chosen for the account in Settings ▸ Calendar ▸ Video meetings: the
+    /// calendar's own (Meet or Teams) with one click, a Zoom meeting (scheduled in Zoom and its invitation pasted, or
+    /// the Personal Room), or a FaceTime link pasted in.
     @ViewBuilder
     private var conferenceRow: some View {
-        let native = model.conferenceKind(for: draft.calendarID)
+        let offer = model.videoMeetingOffer(for: draft.calendarID)
         field(icon: "video") {
             VStack(alignment: .leading, spacing: 8) {
                 if let conference = draft.conference, conference.kind != .faceTime || draft.faceTimeLink.isEmpty {
@@ -389,17 +400,10 @@ struct EventEditor: View {
                             draft.faceTimeLink = ""
                         }
                     }
-                } else if let native {
-                    if draft.addsNativeConference {
-                        HStack(spacing: 10) {
-                            Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
-                            Text("\(native.displayName) video conferencing will be added when you save.").font(.pm(13))
-                            IconButton(symbol: "xmark", help: "Don’t add it", size: 28, iconSize: 11) { draft.addsNativeConference = false }
-                        }
-                    } else {
-                        OutlinePillButton(title: "Add \(native.displayName) video conferencing") { draft.addsNativeConference = true }
-                    }
+                } else if showsZoomPaste {
+                    zoomPasteRow
                 } else if showsFaceTime {
+                    // Ahead of Meet and Teams: an event's FaceTime link shows, whatever the account now offers.
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
                             TextField("Paste a FaceTime link", text: $draft.faceTimeLink).textFieldStyle(.roundedBorder).frame(width: 340)
@@ -416,7 +420,19 @@ struct EventEditor: View {
                                 .font(.pm(11.5)).foregroundStyle(Theme.danger)
                         }
                     }
-                } else {
+                } else if let native = offer.madeByCalendar {
+                    if draft.addsNativeConference {
+                        HStack(spacing: 10) {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
+                            Text("\(native.displayName) video conferencing will be added when you save.").font(.pm(13))
+                            IconButton(symbol: "xmark", help: "Don’t add it", size: 28, iconSize: 11) { draft.addsNativeConference = false }
+                        }
+                    } else {
+                        OutlinePillButton(title: "Add \(native.displayName) video conferencing") { draft.addsNativeConference = true }
+                    }
+                } else if offer == .zoom {
+                    OutlinePillButton(title: "Add Zoom meeting") { addZoomMeeting() }
+                } else if offer == .faceTime {
                     OutlinePillButton(title: "Add FaceTime link") {
                         showsFaceTime = true
                         pasteFaceTimeLink(onlyIfFaceTime: true)
@@ -424,6 +440,52 @@ struct EventEditor: View {
                 }
             }
         }
+    }
+
+    /// The Zoom meeting scheduled in Zoom: its copied invitation (or just its link) pasted in, which PMail keeps the
+    /// meeting's link from.
+    private var zoomPasteRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("Paste the Zoom invitation", text: $zoomPaste).textFieldStyle(.roundedBorder).frame(width: 300)
+                    .onChange(of: zoomPaste) { _, text in takeZoomMeeting(from: text) }
+                Button("Paste") { zoomPaste = NSPasteboard.general.string(forType: .string) ?? "" }
+                Button("Open Zoom") { NSWorkspace.shared.open(VideoMeetingChoice.zoomSchedulePage) }
+                IconButton(symbol: "xmark", help: "Don’t add a Zoom meeting", size: 28, iconSize: 11) {
+                    showsZoomPaste = false
+                    zoomPaste = ""
+                }
+            }
+            Text("Schedule the meeting in Zoom, click Copy Invitation, then paste it here.")
+                .font(.pm(11.5))
+                .foregroundStyle(Theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 480, alignment: .leading)
+            if !zoomPaste.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("There’s no Zoom meeting link in that. Copy the invitation, or the meeting’s link, in Zoom.")
+                    .font(.pm(11.5)).foregroundStyle(Theme.danger)
+            }
+        }
+    }
+
+    /// Add Zoom Meeting: the account's Personal Room at once where that's chosen in Settings, otherwise Zoom's page for
+    /// scheduling a meeting, whose invitation is then pasted.
+    private func addZoomMeeting() {
+        if let room = model.videoMeeting.personalRoomMeeting {
+            draft.conference = room
+            draft.faceTimeLink = ""
+            return
+        }
+        showsZoomPaste = true
+        NSWorkspace.shared.open(VideoMeetingChoice.zoomSchedulePage)
+    }
+
+    private func takeZoomMeeting(from text: String) {
+        guard let meeting = ConferenceDetector.zoomMeeting(in: text) else { return }
+        draft.conference = meeting
+        draft.faceTimeLink = ""
+        showsZoomPaste = false
+        zoomPaste = ""
     }
 
     private func pasteFaceTimeLink(onlyIfFaceTime: Bool = false) {

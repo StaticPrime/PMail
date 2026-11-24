@@ -26,6 +26,14 @@ public enum ConferenceDetector {
         return nil
     }
 
+    /// The Zoom meeting in pasted text: a whole invitation as Zoom copies it ("Join Zoom Meeting https://…/j/…", with
+    /// its meeting ID, passcode and numbers to dial), or just the meeting's link. Nil when there's no Zoom meeting link
+    /// in it (the invitation's "Find your local number" page isn't one).
+    public static func zoomMeeting(in text: String) -> Conference? {
+        guard let url = links(in: text).first(where: { kind(of: $0) == .zoom }) else { return nil }
+        return Conference(kind: .zoom, joinURL: url, meetingCode: code(in: url, kind: .zoom))
+    }
+
     /// Whether a link is a FaceTime link someone made in the FaceTime app.
     public static func isFaceTimeLink(_ text: String) -> Bool {
         guard let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }

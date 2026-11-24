@@ -98,8 +98,9 @@ struct CalendarRowMenu: View {
     }
 }
 
-/// Settings ▸ Calendar: a calendar's name, description, time zone, owner and color, the notifications new events get,
-/// its provider's email notices, and exporting it. What its provider keeps goes to it; the rest is kept on this Mac.
+/// Settings ▸ Calendar: an account's video meeting for new events and its answers to conflicting invitations; and a
+/// calendar's name, description, time zone, owner and color, the notifications new events get, its provider's email
+/// notices, and exporting it. What its provider keeps goes to it; the rest is kept on this Mac.
 struct CalendarSettingsPane: View {
     let app: AppModel
     @State private var accountID: UUID?
@@ -130,7 +131,11 @@ struct CalendarSettingsPane: View {
                         ForEach(app.accounts.accounts) { account in Text(account.email).tag(Optional(account.id)) }
                     }
                 }
-                if let model { conflictSection(model) }
+                if let model {
+                    // Which meeting is the account's own shows once its calendars are in.
+                    if !model.calendars.isEmpty { videoMeetingSection(model) }
+                    conflictSection(model)
+                }
                 Section {
                     Picker("Calendar", selection: Binding(get: { calendar?.id }, set: { calendarID = $0 })) {
                         ForEach(choices) { calendar in Text(calendar.name).tag(Optional(calendar.id)) }
@@ -152,6 +157,66 @@ struct CalendarSettingsPane: View {
         .onAppear { follow(app.calendarSettingsTarget) }
         .onChange(of: app.calendarSettingsTarget) { _, target in follow(target) }
         .onChange(of: settings) { _, changed in scheduleSave(changed) }
+    }
+
+    /// The video meeting new events on the account's calendars are offered (its own: Meet, Teams or FaceTime; Zoom; or
+    /// none), and for Zoom, whether that's the Personal Room, at once.
+    private func videoMeetingSection(_ model: CalendarViewModel) -> some View {
+        let own = model.ownConference
+        let choice = model.videoMeeting
+        let option = choice.option(own: own)
+        return Section {
+            Picker("New events", selection: Binding(get: { option }, set: { chosen in model.setVideoMeeting { $0.chosen = chosen } })) {
+                ForEach(VideoMeetingChoice.options(own: own), id: \.self) { option in Text(option.title).tag(option) }
+            }
+            if option == .zoom {
+                Toggle("Always use my Personal Room", isOn: Binding(get: { choice.alwaysUsesPersonalRoom },
+                                                                    set: { on in model.setVideoMeeting { $0.alwaysUsesPersonalRoom = on } }))
+                if choice.alwaysUsesPersonalRoom {
+                    LabeledContent("Personal Room link") {
+                        HStack(spacing: 8) {
+                            // A whole invitation pasted is kept as its link.
+                            TextField("Personal Room link", text: Binding(get: { model.videoMeeting.personalRoom }, set: { text in
+                                model.setVideoMeeting { $0.personalRoom = VideoMeetingChoice.personalRoom(from: text) }
+                            }), prompt: Text("https://zoom.us/j/…"))
+                            .labelsHidden()
+                            Button("Paste") {
+                                guard let text = NSPasteboard.general.string(forType: .string) else { return }
+                                model.setVideoMeeting { $0.personalRoom = VideoMeetingChoice.personalRoom(from: text) }
+                            }
+                        }
+                    }
+                    if !choice.personalRoom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, choice.personalRoomMeeting == nil {
+                        Text("That isn’t a Zoom meeting link.").font(.pm(11.5)).foregroundStyle(Theme.danger)
+                    }
+                }
+            }
+        } header: {
+            Text("Video meetings")
+        } footer: {
+            // A personal Microsoft account's calendars can't make Teams meetings, so it isn't offered: say why.
+            let noTeams = model.account.kind == .microsoft && own == nil ? " Teams meetings need a Microsoft work or school account." : ""
+            Text(Self.videoMeetingFooter(option, personalRoom: choice.alwaysUsesPersonalRoom) + noTeams)
+                .font(.pm(11.5)).foregroundStyle(.secondary)
+        }
+    }
+
+    private static func videoMeetingFooter(_ option: VideoMeetingChoice.Option, personalRoom: Bool) -> String {
+        let keep = " Events that already have a meeting keep it."
+        switch option {
+        case .meet, .teams:
+            return "New events on this account’s calendars are offered \(option.title)." + keep
+        case .zoom where personalRoom:
+            return "New events on this account’s calendars are offered your Personal Room, in one click. In Zoom, open "
+                + "Meetings ▸ Personal Room, click Copy Invitation and paste it here."
+        case .zoom:
+            return "New events on this account’s calendars are offered a Zoom meeting: Zoom opens for you to schedule it, "
+                + "and you paste the invitation Zoom copies." + keep
+        case .faceTime:
+            return "New events on this account’s calendars are offered a FaceTime link, made in FaceTime and pasted in." + keep
+        case .noMeeting:
+            return "New events on this account’s calendars aren’t offered a video meeting." + keep
+        }
     }
 
     /// The account's automatic answer to invitations that overlap an event it's going to, and its message.

@@ -508,6 +508,8 @@ final class CalendarViewModel {
         var allDayReminders: [String: [AllDayReminder]] = [:]
         /// How invitations that overlap an event the account is going to are answered, if PMail answers them.
         var conflictReply: ConflictReply?
+        /// The video meeting new events on the account's calendars are offered, once one is chosen.
+        var videoMeeting: VideoMeetingChoice?
     }
 
     /// An automatic answer to invitations that overlap another event: No or Maybe, with a message for the organizer.
@@ -1016,8 +1018,9 @@ final class CalendarViewModel {
         let link = draft.faceTimeLink.trimmingCharacters(in: .whitespacesAndNewlines)
         if !link.isEmpty, let url = URL(string: link) {
             event.conference = Conference(kind: ConferenceDetector.kind(of: url) ?? .other, joinURL: url)
-        } else if draft.conference == nil {
-            event.conference = nil
+        } else {
+            // The meeting the event had, one set in the editor (a Zoom meeting pasted in, or the Personal Room), or none.
+            event.conference = draft.conference
         }
         // Each notification once, as many as the calendar keeps.
         var minutes: [Int] = []
@@ -1462,8 +1465,30 @@ final class CalendarViewModel {
         }
     }
 
-    /// What "Add video conferencing" makes on a calendar: its own meeting, or a FaceTime link pasted in.
+    /// The video meeting a calendar adds to an event by itself (Meet or Teams), if any.
     func conferenceKind(for calendarID: String) -> Conference.Kind? { calendarInfo(calendarID)?.nativeConference }
+
+    /// The account's own video meeting, if it has one: Meet on Google and Teams on Microsoft work or school accounts
+    /// (the meeting its calendars make by themselves), and a FaceTime link on iCloud.
+    var ownConference: Conference.Kind? {
+        account.kind == .icloud ? .faceTime : eventCalendars.lazy.compactMap(\.nativeConference).first
+    }
+
+    /// The video meeting chosen for new events on the account's calendars (Settings ▸ Calendar ▸ Video meetings).
+    var videoMeeting: VideoMeetingChoice { preferences.videoMeeting ?? VideoMeetingChoice() }
+
+    func setVideoMeeting(_ change: (inout VideoMeetingChoice) -> Void) {
+        var choice = videoMeeting
+        change(&choice)
+        preferences.videoMeeting = choice
+        savePreferences()
+    }
+
+    /// What a new event on a calendar is offered: the account's choice, except Meet or Teams on a calendar that can't
+    /// make them.
+    func videoMeetingOffer(for calendarID: String) -> VideoMeetingChoice.Option {
+        videoMeeting.offer(calendarsOwn: conferenceKind(for: calendarID), accountsOwn: ownConference)
+    }
 
     func describe(_ error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

@@ -1342,13 +1342,22 @@ enum SelfTest {
             guard var draft = session.calendar.newDraft() else { return }
             draft.title = "Self-test FaceTime"
             draft.faceTimeLink = "https://facetime.apple.com/join#v=1&p=selftest&k=key"
+            // A Zoom meeting scheduled in Zoom, its copied invitation pasted (Add Zoom Meeting).
+            guard var zoom = session.calendar.newDraft() else { return }
+            zoom.title = "Self-test Zoom"
+            zoom.conference = ConferenceDetector.zoomMeeting(in: "Join Zoom Meeting\nhttps://us05web.zoom.us/j/81234567890?pwd=selftest\n\nMeeting ID: 812 3456 7890")
             let calendar = session.calendar
-            Task { try? await calendar.save(draft) }
-            wait("the FaceTime event") { calendar.events.contains { $0.title == "Self-test FaceTime" } }
+            Task {
+                try? await calendar.save(draft)
+                try? await calendar.save(zoom)
+            }
+            wait("the FaceTime and Zoom events") { calendar.events.contains { $0.title == "Self-test FaceTime" } && calendar.events.contains { $0.title == "Self-test Zoom" } }
         }
         step {
             let created = session.calendar.events.first { $0.title == "Self-test FaceTime" }
             check(created?.conference?.kind == .faceTime && created?.conference?.joinURL.host == "facetime.apple.com", "a pasted FaceTime link joins the event")
+            let zoom = session.calendar.events.first { $0.title == "Self-test Zoom" }
+            check(zoom?.conference?.kind == .zoom && zoom?.conference?.meetingCode == "81234567890", "a Zoom meeting's pasted invitation joins a new event")
             check(mail.capabilities.usesLabels == false && mail.sortsInboxOnMac, "iCloud mail has folders, with its inbox sorted on the Mac")
             // Tasks kept on this Mac, and a kind the calendar can't hold.
             let calendar = session.calendar

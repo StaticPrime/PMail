@@ -70,6 +70,70 @@ import Testing
         #expect(ConferenceDetector.isFaceTimeLink(" https://facetime.apple.com/join#v=1&p=abc "))
     }
 
+    @Test func aZoomMeetingIsTakenFromItsCopiedInvitation() {
+        let invitation = """
+            Pug Dog is inviting you to a scheduled Zoom meeting.
+
+            Topic: Park day
+            Time: Nov 25, 2026 10:00 AM Central Time (US and Canada)
+
+            Join Zoom Meeting
+            https://us05web.zoom.us/j/81234567890?pwd=AbCdEf12345
+
+            Meeting ID: 812 3456 7890
+            Passcode: 4mDq2x
+
+            ---
+
+            One tap mobile
+            +13126266799,,81234567890#,,,,*123456# US (Chicago)
+
+            Find your local number: https://us05web.zoom.us/u/kbxyzAbc
+            """
+        let meeting = ConferenceDetector.zoomMeeting(in: invitation)
+        #expect(meeting?.kind == .zoom && meeting?.meetingCode == "81234567890")
+        #expect(meeting?.joinURL.absoluteString == "https://us05web.zoom.us/j/81234567890?pwd=AbCdEf12345")
+        #expect(ConferenceDetector.zoomMeeting(in: " https://zoom.us/my/pugdog ")?.joinURL.path == "/my/pugdog", "a Personal Room's own link")
+        #expect(ConferenceDetector.zoomMeeting(in: "Find your local number: https://us05web.zoom.us/u/kbxyzAbc") == nil, "not a meeting")
+        #expect(ConferenceDetector.zoomMeeting(in: "https://meet.google.com/abc-defg-hij") == nil, "another kind of meeting")
+        #expect(ConferenceDetector.zoomMeeting(in: "") == nil)
+    }
+
+    @Test func eachAccountChoosesTheVideoMeetingItsNewEventsAreOffered() throws {
+        // Zoom on every account; Meet only on Google, Teams only on Microsoft, FaceTime only on iCloud.
+        #expect(VideoMeetingChoice.options(own: .meet) == [.meet, .zoom, .noMeeting])
+        #expect(VideoMeetingChoice.options(own: .teams) == [.teams, .zoom, .noMeeting])
+        #expect(VideoMeetingChoice.options(own: .faceTime) == [.faceTime, .zoom, .noMeeting])
+        #expect(VideoMeetingChoice.options(own: nil) == [.zoom, .noMeeting], "other accounts, and Microsoft ones without Teams")
+        // Until something's chosen: the account's own meeting, or none where it has none.
+        let usual = VideoMeetingChoice()
+        #expect(usual.option(own: .meet) == .meet && usual.option(own: .faceTime) == .faceTime && usual.option(own: nil) == .noMeeting)
+        // Teams on a Microsoft account, Zoom on iCloud, Meet on Google: each account's own choice.
+        #expect(usual.offer(calendarsOwn: .teams, accountsOwn: .teams) == .teams)
+        let zoom = VideoMeetingChoice(.zoom)
+        #expect(zoom.offer(calendarsOwn: nil, accountsOwn: .faceTime) == .zoom && zoom.offer(calendarsOwn: .meet, accountsOwn: .meet) == .zoom)
+        #expect(zoom.offer(calendarsOwn: nil, accountsOwn: nil) == .zoom)
+        #expect(usual.offer(calendarsOwn: nil, accountsOwn: .faceTime) == .faceTime, "FaceTime on every iCloud calendar")
+        #expect(VideoMeetingChoice(.noMeeting).offer(calendarsOwn: .meet, accountsOwn: .meet) == .noMeeting)
+        #expect(usual.offer(calendarsOwn: nil, accountsOwn: .meet) == .noMeeting, "no FaceTime on a calendar that can't make Meet")
+        #expect(VideoMeetingChoice(.faceTime).option(own: .meet) == .meet, "a choice the account can't have gives way")
+        #expect(VideoMeetingChoice(.teams).option(own: nil) == .noMeeting)
+        // Zoom's Personal Room, at once where that's chosen.
+        #expect(zoom.personalRoomMeeting == nil, "Add Zoom Meeting schedules one unless the Personal Room is chosen")
+        var room = VideoMeetingChoice(.zoom, alwaysUsesPersonalRoom: true, personalRoom: "https://zoom.us/j/5551234567?pwd=xyz")
+        #expect(room.personalRoomMeeting?.joinURL.absoluteString == "https://zoom.us/j/5551234567?pwd=xyz")
+        #expect(VideoMeetingChoice.personalRoom(from: "Join Zoom Meeting\nhttps://zoom.us/j/5551234567?pwd=xyz\n\nMeeting ID: 555 123 4567")
+                == "https://zoom.us/j/5551234567?pwd=xyz", "a whole invitation pasted keeps its link")
+        #expect(VideoMeetingChoice.personalRoom(from: "https://zoom.us/j/55") == "https://zoom.us/j/55")
+        #expect(VideoMeetingChoice(.zoom, alwaysUsesPersonalRoom: true, personalRoom: "not a link").personalRoomMeeting == nil)
+        // Kept with the account's calendar preferences; a later choice of FaceTime keeps the room for when Zoom's back.
+        room.chosen = .faceTime
+        #expect(room.personalRoomMeeting == nil, "only while Zoom is chosen")
+        let saved = try JSONDecoder().decode(VideoMeetingChoice.self, from: JSONEncoder().encode(room))
+        #expect(saved == room && saved.personalRoom == "https://zoom.us/j/5551234567?pwd=xyz")
+        #expect(try JSONDecoder().decode(VideoMeetingChoice.self, from: JSONEncoder().encode(usual)).chosen == nil)
+    }
+
     @Test func htmlBecomesPlainTextAndSnippets() {
         let html = "<html><head><style>p{color:red}</style></head><body><p>Hello&nbsp;there,</p><p>Waffles &amp; friends &#x1F436;</p></body></html>"
         let text = HTMLText.plainText(fromHTML: html)
