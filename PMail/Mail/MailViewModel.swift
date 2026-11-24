@@ -981,15 +981,11 @@ final class MailViewModel {
             if let totalCount { self.totalCount = max(0, totalCount - (snapshot.count - conversations.count)) }
             checkedIDs.subtract(snapshot.map(\.id).filter { id in !conversations.contains { $0.id == id } })
         }
-        // Leaving a conversation that was filed away goes on to the next one, or back to the list.
-        if !staysOpen, let open = wasOpen, open.messages.allSatisfy({ ids.contains($0.id) }) || leaves {
-            if let next = snapshot.firstIndex(where: { $0.id == open.id }).flatMap({ index in
-                conversations.first { candidate in !ids.isSuperset(of: candidate.messages.map(\.id)) && snapshot.firstIndex(of: candidate).map { $0 > index } == true }
-            }) {
-                self.open(next)
-            } else {
-                closeConversation()
-            }
+        // Filing away the open conversation goes back to the list, on the folder and page it was opened from (not on to
+        // the next conversation). One message out of a longer one that stays in the list leaves the rest open.
+        if !staysOpen, let open = wasOpen,
+           open.messages.allSatisfy({ ids.contains($0.id) }) || (leaves && !conversations.contains { $0.id == open.id }) {
+            closeConversation()
         } else if wasOpen != nil, case .deleteForever = action {
             closeConversation()
         } else if wasOpen != nil {

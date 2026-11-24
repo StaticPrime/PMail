@@ -246,6 +246,20 @@ enum SelfTest {
             if let event = key("u", window: window) { _ = controller.handleKey(event) }
             check(mail.openConversation == nil, "U goes back to the list")
         }
+        step {
+            // Deleting the open conversation goes back to its list and page, not on to the next conversation; Undo puts it back.
+            guard let roadmap = mail.conversations.first(where: { $0.subject == "Q4 roadmap draft" }) else {
+                return check(false, "the roadmap conversation is listed again")
+            }
+            mail.undoDelay = 30
+            let folder = mail.selectedFolderID, page = mail.pageIndex
+            mail.open(roadmap)
+            mail.perform(.trash, on: mail.targetConversations)
+            check(mail.openConversation == nil && mail.selectedFolderID == folder && mail.pageIndex == page,
+                  "deleting the open conversation goes back to its list, on the same page", "open: \(mail.openConversation?.subject ?? "nothing")")
+            app.toast?.action?()
+            check(mail.conversations.contains { $0.id == roadmap.id }, "and Undo puts it back in the list")
+        }
 
         // MARK: Archiving, with and without Undo
         step {
