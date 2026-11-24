@@ -100,6 +100,11 @@ enum DebugLaunchOptions {
             app.sheet = .addAccount(AccountKind(rawValue: kind))
         }
         if defaults.bool(forKey: "PMSettings") { delegate.showSettings(nil) }
+        // `-PMSettingsAccount 3` shows that account in Settings ▸ Calendar, even one the window hasn't shown yet.
+        if let account = app.accounts.accounts[safe: defaults.integer(forKey: "PMSettingsAccount") - 1] {
+            let primary = SampleData.calendars(for: account).first(where: \.isPrimary)?.id ?? ""
+            app.calendarSettingsTarget = CalendarSettingsTarget(accountID: account.id, calendarID: primary)
+        }
         // `-PMSettingsPane accounts` (or `general`, `mail`, `signing`) opens Settings on that pane.
         if let name = defaults.string(forKey: "PMSettingsPane")?.lowercased(),
            let pane = SettingsWindowController.Pane.allCases.first(where: { $0.title.lowercased().hasPrefix(name) }) {

@@ -140,6 +140,8 @@ struct CalendarSettingsPane: View {
                     sections(model, calendar)
                 } else if let problem {
                     Text(problem).foregroundStyle(.secondary)
+                } else if let model, choices.isEmpty, let error = model.error {
+                    Text("This account’s calendars couldn’t be loaded: \(error)").foregroundStyle(.secondary)
                 } else {
                     ProgressView().frame(maxWidth: .infinity)
                 }
@@ -305,6 +307,8 @@ struct CalendarSettingsPane: View {
         settings = nil
         saved = nil
         problem = nil
+        // An account the window hasn't shown yet hasn't loaded its calendars; once they're in, this runs again.
+        if let account { app.accounts.session(for: account)?.startCalendar() }
         guard let model, let calendar else { return }
         do {
             let loaded = try await model.settings(for: calendar)

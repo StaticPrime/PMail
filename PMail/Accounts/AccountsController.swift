@@ -80,6 +80,7 @@ final class AccountSession: Identifiable {
     let calendar: CalendarViewModel
     let contacts: ContactsViewModel
     @ObservationIgnored private var activated = false
+    @ObservationIgnored private var calendarStarted = false
 
     var id: UUID { account.id }
 
@@ -113,8 +114,15 @@ final class AccountSession: Identifiable {
         guard !activated else { return }
         activated = true
         mail.start()
-        calendar.start()
+        startCalendar()
         contacts.start()
+    }
+
+    /// Starts loading the account's calendars, once: when it's shown, or before that for Settings ▸ Calendar.
+    func startCalendar() {
+        guard !calendarStarted else { return }
+        calendarStarted = true
+        calendar.start()
     }
 
     var isActivated: Bool { activated }
