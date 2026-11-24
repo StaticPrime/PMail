@@ -386,6 +386,7 @@ extension IMAPMailService {
 
     /// Makes a label. It's kept in the book; the server only hears of it once a message has it.
     public func createLabel(named name: String, colorHex: String?) async throws -> MailFolder {
+        if isGmail { return try await gmailCreateLabel(named: name, colorHex: colorHex) }
         guard let labelBook else { throw PMailError.notSupported("This account can’t make labels.") }
         return try await labelBook.create(named: name, colorHex: colorHex).folder
     }
@@ -393,6 +394,7 @@ extension IMAPMailService {
     /// Renames or recolors a label (a nil color leaves its color as it is). A new name is a new keyword: its messages on
     /// the server get the new keyword in place of the old, and those kept on this Mac or in the book move to it too.
     public func updateLabel(_ label: MailFolder, name: String, colorHex: String?) async throws -> MailFolder {
+        if isGmail { return try await gmailUpdateLabel(label, name: name, colorHex: colorHex) }
         guard let labelBook else { throw PMailError.notSupported("This account can’t change labels.") }
         guard let current = await labelBook.label(withID: label.id) else { throw PMailError.notFound }
         let newID = try await labelBook.renamedID(current.id, to: name)
@@ -406,6 +408,7 @@ extension IMAPMailService {
     /// Deletes a label: its keyword comes off its messages on the server, and it goes from those kept on this Mac and
     /// from the book.
     public func deleteLabel(_ label: MailFolder) async throws {
+        if isGmail { return try await gmailDeleteLabel(label) }
         guard let labelBook else { throw PMailError.notSupported("This account can’t delete labels.") }
         guard let current = await labelBook.label(withID: label.id) else { return }
         if await labelBook.keywordsAllowed() != false { try await retag(current.id, to: nil) }

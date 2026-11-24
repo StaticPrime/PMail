@@ -86,6 +86,10 @@ public enum IMAPResponseCode: Sendable, Hashable {
     case appendUID(uidValidity: UInt32, uid: UInt32)
     /// Where copied or moved messages went, in the same order as `source` (UIDPLUS).
     case copyUID(uidValidity: UInt32, source: [UInt32], destination: [UInt32])
+    /// The mailbox's highest modification sequence (CONDSTORE): it grows whenever a message is added or changed.
+    case highestModSeq(UInt64)
+    /// The mailbox doesn't keep modification sequences (CONDSTORE).
+    case noModSeq
     /// The destination mailbox doesn't exist, and creating it might help.
     case tryCreate
     case readOnly
@@ -135,10 +139,17 @@ public struct IMAPFetchResponse: Sendable, Hashable {
     public var sections: [String: Data]
     /// The server's own conversation ID (X-GM-THRID), from servers that offer X-GM-EXT-1.
     public var threadID: String?
+    /// The message's labels (X-GM-LABELS), from servers that offer X-GM-EXT-1: Gmail's own ones with a backslash
+    /// ("\Inbox", "\Important"), the account's by name, decoded ("Work/Projects").
+    public var gmailLabels: [String]?
+    /// The message's own ID (X-GM-MSGID), the same in every mailbox it shows in, from servers that offer X-GM-EXT-1.
+    public var gmailMessageID: String?
+    /// The message's modification sequence (CONDSTORE).
+    public var modSeq: UInt64?
 
     public init(sequenceNumber: Int, uid: UInt32? = nil, flags: [String]? = nil, internalDate: Date? = nil, size: Int? = nil,
                 envelope: IMAPEnvelope? = nil, bodyStructure: IMAPBodyPart? = nil, sections: [String: Data] = [:],
-                threadID: String? = nil) {
+                threadID: String? = nil, gmailLabels: [String]? = nil) {
         self.sequenceNumber = sequenceNumber
         self.uid = uid
         self.flags = flags
@@ -148,6 +159,7 @@ public struct IMAPFetchResponse: Sendable, Hashable {
         self.bodyStructure = bodyStructure
         self.sections = sections
         self.threadID = threadID
+        self.gmailLabels = gmailLabels
     }
 
     /// Reads the attribute list of a FETCH response: `(UID 7 FLAGS (\Seen) BODY[1]<0> {12}…)`.
@@ -166,6 +178,10 @@ public struct IMAPFetchResponse: Sendable, Hashable {
             case "ENVELOPE": envelope = IMAPEnvelope(value)
             case "BODYSTRUCTURE", "BODY": bodyStructure = IMAPBodyPart.parse(value) ?? bodyStructure
             case "X-GM-THRID": threadID = value.text
+            case "X-GM-MSGID": gmailMessageID = value.text
+            case "MODSEQ": modSeq = (value.items?.first?.text ?? value.text).flatMap { UInt64($0) }
+            case "X-GM-LABELS":
+                gmailLabels = (value.items ?? []).compactMap(\.text).map { $0.hasPrefix("\\") ? $0 : IMAPMailboxName.decode($0) }
             case "RFC822": sections[""] = value.data ?? Data()
             case "RFC822.HEADER": sections["HEADER"] = value.data ?? Data()
             case "RFC822.TEXT": sections["TEXT"] = value.data ?? Data()
@@ -199,6 +215,9 @@ public struct IMAPFetchResponse: Sendable, Hashable {
         envelope = other.envelope ?? envelope
         bodyStructure = other.bodyStructure ?? bodyStructure
         threadID = other.threadID ?? threadID
+        gmailLabels = other.gmailLabels ?? gmailLabels
+        gmailMessageID = other.gmailMessageID ?? gmailMessageID
+        modSeq = other.modSeq ?? modSeq
         sections.merge(other.sections) { _, new in new }
     }
 
@@ -304,9 +323,11 @@ public struct IMAPSelectedMailbox: Sendable, Hashable {
     public var uidNext: UInt32?
     public var flags: [String]
     public var permanentFlags: [String]
+    /// The highest modification sequence, when it was opened with CONDSTORE.
+    public var highestModSeq: UInt64?
 
     public init(name: String, isReadOnly: Bool, exists: Int = 0, recent: Int = 0, uidValidity: UInt32? = nil,
-                uidNext: UInt32? = nil, flags: [String] = [], permanentFlags: [String] = []) {
+                uidNext: UInt32? = nil, flags: [String] = [], permanentFlags: [String] = [], highestModSeq: UInt64? = nil) {
         self.name = name
         self.isReadOnly = isReadOnly
         self.exists = exists
@@ -315,6 +336,7 @@ public struct IMAPSelectedMailbox: Sendable, Hashable {
         self.uidNext = uidNext
         self.flags = flags
         self.permanentFlags = permanentFlags
+        self.highestModSeq = highestModSeq
     }
 }
 

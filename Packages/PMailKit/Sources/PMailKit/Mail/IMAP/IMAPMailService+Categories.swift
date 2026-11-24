@@ -17,6 +17,7 @@ extension IMAPMailService {
     /// Unread messages in each category of the inbox: the inbox sorted as for listing (only what isn't yet), then one
     /// search for what's unread.
     public func unreadCounts(inTabs tabs: [InboxTab]) async throws -> [String: Int] {
+        if isGmail { return try await gmailUnreadCounts(inTabs: tabs) }
         guard let sorter, tabs.contains(where: { InboxCategory(tabID: $0.id) != nil }) else { return [:] }
         let chosen = await sorter.senderCategories()
         return try await withClient { client in

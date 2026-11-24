@@ -19,7 +19,7 @@ struct LiveServiceFactory: ServiceFactory {
         guard let secret else { return unavailable(.notSignedIn) }
         switch account.kind {
         case .google, .microsoft:
-            return webServices(for: account, secret: secret, secrets: secrets)
+            return webServices(for: account, secret: secret, secrets: secrets, keepsMail: storage != nil)
         case .icloud, .other:
             return internetServices(for: account, secret: secret, storage: storage)
         }
@@ -44,7 +44,8 @@ struct LiveServiceFactory: ServiceFactory {
         return AccountServices(mail: service, calendar: service, contacts: service)
     }
 
-    private func webServices(for account: Account, secret: StoredSecret, secrets: any SecretStore) -> AccountServices {
+    /// `keepsMail`: the window's services, which keep a Google account's mail on this Mac (not a sign-in check's).
+    private func webServices(for account: Account, secret: StoredSecret, secrets: any SecretStore, keepsMail: Bool) -> AccountServices {
         guard let provider = oauth.provider(for: account.kind) else {
             return unavailable(.notConfigured("\(account.kind.displayName) sign-in isn’t set up in this copy of PMail."))
         }
@@ -55,7 +56,10 @@ struct LiveServiceFactory: ServiceFactory {
             try? secrets.setSecret(.oauth(fresh), for: id)
         }
         if account.kind == .google {
-            return AccountServices(mail: GoogleMailService(email: account.email, tokens: tokenProvider),
+            let storeFolder = keepsMail ? storage(for: account).appendingPathComponent("Gmail", isDirectory: true) : nil
+            // An earlier build kept a copy downloaded through Google's mail API here; the Gmail folder replaces it.
+            if keepsMail { try? FileManager.default.removeItem(at: storage(for: account).appendingPathComponent("Google Mail", isDirectory: true)) }
+            return AccountServices(mail: gmail(for: account, tokens: tokenProvider, storeFolder: storeFolder),
                                    calendar: calendar(GoogleCalendarService(tokens: tokenProvider,
                                                                             dismissedFile: storage(for: account).appendingPathComponent(DismissedEvents.fileName)),
                                                       tasks: GoogleTasksService(tokens: tokenProvider), for: account),
@@ -68,6 +72,20 @@ struct LiveServiceFactory: ServiceFactory {
                                                                            followedFile: storage(for: account).appendingPathComponent(FollowedCalendars.fileName)),
                                                   tasks: MicrosoftTasksService(tokens: tokenProvider), for: account),
                                contacts: MicrosoftContactsService(tokens: tokenProvider))
+    }
+
+    /// A Google account's mail: Gmail's IMAP and SMTP servers, signed in with the account's Google sign-in, the
+    /// Gmail way (labels, category tabs, Gmail's conversations and search), kept on this Mac in `storeFolder` so every
+    /// list comes from there. Google's mail API keeps its label colors and signature.
+    private func gmail(for account: Account, tokens: any AccessTokenProvider, storeFolder: URL?) -> any MailService {
+        let credential = Credential.oauth(username: account.email, tokens: tokens)
+        let incoming = ServerSettings(mailProtocol: .imap, host: "imap.gmail.com", security: .tls, username: account.email,
+                                      authentication: .oauth2)
+        let outgoing = ServerSettings(mailProtocol: .smtp, host: "smtp.gmail.com", security: .tls, username: account.email,
+                                      authentication: .oauth2)
+        return IMAPMailService(account: account, incoming: incoming, credential: credential,
+                               sender: SMTPSender(settings: outgoing, credential: credential),
+                               gmailAPI: GoogleMailService(email: account.email, tokens: tokens), gmailStoreFolder: storeFolder)
     }
 
     private func internetServices(for account: Account, secret: StoredSecret, storage: AccountStorage?) -> AccountServices {

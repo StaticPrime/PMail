@@ -170,16 +170,26 @@ final class NewMailFilter {
         starting.insert(session.id)
         defer { starting.remove(session.id) }
         let service = session.services.mail
-        guard let folders = try? await service.loadFolders() else { return }
-        func messages(in role: FolderRole) async -> [MessageSummary]? {
-            guard let folder = folders.first(where: { $0.role == role }) else { return [] }
-            return try? await service.listConversations(ListRequest(folderID: folder.id, pageSize: 100)).conversations.flatMap(\.messages)
+        let junkMarks = session.storage.junkMarks
+        let recipients = session.storage.recipients
+        // Background work: where a service limits how fast an account may go (Google's mail), learning waits its turn
+        // instead of holding up what the person is doing.
+        await BackgroundWork.run {
+            guard let folders = try? await service.loadFolders() else { return }
+            // Mail kept on this Mac is learned from once its download has a page of each folder.
+            await service.waitUntilDownloaded(folderIDs: [FolderRole.spam, .inbox, .sent].compactMap { role in
+                folders.first { $0.role == role }?.id
+            })
+            func messages(in role: FolderRole) async -> [MessageSummary]? {
+                guard let folder = folders.first(where: { $0.role == role }) else { return [] }
+                return try? await service.listConversations(ListRequest(folderID: folder.id, pageSize: 100)).conversations.flatMap(\.messages)
+            }
+            guard let junk = await messages(in: .spam), let inbox = await messages(in: .inbox), let sent = await messages(in: .sent) else { return }
+            let marked = await junkMarks.marks(for: inbox)
+            await filter.learn(junk, asJunk: true)
+            await filter.learn(inbox.filter { marked[$0.id] == nil }, asJunk: false)
+            await recipients.record(sent.flatMap { $0.to + $0.cc }.map(\.email))
+            await filter.markStarted(account: key)
         }
-        guard let junk = await messages(in: .spam), let inbox = await messages(in: .inbox), let sent = await messages(in: .sent) else { return }
-        let marked = await session.storage.junkMarks.marks(for: inbox)
-        await filter.learn(junk, asJunk: true)
-        await filter.learn(inbox.filter { marked[$0.id] == nil }, asJunk: false)
-        await session.storage.recipients.record(sent.flatMap { $0.to + $0.cc }.map(\.email))
-        await filter.markStarted(account: key)
     }
 }

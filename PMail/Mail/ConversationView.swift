@@ -205,7 +205,7 @@ private struct ExpandedMessage: View {
                             Button("Delete this message") { mail.perform(.trash, onMessage: summary) }
                             Button("Mark unread from here") { mail.perform(.markUnread, onMessage: summary); mail.closeConversation() }
                             Divider()
-                            if message.rawSource != nil { Button("Download message") { saveOriginal() } }
+                            if message.rawSource != nil || mail.openQueuedItem == nil { Button("Download message") { saveOriginal() } }
                             if let unsubscribe = message.listUnsubscribe.flatMap(unsubscribeURL) {
                                 Button("Unsubscribe") { NSWorkspace.shared.open(unsubscribe) }
                             }
@@ -278,8 +278,22 @@ private struct ExpandedMessage: View {
         return (links.first { $0.hasPrefix("https://") } ?? links.first { $0.hasPrefix("mailto:") }).flatMap(URL.init(string:))
     }
 
+    /// Saves the message as it came from the server. A copy kept on this Mac doesn't keep that, so it's fetched.
     private func saveOriginal() {
-        guard let data = message.rawSource else { return }
+        if let data = message.rawSource { return save(data) }
+        let service = mail.service
+        let summary = message.summary
+        Task {
+            do {
+                guard let data = try await service.loadMessage(summary).rawSource else { throw PMailError.notFound }
+                save(data)
+            } catch {
+                app.report(error, doing: "Downloading the message")
+            }
+        }
+    }
+
+    private func save(_ data: Data) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = (message.summary.subject.isEmpty ? "Message" : message.summary.subject)
             .replacingOccurrences(of: "/", with: "-") + ".eml"

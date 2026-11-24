@@ -199,6 +199,11 @@ public enum IMAPParser {
         case "COPYUID":
             let validity = try number()
             code = .copyUID(uidValidity: validity, source: try set(), destination: try set())
+        case "HIGHESTMODSEQ":
+            scanner.skipSpaces()
+            guard let value = UInt64(scanner.atom()) else { throw PMailError.protocolError("HIGHESTMODSEQ had no number") }
+            code = .highestModSeq(value)
+        case "NOMODSEQ": code = .noModSeq
         case "TRYCREATE": code = .tryCreate
         case "READ-ONLY": code = .readOnly
         case "READ-WRITE": code = .readWrite

@@ -33,6 +33,9 @@ final class MailViewModel {
     private(set) var totalCount: Int?
     private(set) var hasNextPage = false
     private(set) var isLoadingList = false
+    /// How far downloading the account's mail to this Mac has got, for a service that lists from a copy here.
+    private(set) var downloadProgress: MailDownloadProgress?
+    @ObservationIgnored private var copyReloadScheduled = false
     private(set) var listError: String?
     private(set) var needsSignIn = false
     /// The server couldn't be reached, so what's showing is what PMail last loaded.
@@ -131,7 +134,8 @@ final class MailViewModel {
         guard !tabs.isEmpty, currentFolder?.role == .inbox else { return }
         let service = self.service
         Task {
-            if let counts = try? await service.unreadCounts(inTabs: tabs) { tabUnreadCounts = counts }
+            // Background work: where the service has a connection for that, the counts never hold up what's clicked.
+            if let counts = try? await BackgroundWork.run({ try await service.unreadCounts(inTabs: tabs) }) { tabUnreadCounts = counts }
         }
     }
 
@@ -247,6 +251,11 @@ final class MailViewModel {
     // MARK: Loading
 
     func start() {
+        // A service that keeps the account's mail on this Mac says when the copy changes or downloads more.
+        let service = self.service
+        let copyChanged: @Sendable (MailCopyEvent) -> Void = { [weak self] event in
+            Task { @MainActor in self?.localCopyChanged(event) }
+        }
         Task {
             waitingDrafts = await storage.waitingDrafts.all()
             // What was loaded last time shows at once, while the server is asked.
@@ -261,9 +270,45 @@ final class MailViewModel {
             }
             await refreshLocalFolders()
             await loadBlockedSenders()
+            // Such a service downloads the mail in the background, the inbox first, and the lists come from there.
+            await service.watchLocalCopy(copyChanged)
             await loadFolders(thenList: true)
+            await service.startDownloading(inboxTab: inboxTabs.first?.id)
             // A signature kept on the server may have changed there.
             await app?.accounts.refreshSignature(of: account.id)
+        }
+    }
+
+    /// The copy of the account's mail on this Mac changed or downloaded more: the folders, the page showing and the
+    /// tab counts show it, without a spinner, a moment later (so a burst of changes reloads once).
+    func localCopyChanged(_ event: MailCopyEvent) {
+        switch event {
+        case let .progress(progress):
+            downloadProgress = progress
+        case .changed:
+            guard !copyReloadScheduled else { return }
+            copyReloadScheduled = true
+            Task {
+                try? await Task.sleep(for: .milliseconds(400))
+                copyReloadScheduled = false
+                await loadFolders(thenList: false)
+                reloadListQuietly()
+                if currentFolder?.role == .inbox { refreshTabCounts() }
+            }
+        }
+    }
+
+    /// Loads the page showing again without a spinner, when its list comes from the copy on this Mac.
+    private func reloadListQuietly() {
+        guard capabilities.listsFromLocalCopy, activeSearch == nil, !showsLocalFolder, !isLoadingList else { return }
+        let generation = listGeneration
+        let key = listKey
+        let request = ListRequest(folderID: listFolderID, tabID: selectedTabID, pageSize: pageSize,
+                                  pageToken: pageIndex == 0 ? nil : pageTokens[pageIndex], pageIndex: pageIndex, extra: fillerCount)
+        Task {
+            guard let page = try? await service.listConversations(request), generation == listGeneration, key == listKey else { return }
+            show(page)
+            await storage.cache.save(page: page, for: key)
         }
     }
 
@@ -302,54 +347,64 @@ final class MailViewModel {
             await refreshLocalFolders()
             loadList()
         }
-        if let session { app?.sync?.refreshCalendarAndContacts(of: session) }
+        guard let session else { return }
+        app?.sync?.refreshCalendarAndContacts(of: session)
+        // With the mail kept on this Mac, refreshing catches the copy up with the server now.
+        if capabilities.listsFromLocalCopy { Task { await app?.sync?.check(session) } }
     }
 
-    /// New mail came in, or the server said something changed: counts and the list showing are fetched again
-    /// (without clearing what's there).
     /// How many unread messages with an event's title are opened, at most, to find its invitation.
     static let invitationCandidates = 20
 
     /// Marks an event's invitation emails read once it's answered on the calendar: the inbox's unread messages whose
     /// calendar file is for that very event, by its iCalendar UID (every version of the invitation, if it was sent
     /// more than once). PMail may never have opened them, so the inbox is searched for the event's title; a message
-    /// with the same title about another event, or with no calendar file for this one, stays as it is.
+    /// with the same title about another event, or with no calendar file for this one, stays as it is. The search is
+    /// background work, so where a service limits how fast an account may go, it never holds up what the person is
+    /// doing.
     func markInvitationRead(for event: CalendarEvent) async {
         guard let uid = event.uid, !uid.isEmpty else { return }
         let title = event.title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
         let service = self.service
         let inbox = folder(role: .inbox)?.id ?? "INBOX"
-        let searched = (try? await service.listConversations(ListRequest(folderID: inbox, query: title, pageSize: 50)))?.conversations ?? []
-        // The newest mail too, with the title in its subject: a server's search may not know a message that only just
-        // arrived (iCloud's often doesn't).
-        let newest = (try? await service.listConversations(ListRequest(folderID: inbox, pageSize: 50)))?.conversations ?? []
-        let lowered = title.lowercased()
-        var seen = Set<String>()
-        let found = searched.flatMap(\.messages) + newest.flatMap(\.messages).filter { $0.subject.lowercased().contains(lowered) }
-        // Messages known to carry an invitation are opened first, then ones that might (the list doesn't say for
-        // every account); ones known not to carry one never are.
-        let candidates = found.filter { seen.insert($0.id).inserted && $0.isUnread && $0.isInvitation != false }
-            .sorted { first, second in
-                func rank(_ message: MessageSummary) -> Int { message.isInvitation == true ? 0 : message.hasAttachments ? 1 : 2 }
-                return rank(first) < rank(second)
-            }
-        var matches: [MessageSummary] = []
-        for summary in candidates.prefix(Self.invitationCandidates) {
-            guard let message = try? await service.loadMessage(summary) else { continue }
-            for file in message.attachments + message.inlineParts where Invitation.isCalendarFile(mimeType: file.mimeType, filename: file.filename) {
-                var data = file.data
-                if data == nil { data = try? await service.loadAttachment(file, in: summary) }
-                if let data, Invitation.read(data, ownerEmail: account.email)?.uid == uid {
-                    matches.append(summary)
-                    break
+        let ownerEmail = account.email
+        let limit = Self.invitationCandidates
+        let marked = await BackgroundWork.run { () async -> Bool in
+            let searched = (try? await service.listConversations(ListRequest(folderID: inbox, query: title, pageSize: 50)))?.conversations ?? []
+            // The newest mail too, with the title in its subject: a server's search may not know a message that only
+            // just arrived (iCloud's often doesn't).
+            let newest = (try? await service.listConversations(ListRequest(folderID: inbox, pageSize: 50)))?.conversations ?? []
+            let lowered = title.lowercased()
+            var seen = Set<String>()
+            let found = searched.flatMap(\.messages) + newest.flatMap(\.messages).filter { $0.subject.lowercased().contains(lowered) }
+            // Messages known to carry an invitation are opened first, then ones that might (the list doesn't say for
+            // every account); ones known not to carry one never are.
+            let candidates = found.filter { seen.insert($0.id).inserted && $0.isUnread && $0.isInvitation != false }
+                .sorted { first, second in
+                    func rank(_ message: MessageSummary) -> Int { message.isInvitation == true ? 0 : message.hasAttachments ? 1 : 2 }
+                    return rank(first) < rank(second)
+                }
+            var matches: [MessageSummary] = []
+            for summary in candidates.prefix(limit) {
+                guard let message = try? await service.loadMessage(summary) else { continue }
+                for file in message.attachments + message.inlineParts where Invitation.isCalendarFile(mimeType: file.mimeType, filename: file.filename) {
+                    var data = file.data
+                    if data == nil { data = try? await service.loadAttachment(file, in: summary) }
+                    if let data, Invitation.read(data, ownerEmail: ownerEmail)?.uid == uid {
+                        matches.append(summary)
+                        break
+                    }
                 }
             }
+            guard !matches.isEmpty else { return false }
+            return (try? await service.perform(.markRead, on: matches)) != nil
         }
-        guard !matches.isEmpty, (try? await service.perform(.markRead, on: matches)) != nil else { return }
-        serverChanged()
+        if marked { serverChanged() }
     }
 
+    /// New mail came in, or the server said something changed: counts and the list showing are fetched again
+    /// (without clearing what's there).
     func serverChanged() {
         Task {
             await loadFolders(thenList: false)
@@ -388,7 +443,7 @@ final class MailViewModel {
         }
         let key = listKey
         let request = ListRequest(folderID: listFolderID, tabID: selectedTabID, query: activeSearch, pageSize: pageSize,
-                                  pageToken: pageIndex == 0 ? nil : pageTokens[pageIndex], pageIndex: pageIndex)
+                                  pageToken: pageIndex == 0 ? nil : pageTokens[pageIndex], pageIndex: pageIndex, extra: fillerCount)
         isLoadingList = true
         listError = nil
         let cacheable = activeSearch == nil
@@ -399,6 +454,12 @@ final class MailViewModel {
             do {
                 let page = try await service.listConversations(request)
                 guard generation == listGeneration else { return }
+                // The copy on this Mac has nothing yet (its first download is just starting): what showed before stays.
+                if page.conversations.isEmpty, capabilities.listsFromLocalCopy, (downloadProgress?.downloaded ?? 0) == 0,
+                   !conversations.isEmpty {
+                    isLoadingList = false
+                    return
+                }
                 show(page)
                 isLoadingList = false
                 needsSignIn = false
@@ -420,6 +481,16 @@ final class MailViewModel {
         }
     }
 
+    /// How many conversations being filed away from the list showing (waiting out Undo, on their way, or waiting for
+    /// the network) are still in its pages, for a service that lists from a copy on this Mac: a load lists that many
+    /// more, so the page fills up in their place at once rather than once they've reached the server.
+    private var fillerCount: Int {
+        guard capabilities.listsFromLocalCopy else { return 0 }
+        let key = listKey
+        let leaving = (Array(pending.values) + Array(committing.values) + waitingForNetwork).filter { $0.leaves && $0.listKey == key }
+        return Set(leaving.flatMap { $0.messages.map(\.threadID) }).count
+    }
+
     private func show(_ page: ConversationPage) {
         // What was filed away here but hasn't reached the server yet (waiting out Undo, on its way, or waiting for
         // the network) stays out of the list when it's loaded again.
@@ -434,6 +505,9 @@ final class MailViewModel {
                 return conversation.messages.isEmpty ? nil : conversation
             }
         }
+        let filedAway = page.conversations.count - shown.count
+        // A page listed with more to fill in for what's being filed away shows a page's worth.
+        if shown.count > pageSize { shown = Array(shown.prefix(pageSize)) }
         // Drafts kept on this Mac go at the top of Drafts, in place of the server's copies they replace (or delete).
         if showsDrafts, pageIndex == 0, !waitingDrafts.isEmpty {
             let replaced = Set(waitingDrafts.compactMap { $0.replaces?.id })
@@ -441,7 +515,7 @@ final class MailViewModel {
             shown = waitingDrafts.reversed().compactMap { draft in draft.summary.map { Conversation(id: draft.summaryID, messages: [$0]) } } + shown
         }
         conversations = shown
-        totalCount = page.totalCount.map { max(0, $0 - (page.conversations.count - shown.count)) }
+        totalCount = page.totalCount.map { max(0, $0 - filedAway) }
         hasNextPage = page.nextPageToken != nil
         if let token = page.nextPageToken { pageTokens[pageIndex + 1] = token }
         checkedIDs.formIntersection(Set(conversations.map(\.id)))
@@ -683,8 +757,10 @@ final class MailViewModel {
         let snoozed = selectedFolderID == Snooze.folderID
         Task {
             var showedCopy = false
-            if let cached = await storage.cache.conversation(conversation.id), !cached.isEmpty, generation == conversationGeneration {
-                show(cached, for: conversation)
+            // The copy kept from before shows at once, and the service fetches only what it doesn't have.
+            let kept = await storage.cache.conversation(conversation.id) ?? []
+            if !kept.isEmpty, generation == conversationGeneration {
+                show(kept, for: conversation)
                 showedCopy = true
             }
             do {
@@ -694,7 +770,7 @@ final class MailViewModel {
                     let found = try await service.findMessages(withMessageIDs: conversation.messages.compactMap(\.messageIDHeader))
                     if !found.isEmpty { hint = Conversation(id: found.first?.threadID ?? conversation.id, messages: found) }
                 }
-                let messages = try await service.loadConversation(id: hint.id, hint: hint)
+                let messages = try await service.loadConversation(id: hint.id, hint: hint, known: kept)
                 guard generation == conversationGeneration else { return }
                 show(messages, for: conversation)
                 connectionTrouble = false
@@ -949,6 +1025,8 @@ final class MailViewModel {
         pending[id] = item
         app?.show(note ?? text, actionTitle: undoable ? "Undo" : nil, duration: undoable ? undoDelay : 4,
                   action: undoable ? { [weak self] in self?.undo(id) } : nil)
+        // With the mail on this Mac, the next conversations move up at once to fill the page.
+        if leaves, capabilities.listsFromLocalCopy { reloadListQuietly() }
     }
 
     /// Sends a waiting action to the server; offline, it waits for the network.

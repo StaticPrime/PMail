@@ -8,6 +8,12 @@ public actor GoogleMailService: MailService {
     let client: WebClient
     /// Draft IDs, by the draft message's ID and by its Message-ID header, so a draft can be replaced or deleted.
     private var draftIDs: [String: String] = [:]
+    /// List rows fetched before, by thread, with the history ID the list gave the thread then. A thread the list gives
+    /// the same history ID again hasn't changed (a new message or a label would have moved it on), so its row isn't
+    /// fetched again: Google counts every thread fetched toward what the account may spend in a minute.
+    private var listedRows: [String: (historyID: String, messages: [MessageSummary])] = [:]
+    /// The most rows kept.
+    static let keptRows = 2_000
 
     static let base = "https://gmail.googleapis.com/gmail/v1/users/me/"
 
@@ -38,7 +44,12 @@ public actor GoogleMailService: MailService {
     ]
 
     public init(email: String, tokens: any AccessTokenProvider, transport: any HTTPTransport = URLSessionTransport()) {
-        self.init(email: email, client: WebClient(tokens: tokens, transport: transport))
+        // Google counts what each person's requests cost in a minute, and refuses a person too many requests going
+        // at once; PMail keeps its own count and its own limit to stay under both.
+        let budget = RequestBudget(capacity: Self.unitsPerMinute, backgroundShare: Self.backgroundShare,
+                                   cost: { GoogleMailService.quotaCost($0, $1) })
+        let gate = RequestGate(limit: Self.requestsAtOnce)
+        self.init(email: email, client: WebClient(tokens: tokens, transport: transport, budget: budget, gate: gate))
     }
 
     init(email: String, client: WebClient) {
@@ -61,6 +72,11 @@ public actor GoogleMailService: MailService {
     // MARK: Folders
 
     public func loadFolders() async throws -> [MailFolder] {
+        try await fetchFolders()
+    }
+
+    /// Every label, with its counts, from Google.
+    func fetchFolders() async throws -> [MailFolder] {
         let labels = try await client.get(Self.url("labels"))["labels"].array
         let counted = labels.compactMap { label -> String? in
             guard let id = label["id"].string else { return nil }
@@ -119,7 +135,14 @@ public actor GoogleMailService: MailService {
 
     // MARK: Listing
 
+    /// A page of a list (or a search), from Google.
     public func listConversations(_ request: ListRequest) async throws -> ConversationPage {
+        try await listFromGoogle(request)
+    }
+
+    /// A page of a list (or a search) from Google. Rows kept from before are used again for threads that haven't changed
+    /// since; only the rest are fetched.
+    private func listFromGoogle(_ request: ListRequest) async throws -> ConversationPage {
         var query: [(String, String)] = []
         if let folderID = request.folderID, !folderID.isEmpty {
             query.append(("labelIds", folderID))
@@ -133,21 +156,38 @@ public actor GoogleMailService: MailService {
         if let token = request.pageToken, !token.isEmpty { query.append(("pageToken", token)) }
         let list = try await client.get(Self.url("threads", query))
 
-        let threadIDs = WebClient.unique(list["threads"].array.compactMap { $0["id"].nonEmpty })
+        let listed = list["threads"].array
+        let threadIDs = WebClient.unique(listed.compactMap { $0["id"].nonEmpty })
+        var historyIDs: [String: String] = [:]
+        for thread in listed {
+            guard let id = thread["id"].nonEmpty, historyIDs[id] == nil, let historyID = thread["historyId"].nonEmpty else { continue }
+            historyIDs[id] = historyID
+        }
+        // Rows fetched before for threads that haven't changed since are used again; only the rest are fetched.
+        var rows: [String: [MessageSummary]] = [:]
+        for id in threadIDs {
+            if let historyID = historyIDs[id], let kept = listedRows[id], kept.historyID == historyID { rows[id] = kept.messages }
+        }
         let client = self.client
-        let threads = try await WebClient.concurrentMap(threadIDs) { id -> JSONValue? in
+        let fetched = try await WebClient.concurrentMap(threadIDs.filter { rows[$0] == nil }) { id -> (String, JSONValue?) in
             do {
-                return try await client.get(Self.url("threads/\(WebURL.segment(id))", Self.metadataQuery))
+                return (id, try await client.get(Self.url("threads/\(WebURL.segment(id))", Self.metadataQuery)))
             } catch PMailError.notFound {
-                return nil  // Deleted since the list was made.
+                return (id, nil)  // Deleted since the list was made.
             }
         }
+        for case let (id, thread?) in fetched {
+            let messages = thread["messages"].array.compactMap(Self.summary(fromMetadata:))
+            rows[id] = messages
+            if let historyID = historyIDs[id] { listedRows[id] = (historyID, messages) }
+        }
+        if listedRows.count > Self.keptRows {
+            let showing = Set(threadIDs)
+            listedRows = listedRows.filter { showing.contains($0.key) }
+        }
         let folderID = request.folderID
-        let conversations = threads.compactMap { thread -> Conversation? in
-            guard let thread, let id = thread["id"].string else { return nil }
-            let messages = thread["messages"].array.compactMap(Self.summary(fromMetadata:)).filter {
-                Self.isShown($0.labelIDs, listing: folderID)
-            }
+        let conversations = threadIDs.compactMap { id -> Conversation? in
+            let messages = (rows[id] ?? []).filter { Self.isShown($0.labelIDs, listing: folderID) }
             return messages.isEmpty ? nil : Conversation(id: id, messages: messages)
         }
         return ConversationPage(conversations: conversations, totalCount: list["resultSizeEstimate"].int,
@@ -304,25 +344,53 @@ public actor GoogleMailService: MailService {
     // MARK: Reading
 
     public func loadConversation(id: String, hint: Conversation?) async throws -> [MailMessage] {
+        try await loadConversation(id: id, hint: hint, known: [])
+    }
+
+    /// A message never changes once it's in the mailbox, only its labels: one kept from opening the conversation
+    /// before is used again with its labels as they are now, and only the others are fetched.
+    public func loadConversation(id: String, hint: Conversation?, known: [MailMessage]) async throws -> [MailMessage] {
+        // Which messages the conversation has, with their labels.
         let thread = try await client.get(Self.url("threads/\(WebURL.segment(id))", [("format", "minimal")]))
-        let entries = thread["messages"].array.filter { $0["id"].nonEmpty != nil }
+        let entries: [(id: String, labels: [String], summary: MessageSummary?)] = thread["messages"].array.compactMap { entry in
+            entry["id"].nonEmpty.map { ($0, entry["labelIds"].strings, nil) }
+        }
         let hints = Dictionary((hint?.messages ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         // Trashed and spam messages stay out unless the list showed them (or they're all there is).
         let visible = entries.filter { entry in
-            let labels = entry["labelIds"].strings
-            return (!labels.contains("TRASH") && !labels.contains("SPAM")) || hints[entry["id"].string ?? ""] != nil
+            (!entry.labels.contains("TRASH") && !entry.labels.contains("SPAM")) || hints[entry.id] != nil
         }
+        let kept = Dictionary(known.filter { $0.htmlBody != nil || $0.textBody != nil }.map { ($0.id, $0) },
+                              uniquingKeysWith: { first, _ in first })
         let client = self.client
         let messages = try await WebClient.concurrentMap(visible.isEmpty ? entries : visible) { entry -> MailMessage? in
-            guard let messageID = entry["id"].string else { return nil }
+            if let message = kept[entry.id] { return Self.relabeled(message, entry.labels) }
             do {
-                let raw = try await client.get(Self.url("messages/\(WebURL.segment(messageID))", [("format", "raw")]))
-                return Self.message(fromRaw: raw, hint: hints[messageID])
+                let raw = try await client.get(Self.url("messages/\(WebURL.segment(entry.id))", [("format", "raw")]))
+                return Self.message(fromRaw: raw, hint: hints[entry.id] ?? entry.summary)
             } catch PMailError.notFound {
                 return nil
             }
         }
         return messages.compactMap { $0 }.sorted { $0.summary.date < $1.summary.date }
+    }
+
+    /// A message kept from before with its labels (and so its read, starred, important and draft marks) as they are
+    /// now. Google leaves a message with no labels without a label list.
+    static func relabeled(_ message: MailMessage, _ labels: [String]) -> MailMessage {
+        var message = message
+        message.summary = relabeled(message.summary, labels)
+        return message
+    }
+
+    static func relabeled(_ summary: MessageSummary, _ labels: [String]) -> MessageSummary {
+        var summary = summary
+        summary.labelIDs = labels
+        summary.isUnread = labels.contains("UNREAD")
+        summary.isStarred = labels.contains("STARRED")
+        summary.isImportant = labels.contains("IMPORTANT")
+        summary.isDraft = labels.contains("DRAFT")
+        return summary
     }
 
     public func loadMessage(_ summary: MessageSummary) async throws -> MailMessage {
@@ -428,6 +496,15 @@ public actor GoogleMailService: MailService {
         _ = try await client.post(Self.url("messages/send"), Self.rawMessage(message, threadID: message.threadID))
     }
 
+    /// A list row for a message sent or saved from here.
+    static func summary(of message: OutgoingMessage, id: String, threadID: String?, labels: [String]) -> MessageSummary {
+        MessageSummary(id: id, threadID: threadID, labelIDs: labels, from: message.from, to: message.to, cc: message.cc,
+                       subject: message.subject, snippet: HTMLText.snippet(from: message.textBody), date: message.date,
+                       isUnread: labels.contains("UNREAD"), isStarred: labels.contains("STARRED"), isDraft: labels.contains("DRAFT"),
+                       hasAttachments: !message.attachments.isEmpty, messageIDHeader: message.messageID,
+                       inReplyTo: message.inReplyTo, references: message.references)
+    }
+
     /// The `{raw, threadId}` form of a message that Google's mail API takes.
     static func rawMessage(_ message: OutgoingMessage, threadID: String?) -> JSONValue {
         var body: [String: JSONValue] = ["raw": .string(WebBase64.urlEncoded(WebMIME.build(message)))]
@@ -459,12 +536,10 @@ public actor GoogleMailService: MailService {
         draftIDs[messageID] = draftID
         draftIDs[message.messageID] = draftID
         let labels = result["message"]["labelIds"].strings
-        return MessageSummary(id: messageID, threadID: result["message"]["threadId"].nonEmpty,
-                              labelIDs: labels.isEmpty ? ["DRAFT"] : labels,
-                              from: message.from, to: message.to, cc: message.cc, subject: message.subject,
-                              snippet: HTMLText.snippet(from: message.textBody), date: message.date, isDraft: true,
-                              hasAttachments: !message.attachments.isEmpty, messageIDHeader: message.messageID,
-                              inReplyTo: message.inReplyTo, references: message.references)
+        var summary = Self.summary(of: message, id: messageID, threadID: result["message"]["threadId"].nonEmpty,
+                                   labels: labels.isEmpty ? ["DRAFT"] : labels)
+        summary.isDraft = true
+        return summary
     }
 
     public func deleteDraft(_ draft: MessageSummary) async throws {

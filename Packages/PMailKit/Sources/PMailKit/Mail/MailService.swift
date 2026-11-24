@@ -19,6 +19,22 @@ public protocol MailService: AnyObject, Sendable {
     /// for services that can't look a conversation up by ID alone.
     func loadConversation(id: String, hint: Conversation?) async throws -> [MailMessage]
 
+    /// The same, given the messages kept on this Mac from opening the conversation before: a service whose messages
+    /// never change (Google's) fetches only the ones it doesn't have. Others fetch them all.
+    func loadConversation(id: String, hint: Conversation?, known: [MailMessage]) async throws -> [MailMessage]
+
+    // The copy on this Mac (a service that lists from one: Google's). Others do nothing here.
+
+    /// Starts keeping the account's mail on this Mac: a background job downloads it a page at a time, the inbox (the
+    /// tab `inboxTab`, when the inbox shows tabs), Trash and Sent first.
+    func startDownloading(inboxTab: String?) async
+
+    /// Hands `update` each change to the copy on this Mac and each step of its download.
+    func watchLocalCopy(_ update: @escaping @Sendable (MailCopyEvent) -> Void) async
+
+    /// Waits until the copy on this Mac has at least a page of each of these folders.
+    func waitUntilDownloaded(folderIDs: [String]) async
+
     /// One whole message, with its body.
     func loadMessage(_ summary: MessageSummary) async throws -> MailMessage
 
@@ -83,6 +99,36 @@ public protocol MailService: AnyObject, Sendable {
 
 /// Where a service is up to in an account's inbox, for asking what's new since then. Only the service that made it
 /// understands it.
+/// What happened to the copy of an account's mail kept on this Mac.
+public enum MailCopyEvent: Sendable, Equatable {
+    /// Conversations or folders changed: downloaded, caught up with the server, or changed here.
+    case changed
+    /// How the download stands.
+    case progress(MailDownloadProgress)
+}
+
+/// How far the download of an account's mail to this Mac has got.
+public struct MailDownloadProgress: Sendable, Equatable {
+    /// Conversations kept on this Mac.
+    public var downloaded: Int
+    /// Conversations in the mailbox, as the server last said.
+    public var total: Int?
+    /// Whether it's still downloading.
+    public var isDownloading: Bool
+
+    public init(downloaded: Int, total: Int?, isDownloading: Bool) {
+        self.downloaded = downloaded
+        self.total = total
+        self.isDownloading = isDownloading
+    }
+
+    /// How much is downloaded, from 0 to 1, when the total is known.
+    public var fraction: Double? {
+        guard let total else { return nil }
+        return total > 0 ? min(Double(downloaded) / Double(total), 1) : 1
+    }
+}
+
 public struct MailSyncState: Codable, Sendable, Hashable {
     public var value: String
 
@@ -108,6 +154,16 @@ public struct NewMail: Sendable {
 }
 
 extension MailService {
+    public func loadConversation(id: String, hint: Conversation?, known: [MailMessage]) async throws -> [MailMessage] {
+        try await loadConversation(id: id, hint: hint)
+    }
+
+    public func startDownloading(inboxTab: String?) async {}
+
+    public func watchLocalCopy(_ update: @escaping @Sendable (MailCopyEvent) -> Void) async {}
+
+    public func waitUntilDownloaded(folderIDs: [String]) async {}
+
     public func checkForNewMail(since state: MailSyncState?) async throws -> NewMail {
         throw PMailError.notSupported("This account can’t be checked for new mail yet.")
     }

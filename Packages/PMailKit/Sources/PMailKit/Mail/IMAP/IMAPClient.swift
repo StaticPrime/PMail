@@ -297,11 +297,14 @@ public actor IMAPClient {
 
     /// Opens a mailbox for the commands that follow: SELECT, or EXAMINE when `readOnly`.
     @discardableResult
-    public func select(_ mailbox: String, readOnly: Bool = false) async throws -> IMAPSelectedMailbox {
+    /// With `condstore`, on a server that offers CONDSTORE, the mailbox's highest modification sequence comes too.
+    public func select(_ mailbox: String, readOnly: Bool = false, condstore: Bool = false) async throws -> IMAPSelectedMailbox {
         try await exclusively {
             // A failed SELECT leaves no mailbox selected.
             self.selectedMailbox = nil
-            let result = try await self.run([.text(readOnly ? "EXAMINE " : "SELECT "), self.mailboxArgument(mailbox)])
+            var parts: [IMAPCommandPart] = [.text(readOnly ? "EXAMINE " : "SELECT "), self.mailboxArgument(mailbox)]
+            if condstore, self.capabilities.contains("CONDSTORE") { parts.append(.text(" (CONDSTORE)")) }
+            let result = try await self.run(parts)
             try self.check(result)
             var selected = IMAPSelectedMailbox(name: mailbox, isReadOnly: readOnly)
             for response in result.untagged {
@@ -314,6 +317,7 @@ public actor IMAPClient {
                     case let .uidValidity(value)?: selected.uidValidity = value
                     case let .uidNext(value)?: selected.uidNext = value
                     case let .permanentFlags(flags)?: selected.permanentFlags = flags
+                    case let .highestModSeq(value)?: selected.highestModSeq = value
                     default: break
                     }
                 default: break
@@ -368,11 +372,31 @@ public actor IMAPClient {
         }
     }
 
-    /// What a message list shows for each message (`summaryItems`, plus the server's conversation ID when it
-    /// offers X-GM-EXT-1), optionally with the whole message too.
+    /// Fetches items for every message with a UID from `first` up (to `last`, or the newest when nil), in UID order. With
+    /// `changedSince` (CONDSTORE), only those changed since that modification sequence. Answers a server splits are
+    /// joined; `n:*`'s newest message, which comes even when its UID is below `first`, is left out.
+    public func uidFetch(from first: UInt32, to last: UInt32? = nil, items: String, changedSince: UInt64? = nil) async throws -> [IMAPFetchResponse] {
+        let start = max(first, 1)
+        if let last, last < start { return [] }
+        return try await exclusively {
+            var command = "UID FETCH \(start):\(last.map(String.init) ?? "*") (\(items))"
+            if let changedSince { command += " (CHANGEDSINCE \(changedSince))" }
+            let result = try await self.run([.text(command)])
+            try self.check(result)
+            var byUID: [UInt32: IMAPFetchResponse] = [:]
+            for case let .fetch(response) in result.untagged {
+                guard let uid = response.uid, uid >= start, last.map({ uid <= $0 }) ?? true else { continue }
+                if byUID[uid] == nil { byUID[uid] = response } else { byUID[uid]?.merge(response) }
+            }
+            return byUID.keys.sorted().compactMap { byUID[$0] }
+        }
+    }
+
+    /// What a message list shows for each message (`summaryItems`, plus the server's conversation ID and labels when
+    /// it offers X-GM-EXT-1), optionally with the whole message too.
     public func fetchSummaries(_ uids: [UInt32], withMessage: Bool = false) async throws -> [IMAPFetchResponse] {
         var items = Self.summaryItems
-        if capabilities.contains("X-GM-EXT-1") { items += " X-GM-THRID" }
+        if capabilities.contains("X-GM-EXT-1") { items += " X-GM-THRID X-GM-LABELS" }
         if withMessage { items += " BODY.PEEK[]" }
         return try await uidFetch(uids, items: items)
     }
@@ -417,6 +441,26 @@ public actor IMAPClient {
             }
             return reported
         }
+    }
+
+    /// Adds or takes away Gmail labels (X-GM-EXT-1): Gmail's own by their backslash names ("\Inbox", "\Important"),
+    /// the account's by name. A label is on a message wherever it is, so this works in any mailbox.
+    public func uidStoreGmailLabels(_ uids: [UInt32], adding: Bool, labels: [String]) async throws {
+        guard !uids.isEmpty, !labels.isEmpty else { return }
+        try await exclusively {
+            var parts: [IMAPCommandPart] = [.text("UID STORE \(IMAPSequenceSet.string(uids)) \(adding ? "+" : "-")X-GM-LABELS (")]
+            for (index, label) in labels.enumerated() {
+                if index > 0 { parts.append(.text(" ")) }
+                parts.append(Self.isGmailSystemLabel(label) ? .text(label) : self.mailboxArgument(label))
+            }
+            parts.append(.text(")"))
+            try self.check(try await self.run(parts))
+        }
+    }
+
+    /// Gmail's own labels ("\Inbox", "\Important"), which go as they are.
+    static func isGmailSystemLabel(_ label: String) -> Bool {
+        label.hasPrefix("\\") && label.dropFirst().allSatisfy { $0.isLetter }
     }
 
     /// Copies messages to another mailbox; returns the COPYUID code when the server gives one.
@@ -659,6 +703,15 @@ public actor IMAPClient {
         guard let connection else { throw PMailError.connectionFailed("the connection to the server was closed") }
         tagNumber += 1
         let tag = "A\(tagNumber)"
+        // A slow answer is noted, by the command's name only, for finding out what's slow.
+        let started = ContinuousClock.now
+        defer {
+            let elapsed = ContinuousClock.now - started
+            if elapsed >= .seconds(1) {
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                Self.log.notice("\(Self.commandName(parts), privacy: .public) took \(seconds, format: .fixed(precision: 1)) s")
+            }
+        }
         var untagged: [IMAPUntaggedResponse] = []
         do {
             if let refusal = try await send(parts, tag: tag, on: connection, untagged: &untagged) {
@@ -814,6 +867,14 @@ public actor IMAPClient {
         capabilities = []
         tagNumber = 0
         byeText = nil
+    }
+
+    /// A command's name for notes ("UID SEARCH", "EXAMINE"), without what it's about.
+    static func commandName(_ parts: [IMAPCommandPart]) -> String {
+        guard case let .text(text)? = parts.first else { return "A command" }
+        let words = text.split(separator: " ").prefix(2).map(String.init)
+        if words.first == "UID", words.count > 1 { return "UID " + words[1] }
+        return words.first ?? "A command"
     }
 
     /// Runs `body` with no other command in flight, so commands from different tasks never interleave.

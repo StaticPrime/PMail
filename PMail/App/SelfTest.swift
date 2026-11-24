@@ -1549,8 +1549,10 @@ enum SelfTest {
             try? secrets.setSecret(.password("x"), for: pop.id)
             let g = factory.services(for: google, secrets: secrets)
             let gCalendar = g.calendar as? CalendarWithTasks
-            check(g.mail is GoogleMailService && gCalendar?.calendars is GoogleCalendarService && gCalendar?.tasks is GoogleTasksService
-                  && g.contacts is GoogleContactsService, "a Google account uses Google's mail, calendar, tasks and contacts services")
+            let gMail = g.mail as? IMAPMailService
+            check(gMail?.isGmail == true && gMail?.gmailAPI != nil && gCalendar?.calendars is GoogleCalendarService
+                  && gCalendar?.tasks is GoogleTasksService && g.contacts is GoogleContactsService,
+                  "a Google account's mail is Gmail over IMAP, and its calendar, tasks and contacts are Google's services")
             check(gCalendar?.types.file == factory.storage(for: google).appendingPathComponent(EventTypeBook.fileName),
                   "and keeps the kinds of events its calendars can't hold in its folder")
             let m = factory.services(for: microsoft, secrets: secrets)
@@ -2326,7 +2328,10 @@ enum SelfTest {
 
         // MARK: Accounts, windows and menus
         step {
-            check(app.oauth.google == nil || ProcessInfo.processInfo.environment["PMAIL_GOOGLE_CLIENT_ID"] != nil, "sign-in setup comes from the environment")
+            // The client ID comes from the environment, or from the build's settings (Config/Secrets.xcconfig) by way of Info.plist.
+            let googleClientID = ProcessInfo.processInfo.environment["PMAIL_GOOGLE_CLIENT_ID"]
+                ?? (Bundle.main.object(forInfoDictionaryKey: "PMailGoogleClientID") as? String)
+            check(app.oauth.google == nil || app.oauth.google?.clientID == googleClientID, "sign-in setup comes from the environment or the build")
             app.sheet = .addAccount(nil)
             check(app.sheet?.id == "add-any", "Add Account opens the sheet")
             app.sheet = nil

@@ -65,6 +65,17 @@ extension GoogleMailService {
         }
     }
 
+    /// The account's own labels by their full names ("Work/Projects"), with their IDs and colors: for mail reached
+    /// over IMAP, where a label is a mailbox with its name.
+    public func userLabels() async throws -> [String: (id: String, colorHex: String?)] {
+        var found: [String: (id: String, colorHex: String?)] = [:]
+        for label in try await client.get(Self.url("labels"))["labels"].array where label["type"].string == "user" {
+            guard let id = label["id"].nonEmpty, let name = label["name"].nonEmpty else { continue }
+            found[name] = (id, WebColor.hex(label["color"]["backgroundColor"].string))
+        }
+        return found
+    }
+
     /// A label from Google's answer as the folder list shows it, with the name to show.
     static func labelFolder(_ json: JSONValue, name: String, parentID: String? = nil) throws -> MailFolder {
         guard let id = json["id"].nonEmpty else { throw PMailError.protocolError("the label had no ID") }

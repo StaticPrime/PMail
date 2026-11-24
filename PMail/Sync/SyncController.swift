@@ -230,9 +230,13 @@ final class SyncController {
         let service = session.services.mail
         let cache = session.storage.remoteContent
         Task {
-            for summary in wanted {
-                guard let html = try? await service.loadMessage(summary).htmlBody, !html.isEmpty else { continue }
-                await RemoteContentLoader.shared.prefetch(html: html, into: cache)
+            // Background work: where a service limits how fast an account may go, it never holds up what the person
+            // is doing.
+            await BackgroundWork.run {
+                for summary in wanted {
+                    guard let html = try? await service.loadMessage(summary).htmlBody, !html.isEmpty else { continue }
+                    await RemoteContentLoader.shared.prefetch(html: html, into: cache)
+                }
             }
         }
     }

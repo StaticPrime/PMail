@@ -54,9 +54,18 @@ public final class URLSessionByteStream: ByteStream, @unchecked Sendable {
         session.invalidateAndCancel()
     }
 
+    // The completion-handler forms, each answered once: a stream task can call a read's handler a second time (with
+    // "cancelled") when the connection failed and is then closed, which the system's async forms don't survive.
+
     public func read() async throws -> Data {
+        let task = self.task
+        let timeout = self.timeout
         do {
-            let (data, atEnd) = try await task.readData(ofMinLength: 1, maxLength: 256 * 1024, timeout: timeout)
+            let (data, atEnd) = try await OnceContinuation<(Data?, Bool)>.wait { answer in
+                task.readData(ofMinLength: 1, maxLength: 256 * 1024, timeout: timeout) { data, atEnd, error in
+                    answer(error.map { .failure($0) } ?? .success((data, atEnd)))
+                }
+            }
             if let data, !data.isEmpty { return data }
             if atEnd { return Data() }
             throw PMailError.timedOut
@@ -68,8 +77,12 @@ public final class URLSessionByteStream: ByteStream, @unchecked Sendable {
     }
 
     public func write(_ data: Data) async throws {
+        let task = self.task
+        let timeout = self.timeout
         do {
-            try await task.write(data, timeout: timeout)
+            try await OnceContinuation<Void>.wait { answer in
+                task.write(data, timeout: timeout) { error in answer(error.map { .failure($0) } ?? .success(())) }
+            }
         } catch {
             throw Self.translate(error)
         }
@@ -98,6 +111,32 @@ public final class URLSessionByteStream: ByteStream, @unchecked Sendable {
             }
         }
         return .connectionFailed(nsError.localizedDescription)
+    }
+}
+
+/// Waits for a completion handler that may be called more than once, taking only its first answer.
+final class OnceContinuation<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+
+    private init(_ continuation: CheckedContinuation<Value, Error>) {
+        self.continuation = continuation
+    }
+
+    /// Runs `start`, handing it a function to answer with; answers after the first are ignored.
+    static func wait(_ start: (@escaping @Sendable (Result<Value, Error>) -> Void) -> Void) async throws -> Value {
+        try await withCheckedThrowingContinuation { continuation in
+            let once = OnceContinuation(continuation)
+            start { result in once.resume(with: result) }
+        }
+    }
+
+    private func resume(with result: Result<Value, Error>) {
+        let waiting = lock.withLock { () -> CheckedContinuation<Value, Error>? in
+            defer { continuation = nil }
+            return continuation
+        }
+        waiting?.resume(with: result)
     }
 }
 

@@ -1,25 +1,49 @@
 import Foundation
+import os
 
 /// Talks to a provider's JSON web API for one account. It adds the bearer token, gets a fresh token and tries once
-/// more when a token is turned down, waits and tries again when the service says it's busy, and turns error answers
-/// into `PMailError`s worded for the person.
+/// more when a token is turned down, waits and tries again when the service says it's busy, that the account has too
+/// many requests going or that it's going too fast for the minute, keeps within what the account may spend in a
+/// minute and have going at once when the service limits that, and turns error answers into `PMailError`s worded for
+/// the person.
 struct WebClient: Sendable {
     let tokens: any AccessTokenProvider
     let transport: any HTTPTransport
     /// The longest wait, in seconds, that a busy answer's `Retry-After` can ask for.
     var maxRetryDelay: Double
-    /// How many times a busy answer (HTTP 429 or 503) is tried again.
+    /// How many times a busy answer (HTTP 429 or 503, or a server error to a GET) is tried again.
     var busyRetries: Int
+    /// What the account may spend in a minute, for a service that counts it (Google's mail API): requests wait for
+    /// room instead of being refused.
+    let budget: RequestBudget?
+    /// How many requests the account may have going at once, for a service that limits it (Google's mail API).
+    let gate: RequestGate?
+    /// How many times a refusal for going too fast for the minute is tried again.
+    var rateLimitRetries: Int
     /// Waits a number of seconds. Tests swap in one that returns at once.
     let pause: @Sendable (Double) async throws -> Void
+    /// From 0 to 1, for spreading out the waits before trying again, so requests refused together don't come back
+    /// together. Tests use 1, which waits the whole time.
+    let jitter: @Sendable () -> Double
+
+    /// How many times a refusal for having too many requests going at once is tried again.
+    static let crowdedRetries = 5
+    /// Notes on waiting and refusals, in the Console app under the "Requests" category.
+    static let log = Logger(subsystem: "com.pugglesoft.PMail", category: "Requests")
 
     init(tokens: any AccessTokenProvider, transport: any HTTPTransport, maxRetryDelay: Double = 5, busyRetries: Int = 2,
-         pause: @escaping @Sendable (Double) async throws -> Void = WebClient.sleep) {
+         budget: RequestBudget? = nil, gate: RequestGate? = nil, rateLimitRetries: Int = 3,
+         pause: @escaping @Sendable (Double) async throws -> Void = WebClient.sleep,
+         jitter: @escaping @Sendable () -> Double = { Double.random(in: 0...1) }) {
         self.tokens = tokens
         self.transport = transport
         self.maxRetryDelay = maxRetryDelay
         self.busyRetries = busyRetries
+        self.budget = budget
+        self.gate = gate
+        self.rateLimitRetries = rateLimitRetries
         self.pause = pause
+        self.jitter = jitter
     }
 
     /// Really waits, for the app.
@@ -33,15 +57,21 @@ struct WebClient: Sendable {
     /// Sends a request and returns the body and response of a successful answer (any 2xx status).
     func send(_ method: String, _ url: URL, body: Data? = nil, contentType: String? = nil,
               headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+        let inBackground = BackgroundWork.isRunning
         var triedNewToken = false
         var busyAttempts = 0
+        var rateLimitAttempts = 0
+        var crowdedAttempts = 0
         while true {
+            if let budget {
+                try await Self.mappingErrors { try await budget.spend(method, url, inBackground: inBackground) }
+            }
             let token = try await Self.mappingErrors { try await tokens.accessToken() }
             var allHeaders = headers
             allHeaders["Authorization"] = "Bearer \(token)"
             if let contentType { allHeaders["Content-Type"] = contentType }
             let request = URLRequest(url: url, method: method, headers: allHeaders, body: body)
-            let (data, response) = try await Self.mappingErrors { try await transport.data(for: request) }
+            let (data, response) = try await transmit(request, inBackground: inBackground)
             let status = response.statusCode
             if (200..<300).contains(status) { return (data, response) }
             if status == 401 {
@@ -50,15 +80,63 @@ struct WebClient: Sendable {
                 await tokens.invalidateAccessToken()
                 continue
             }
-            if status == 429 || status == 503, busyAttempts < busyRetries {
+            switch Self.refusal(status: status, data: data) {
+            case .tooManyAtOnce?:
+                // Too many requests going for the account (others of PMail's, or another app's): a moment's wait, a
+                // little longer each time.
+                guard crowdedAttempts < Self.crowdedRetries else { throw Self.error(status: status, data: data) }
+                crowdedAttempts += 1
+                let wait = Self.backoff(attempt: crowdedAttempts, base: 0.5, cap: 8, jitter: jitter())
+                Self.log.notice("Too many requests going at once; trying again in \(wait, format: .fixed(precision: 1)) s")
+                try await Self.mappingErrors { try await pause(wait) }
+                continue
+            case .tooFastForTheMinute?:
+                // Too fast for the minute: wait a little, longer each time, and if it goes on, say so plainly.
+                guard rateLimitAttempts < rateLimitRetries else { throw PMailError.server(Self.slowDownMessage) }
+                rateLimitAttempts += 1
+                if let budget {
+                    await budget.refused()
+                } else {
+                    let asked = Self.retryDelay(response.value(forHTTPHeaderField: "Retry-After"), attempt: 0, cap: 60)
+                    let wait = asked > 0 ? asked : Self.backoff(attempt: rateLimitAttempts, base: 5, cap: 60, jitter: jitter())
+                    try await Self.mappingErrors { try await pause(wait) }
+                }
+                continue
+            case nil:
+                break
+            }
+            if Self.isBusy(status: status, method: method), busyAttempts < busyRetries {
                 busyAttempts += 1
-                let wait = Self.retryDelay(response.value(forHTTPHeaderField: "Retry-After"), attempt: busyAttempts,
-                                           cap: maxRetryDelay)
+                let asked = response.value(forHTTPHeaderField: "Retry-After")
+                let wait = asked == nil
+                    ? Self.backoff(attempt: busyAttempts, base: 1, cap: maxRetryDelay, jitter: jitter())
+                    : Self.retryDelay(asked, attempt: busyAttempts, cap: maxRetryDelay)
                 try await Self.mappingErrors { try await pause(wait) }
                 continue
             }
             throw Self.error(status: status, data: data)
         }
+    }
+
+    /// Sends one request on its way, taking a place among the account's requests going at once where the service
+    /// limits them.
+    private func transmit(_ request: URLRequest, inBackground: Bool) async throws -> (Data, HTTPURLResponse) {
+        guard let gate else { return try await Self.mappingErrors { try await transport.data(for: request) } }
+        await gate.enter(inBackground: inBackground)
+        do {
+            let answer = try await Self.mappingErrors { try await transport.data(for: request) }
+            await gate.leave(inBackground: inBackground)
+            return answer
+        } catch {
+            await gate.leave(inBackground: inBackground)
+            throw error
+        }
+    }
+
+    /// Whether an unsuccessful answer is worth trying again after a moment: the service is busy, or a server error
+    /// answered a request that's safe to send twice.
+    static func isBusy(status: Int, method: String) -> Bool {
+        status == 429 || status == 503 || (method.uppercased() == "GET" && [500, 502, 504].contains(status))
     }
 
     /// Sends a request with an optional body and reads the JSON answer (`.null` when the answer is empty).
@@ -139,6 +217,42 @@ struct WebClient: Sendable {
         } catch {
             throw PMailError.connectionFailed(error.localizedDescription)
         }
+    }
+
+    /// What PMail says when a service keeps refusing because the account is going too fast.
+    static let slowDownMessage = "The server asked PMail to slow down for a minute. Try again shortly."
+
+    /// Why a service refused a request that waiting a little can cure.
+    enum Refusal: Equatable {
+        /// The account has too many requests going at once (Google: "Too many concurrent requests for user").
+        case tooManyAtOnce
+        /// The account is going too fast for the minute (a per-minute quota, which passes).
+        case tooFastForTheMinute
+    }
+
+    /// Why an answer refuses, when waiting a little cures it: too many requests at once, or too fast for the minute.
+    /// A daily limit or missing permission, which waiting doesn't cure, is nil, like any other answer.
+    static func refusal(status: Int, data: Data) -> Refusal? {
+        guard status == 403 || status == 429, let json = try? JSONValue.parse(data) else { return nil }
+        let error = json["error"]
+        let details = error["errors"].array + error["details"].array
+        let messages = ([error["message"].string] + details.map { $0["message"].string }).compactMap { $0?.lowercased() }
+        let reasons = details.compactMap { $0["reason"].string }
+        if messages.contains(where: { $0.contains("per day") }) || reasons.contains("dailyLimitExceeded") { return nil }
+        // Google gives this the same reason as going too fast; only the message tells them apart.
+        if messages.contains(where: { $0.contains("concurrent") }) { return .tooManyAtOnce }
+        if reasons.contains(where: { ["rateLimitExceeded", "userRateLimitExceeded", "RATE_LIMIT_EXCEEDED"].contains($0) })
+            || messages.contains(where: { $0.contains("quota exceeded") && $0.contains("per minute") }) {
+            return .tooFastForTheMinute
+        }
+        return nil
+    }
+
+    /// How long to wait before trying again for the `attempt`th time (from 1): `base` seconds, doubling each time,
+    /// never more than `cap`, with up to half taken off by `jitter` (from 0 to 1; 1 takes nothing off).
+    static func backoff(attempt: Int, base: Double, cap: Double, jitter: Double) -> Double {
+        let whole = min(base * pow(2, Double(max(attempt, 1) - 1)), cap)
+        return whole * (0.5 + 0.5 * min(max(jitter, 0), 1))
     }
 
     /// The error for an unsuccessful HTTP status.

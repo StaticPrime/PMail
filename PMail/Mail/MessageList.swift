@@ -10,12 +10,23 @@ struct MessageList: View {
     var body: some View {
         VStack(spacing: 0) {
             ListToolbar(app: app, mail: mail)
+            if let progress = mail.downloadProgress, progress.isDownloading {
+                DownloadStatus(progress: progress)
+            }
             if mail.selectedTabID != nil, mail.activeSearch == nil, mail.currentFolder?.role == .inbox, !mail.inboxTabs.isEmpty {
                 InboxTabs(mail: mail)
             }
             Divider().overlay(Theme.divider)
             if let error = mail.listError, mail.conversations.isEmpty {
                 ErrorState(text: error) { mail.refresh() }
+            } else if let progress = mail.downloadProgress, progress.isDownloading, mail.conversations.isEmpty, mail.activeSearch == nil {
+                // Nothing of this list downloaded yet.
+                VStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(progress.downloaded == 0 ? "Downloading your mail…" : "Nothing in this list has downloaded yet.")
+                        .font(.pm(13)).foregroundStyle(Theme.textSecondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if mail.conversations.isEmpty, !mail.isLoadingList, mail.foldersLoaded {
                 EmptyListState(mail: mail)
             } else {
@@ -31,6 +42,35 @@ struct MessageList: View {
                 }
             }
         }
+    }
+}
+
+/// How far downloading the account's mail to this Mac has got, while it's downloading: lists show what's here so far.
+private struct DownloadStatus: View {
+    let progress: MailDownloadProgress
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if let fraction = progress.fraction {
+                ProgressView(value: fraction).progressViewStyle(.linear).frame(width: 120)
+            } else {
+                ProgressView().controlSize(.mini)
+            }
+            Text(text).font(.pm(12)).foregroundStyle(Theme.textSecondary).lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 26)
+        .help("PMail keeps your mail on this Mac and shows what it has downloaded so far. The rest comes in the background.")
+    }
+
+    private var text: String {
+        let number = NumberFormatter()
+        number.numberStyle = .decimal
+        let downloaded = number.string(from: NSNumber(value: progress.downloaded)) ?? "\(progress.downloaded)"
+        guard let total = progress.total, total > 0 else { return "Downloading mail: \(downloaded) messages so far" }
+        let all = number.string(from: NSNumber(value: max(total, progress.downloaded))) ?? "\(total)"
+        return "Downloading mail: \(downloaded) of \(all) messages"
     }
 }
 

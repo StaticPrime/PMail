@@ -230,6 +230,11 @@ public indirect enum IMAPSearchKey: Sendable, Hashable {
     case or(IMAPSearchKey, IMAPSearchKey)
     /// Keys that must all match, in parentheses.
     case allOf([IMAPSearchKey])
+    /// Gmail's own search (X-GM-RAW, on servers that offer X-GM-EXT-1), in the words of its search box:
+    /// "category:social", "from:alex has:attachment".
+    case gmailSearch(String)
+    /// The messages in one of Gmail's conversations (X-GM-THRID). An ID that isn't a number matches nothing.
+    case gmailThread(String)
 
     /// One key that matches when any of the keys does; nil for none.
     public static func any(_ keys: [IMAPSearchKey]) -> IMAPSearchKey? {
@@ -277,6 +282,9 @@ public indirect enum IMAPSearchKey: Sendable, Hashable {
             first.write(into: &builder)
             builder.text(" ")
             second.write(into: &builder)
+        case let .gmailSearch(query): string("X-GM-RAW", query)
+        case let .gmailThread(id):
+            builder.text(!id.isEmpty && id.utf8.allSatisfy { $0 >= 0x30 && $0 <= 0x39 } ? "X-GM-THRID " + id : "NOT ALL")
         case let .allOf(keys):
             builder.text("(")
             for (index, key) in keys.enumerated() {

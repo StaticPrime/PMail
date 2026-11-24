@@ -87,9 +87,11 @@ public actor IMAPMailService: MailService {
     /// How often a server without IDLE is asked about the inbox while waiting for a change, in seconds.
     var pollInterval: TimeInterval = 60
 
+    /// `gmailAPI`, for a Google account: its mail works the Gmail way (see IMAPMailService+Gmail.swift), with label
+    /// colors, changes to labels and the signature through Google's mail API.
     public init(account: Account, incoming: ServerSettings, credential: Credential, sender: any MailSending,
                 connector: any ByteStreamConnector = URLSessionConnector(), localStore: LocalMailStore? = nil,
-                labelBook: LabelBook? = nil, sorter: InboxSorter? = nil) {
+                labelBook: LabelBook? = nil, sorter: InboxSorter? = nil, gmailAPI: GoogleMailService? = nil, gmailStoreFolder: URL? = nil) {
         self.account = account
         self.incoming = incoming
         self.credential = credential
@@ -98,7 +100,34 @@ public actor IMAPMailService: MailService {
         localFolders = localStore.map(LocalFolders.init(store:))
         self.labelBook = labelBook
         self.sorter = sorter
+        self.gmailAPI = gmailAPI
+        isGmail = gmailAPI != nil || account.kind == .google
+        gmailStore = isGmail ? gmailStoreFolder.flatMap { try? GmailStore(file: $0.appendingPathComponent(GmailStore.fileName)) } : nil
     }
+
+    /// For a Google account, its mail kept on this Mac, which every list comes from (`gmailStoreFolder`); nil keeps
+    /// asking the server (signing in, tests).
+    nonisolated let gmailStore: GmailStore?
+    /// What keeping the store in step keeps between syncs.
+    var gmailSync = GmailSyncState()
+
+    /// Whether the account is a Google one, whose mail works the Gmail way: labels, category tabs, Gmail's
+    /// conversations and search, and the special folders under "[Gmail]".
+    public nonisolated let isGmail: Bool
+    /// Google's mail API, for a Google account's label colors, changes to labels and signature.
+    public nonisolated let gmailAPI: GoogleMailService?
+    /// What the Gmail way keeps between calls: label counts and colors, loaded now and then.
+    var gmail = GmailIMAPState()
+    /// A Google account's connection for background work (learning junk, fetching pictures ahead, tab counts), so what
+    /// the person asks for never waits behind it.
+    var backgroundClient: IMAPClient?
+    var isBackgroundBusy = false
+    var backgroundWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Lists' messages, newest first, as their last search found them, so another page of the same list doesn't
+    /// search again (Gmail's own searches are its slowest answers).
+    var listed: [IMAPListKey: IMAPListedUIDs] = [:]
+    /// How long a list's search is used again for another page of it, while its mailbox hasn't changed.
+    static let listReuseWindow: TimeInterval = 300
 
     /// The account's labels kept on this Mac (their names and colors, and which messages have them where the server
     /// can't keep that); nil leaves labels out.
@@ -109,17 +138,26 @@ public actor IMAPMailService: MailService {
     var categoryIndex = IMAPCategoryIndex()
 
     public nonisolated var capabilities: MailCapabilities {
-        MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: false, hasInboxTabs: sorter != nil, searchesOnServer: true,
-                         canArchive: true, supportsDrafts: true, canMove: true, canLabel: labelBook != nil,
-                         canEditLabels: labelBook != nil)
+        if isGmail {
+            return MailCapabilities(usesLabels: true, canStar: true, canMarkImportant: true, hasInboxTabs: true, searchesOnServer: true,
+                                    canArchive: true, supportsDrafts: true, canMove: true, canLabel: true,
+                                    canEditLabels: gmailAPI != nil, syncsSignature: gmailAPI != nil, listsFromLocalCopy: gmailStore != nil)
+        }
+        return MailCapabilities(usesLabels: false, canStar: true, canMarkImportant: false, hasInboxTabs: sorter != nil, searchesOnServer: true,
+                                canArchive: true, supportsDrafts: true, canMove: true, canLabel: labelBook != nil,
+                                canEditLabels: labelBook != nil)
     }
 
-    public nonisolated var inboxTabs: [InboxTab] { sorter == nil ? [] : InboxCategory.tabs }
+    public nonisolated var inboxTabs: [InboxTab] {
+        if isGmail { return Self.gmailTabs }
+        return sorter == nil ? [] : InboxCategory.tabs
+    }
 
     // MARK: Folders
 
     public func loadFolders() async throws -> [MailFolder] {
-        try await withClient { client in
+        if isGmail { return try await gmailFolders() }
+        return try await withClient { client in
             var boxes = try await client.listMailboxes()
             // Every account has an inbox, even on a server that leaves it out of LIST.
             if !boxes.contains(where: \.isInbox) { boxes.insert(IMAPMailbox(name: "INBOX"), at: 0) }
@@ -157,6 +195,7 @@ public actor IMAPMailService: MailService {
     // MARK: Listing
 
     public func listConversations(_ request: ListRequest) async throws -> ConversationPage {
+        if let store = await usableGmailStore() { return try await gmailStorePage(request, store: store) }
         if let local = localFolders, LocalFolders.contains(request.folderID) { return await local.page(request) }
         if let page = try await labelPage(request) { return page }
         if let page = try await categoryPage(request) { return page }
@@ -165,11 +204,27 @@ public actor IMAPMailService: MailService {
             // Opened again each time, so the list sees the mailbox as it is now.
             let selected = try await client.select(mailbox, readOnly: true)
             var keys = filter.map { [$0] } ?? []
-            keys += IMAPSearchKey.matching(query: request.query ?? "")
-            let uids = selected.exists == 0 ? [] : try await client.uidSearch(keys.isEmpty ? [.all] : keys)
-            let newestFirst = Array(Set(uids)).sorted(by: >)
+            if self.isGmail {
+                // Gmail's own search and category tabs.
+                keys += Self.gmailSearchKeys(for: request, in: mailbox)
+            } else {
+                keys += IMAPSearchKey.matching(query: request.query ?? "")
+            }
             let pageSize = max(1, request.pageSize)
             let pageIndex = max(0, request.pageToken.flatMap { Int($0) } ?? request.pageIndex)
+            // Another page of a list just searched (or a tab or a whole mailbox again, which flags don't change) uses
+            // that search, while the mailbox has the same messages; otherwise it searches.
+            let listKey = IMAPListKey(mailbox: mailbox, keys: keys)
+            let newestFirst: [UInt32]
+            if let kept = self.listed[listKey], kept.isCurrent(for: selected, within: Self.listReuseWindow),
+               pageIndex > 0 || Self.searchIgnoresFlags(keys) {
+                newestFirst = kept.newestFirst
+            } else {
+                let uids = selected.exists == 0 ? [] : try await client.uidSearch(keys.isEmpty ? [.all] : keys)
+                newestFirst = Array(Set(uids)).sorted(by: >)
+                self.listed[listKey] = IMAPListedUIDs(uidValidity: selected.uidValidity, uidNext: selected.uidNext,
+                                                      exists: selected.exists, newestFirst: newestFirst, searched: Date())
+            }
             let (offset, overflowed) = pageIndex.multipliedReportingOverflow(by: pageSize)
             let start = overflowed ? newestFirst.count : min(offset, newestFirst.count)
             let end = start + min(pageSize, newestFirst.count - start)
@@ -244,11 +299,14 @@ public actor IMAPMailService: MailService {
         let messageID = envelope?.messageID
         let threadID = response.threadID ?? references.first ?? inReplyTo ?? messageID ?? id.rawValue
         let isInvitation: Bool? = response.bodyStructure?.hasCalendar
-        return MessageSummary(id: id.rawValue, threadID: threadID, folderID: id.mailbox, labelIDs: keywordLabelIDs(response.flags),
+        // Gmail's labels where the server gives them, else labels kept as keywords.
+        let labels = response.gmailLabels.map(gmailLabelIDs) ?? keywordLabelIDs(response.flags)
+        return MessageSummary(id: id.rawValue, threadID: threadID, folderID: id.mailbox, labelIDs: labels,
                               from: envelope?.from.first,
                               to: envelope?.to ?? [], cc: envelope?.cc ?? [], subject: envelope?.subject ?? "", snippet: snippet,
                               date: envelope?.date ?? response.internalDate ?? Date(timeIntervalSince1970: 0),
                               isUnread: !response.hasFlag("\\Seen"), isStarred: response.hasFlag("\\Flagged"),
+                              isImportant: response.gmailLabels?.contains("\\Important") ?? false,
                               isDraft: response.hasFlag("\\Draft"), hasAttachments: response.bodyStructure?.hasAttachments ?? false,
                               messageIDHeader: messageID, inReplyTo: inReplyTo, references: references, size: response.size,
                               senderHints: senderHints(from: headers), isInvitation: isInvitation)
@@ -257,6 +315,17 @@ public actor IMAPMailService: MailService {
     // MARK: Reading
 
     public func loadConversation(id: String, hint: Conversation?) async throws -> [MailMessage] {
+        try await loadConversation(id: id, hint: hint, known: [])
+    }
+
+    /// The same, given the messages kept from opening it before: with a Google account's store, only the others are
+    /// fetched.
+    public func loadConversation(id: String, hint: Conversation?, known: [MailMessage]) async throws -> [MailMessage] {
+        if let store = await usableGmailStore(), let messages = try await gmailStoreConversation(id: id, hint: hint, known: known, store: store) {
+            return messages
+        }
+        // A Gmail conversation is found by Gmail's own conversation ID, wherever its messages are.
+        if isGmail, let messages = try await gmailConversation(id: id, hint: hint) { return messages }
         let kept = (hint?.messages ?? []).filter { IMAPMessageID(rawValue: $0.id) == nil }
         // A conversation kept wholly on this Mac opens without the server.
         if let local = localFolders, let hint, !kept.isEmpty, kept.count == hint.messages.count {
@@ -391,6 +460,14 @@ public actor IMAPMailService: MailService {
     // MARK: Actions
 
     public func perform(_ action: MailAction, on messages: [MessageSummary]) async throws {
+        // What's in lists changes: they're searched again.
+        listed = [:]
+        if isGmail {
+            try await gmailPerform(action, on: messages)
+            // The mail kept on this Mac shows it at once.
+            await gmailApplyLocally(action, to: messages, roles: Self.gmailRoles(mailboxes ?? []))
+            return
+        }
         switch action {
         case .markImportant, .markNotImportant:
             throw PMailError.notSupported("This account doesn’t mark messages as important.")
@@ -640,6 +717,12 @@ public actor IMAPMailService: MailService {
         } catch {
             throw PMailError.connectionFailed(error.localizedDescription)
         }
+        // Gmail files what its outgoing server sends in Sent itself; another copy would show twice. A sync soon brings
+        // it into the mail kept here.
+        if isGmail {
+            gmailSyncSoon()
+            return
+        }
         // File a copy in Sent. The message has already gone, so a failure here mustn't look like a failed send
         // (which could make someone send it again).
         // The copy keeps its Bcc line, so Sent shows who else it went to.
@@ -684,6 +767,7 @@ public actor IMAPMailService: MailService {
                                   inReplyTo: message.inReplyTo, references: message.references, size: raw.count)
         }
         if let keptVersion { try? await localFolders?.store.delete(ids: [keptVersion]) }
+        gmailSyncSoon()
         return saved
     }
 
@@ -700,6 +784,7 @@ public actor IMAPMailService: MailService {
             throw PMailError.notFound
         }
         try await withClient { client in try await self.delete([id], client: client) }
+        gmailSyncSoon()
     }
 
     /// Deletes messages for good, mailbox by mailbox.
@@ -718,10 +803,15 @@ public actor IMAPMailService: MailService {
             changeClient = nil
             if isWaitingForChange { await waiting.disconnect() } else { await waiting.logout() }
         }
+        try? await backgroundExclusively {
+            await self.backgroundClient?.logout()
+            self.backgroundClient = nil
+        }
         try? await exclusively {
             await self.client?.logout()
             self.client = nil
             self.mailboxes = nil
+            self.listed = [:]
         }
     }
 
@@ -733,6 +823,7 @@ public actor IMAPMailService: MailService {
     /// is left out). The state is "<uidvalidity>:<uidnext>"; when UIDVALIDITY changes, what's new can't be told, so the
     /// check starts over from a fresh state without any messages.
     public func checkForNewMail(since state: MailSyncState?) async throws -> NewMail {
+        if isGmail, let gmailStore, await gmailStore.setting("noAllMail") == nil { return try await gmailCheckForNewMail(store: gmailStore) }
         let known = state.flatMap { IMAPInboxState($0) }
         return try await withClient { client in
             if let selected = await client.selectedMailbox, selected.name == "INBOX" {
@@ -981,7 +1072,9 @@ public actor IMAPMailService: MailService {
     /// Runs `body` with a signed-in client, alone. If the connection had dropped since it was last used, the
     /// service connects again and runs `body` once more.
     func withClient<T: Sendable>(_ body: (IMAPClient) async throws -> T) async throws -> T {
-        try await exclusively {
+        // A Google account's background work has a connection of its own.
+        if isGmail, BackgroundWork.isRunning { return try await withBackgroundClient(body) }
+        return try await exclusively {
             if let client = self.client, await client.isConnected {
                 do {
                     return try await body(client)
@@ -992,6 +1085,36 @@ public actor IMAPMailService: MailService {
             let client = try await self.openClient()
             return try await body(client)
         }
+    }
+
+    /// Runs `body` with the signed-in connection for background work, alone on it, connecting (again) as needed.
+    func withBackgroundClient<T: Sendable>(_ body: (IMAPClient) async throws -> T) async throws -> T {
+        try await backgroundExclusively {
+            if let client = self.backgroundClient, await client.isConnected {
+                do {
+                    return try await body(client)
+                } catch PMailError.connectionFailed {
+                    self.backgroundClient = nil
+                }
+            }
+            let client = IMAPClient(connector: self.connector)
+            try await self.connectAndSignIn(client)
+            self.backgroundClient = client
+            return try await body(client)
+        }
+    }
+
+    /// Runs `body` with no other background work in flight on its connection.
+    func backgroundExclusively<T: Sendable>(_ body: () async throws -> T) async throws -> T {
+        if isBackgroundBusy {
+            await withCheckedContinuation { backgroundWaiters.append($0) }
+        } else {
+            isBackgroundBusy = true
+        }
+        defer {
+            if backgroundWaiters.isEmpty { isBackgroundBusy = false } else { backgroundWaiters.removeFirst().resume() }
+        }
+        return try await body()
     }
 
     /// Connects and signs in the main connection.
@@ -1062,7 +1185,14 @@ public actor IMAPMailService: MailService {
     /// under another's FETCH.
     func exclusively<T: Sendable>(_ body: () async throws -> T) async throws -> T {
         if isBusy {
+            // A long wait is noted, for finding out what's slow.
+            let started = ContinuousClock.now
             await withCheckedContinuation { waiters.append($0) }
+            let waited = ContinuousClock.now - started
+            if waited >= .seconds(1) {
+                let seconds = Double(waited.components.seconds) + Double(waited.components.attoseconds) / 1e18
+                IMAPClient.log.notice("Waited \(seconds, format: .fixed(precision: 1)) s for the connection")
+            }
         } else {
             isBusy = true
         }
@@ -1114,6 +1244,27 @@ public actor IMAPMailService: MailService {
     /// A Message-ID in a form for comparing: without angle brackets or space around it, in lowercase.
     static func messageIDKey(_ id: String) -> String {
         id.trimmingCharacters(in: CharacterSet(charactersIn: "<> \t\r\n")).lowercased()
+    }
+}
+
+/// A list: a mailbox and the search that narrows it.
+struct IMAPListKey: Hashable {
+    var mailbox: String
+    var keys: [IMAPSearchKey]
+}
+
+/// A list's messages as a search found them, and the mailbox as it was then.
+struct IMAPListedUIDs {
+    var uidValidity: UInt32?
+    var uidNext: UInt32?
+    var exists: Int
+    var newestFirst: [UInt32]
+    var searched: Date
+
+    /// Whether the mailbox still has the same messages (no more, none fewer, the same UIDs) and the search is recent.
+    func isCurrent(for selected: IMAPSelectedMailbox, within window: TimeInterval, now: Date = Date()) -> Bool {
+        uidValidity == selected.uidValidity && uidNext == selected.uidNext && exists == selected.exists
+            && now.timeIntervalSince(searched) < window
     }
 }
 

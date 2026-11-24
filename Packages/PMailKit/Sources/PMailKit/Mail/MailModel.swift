@@ -242,15 +242,20 @@ public struct ListRequest: Sendable, Hashable {
     public var pageToken: String?
     /// The page number, from 0, for services that page by counting.
     public var pageIndex: Int
+    /// How many conversations more to list after the page, for services that list from a copy on this Mac: as many as
+    /// are being filed away from it (waiting out Undo), so the page fills up in their place. Where the next page starts
+    /// doesn't change.
+    public var extra: Int
 
     public init(folderID: String?, tabID: String? = nil, query: String? = nil, pageSize: Int = 50, pageToken: String? = nil,
-                pageIndex: Int = 0) {
+                pageIndex: Int = 0, extra: Int = 0) {
         self.folderID = folderID
         self.tabID = tabID
         self.query = query
         self.pageSize = pageSize
         self.pageToken = pageToken
         self.pageIndex = pageIndex
+        self.extra = extra
     }
 }
 
@@ -434,10 +439,13 @@ public struct MailCapabilities: Sendable, Hashable {
     public var canEditLabels: Bool
     /// The signature lives on the server too (`loadSignature`, `saveSignature`), so changes go both ways.
     public var syncsSignature: Bool
+    /// Lists come from a copy of the mail kept on this Mac, which downloads and catches up in the background
+    /// (`startDownloading`), rather than from the server.
+    public var listsFromLocalCopy: Bool
 
     public init(usesLabels: Bool = false, canStar: Bool = true, canMarkImportant: Bool = false, hasInboxTabs: Bool = false,
                 searchesOnServer: Bool = true, canArchive: Bool = true, supportsDrafts: Bool = true, canMove: Bool = true,
-                canLabel: Bool = false, canEditLabels: Bool = false, syncsSignature: Bool = false) {
+                canLabel: Bool = false, canEditLabels: Bool = false, syncsSignature: Bool = false, listsFromLocalCopy: Bool = false) {
         self.usesLabels = usesLabels
         self.canStar = canStar
         self.canMarkImportant = canMarkImportant
@@ -449,5 +457,6 @@ public struct MailCapabilities: Sendable, Hashable {
         self.canLabel = canLabel
         self.canEditLabels = canEditLabels
         self.syncsSignature = syncsSignature
+        self.listsFromLocalCopy = listsFromLocalCopy
     }
 }

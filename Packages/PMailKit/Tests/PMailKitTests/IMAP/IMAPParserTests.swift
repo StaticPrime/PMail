@@ -79,7 +79,7 @@ import Testing
         #expect(try code("A6 OK [READ-WRITE] SELECT completed") == .readWrite)
         #expect(try code("A7 OK [READ-ONLY] EXAMINE completed") == .readOnly)
         #expect(try code("* OK [UNSEEN 12] First unseen") == .unseen(12))
-        #expect(try code("* OK [HIGHESTMODSEQ 715194045007] Highest") == .other(name: "HIGHESTMODSEQ", text: "715194045007"))
+        #expect(try code("* OK [HIGHESTMODSEQ 715194045007] Highest") == .highestModSeq(715194045007))
         #expect(try code("* OK [UIDVALIDITY nope] Odd") == .other(name: "UIDVALIDITY", text: "nope"))
         #expect(try code("A8 OK Plain words") == nil)
     }

@@ -38,7 +38,7 @@ extension WebClient {
     /// A client for tests: the stub server, test tokens, and waits that return at once (recorded in `pauses`).
     static func test(_ transport: StubTransport, tokens: WebTestTokens = WebTestTokens(),
                      pauses: WebTestPauses = WebTestPauses()) -> WebClient {
-        WebClient(tokens: tokens, transport: transport, pause: { pauses.record($0) })
+        WebClient(tokens: tokens, transport: transport, pause: { pauses.record($0) }, jitter: { 1 })
     }
 }
 
