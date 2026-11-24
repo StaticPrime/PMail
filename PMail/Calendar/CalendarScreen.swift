@@ -385,7 +385,7 @@ struct TimeGridView: View {
                                 }
                                 ForEach(Array(days.enumerated()), id: \.offset) { index, day in
                                     DayColumn(app: app, model: model, day: day, events: model.events(on: day, from: timed), hourHeight: hourHeight,
-                                              draggedID: drag?.event.id,
+                                              draggedKey: drag?.event.key,
                                               onDrag: { event, value in dragChanged(event, value, columnWidth: columnWidth) },
                                               onDrop: dragEnded)
                                         .frame(width: columnWidth, height: hourHeight * 24)
@@ -425,7 +425,7 @@ struct TimeGridView: View {
     /// Follows the pointer while an event is dragged. The first move notes where in the event it was grabbed, and
     /// starts scrolling the hours when it nears their edge.
     private func dragChanged(_ event: CalendarEvent, _ value: DragGesture.Value, columnWidth: CGFloat) {
-        if drag?.event.id != event.id {
+        if drag?.event.key != event.key {
             let grabbed = time(at: value.startLocation, columnWidth: columnWidth)
             drag = TimeDrag(event: event, grab: grabbed.timeIntervalSince(event.start), pointer: value.location, start: event.start)
             model.dragStarted()
@@ -552,25 +552,26 @@ private struct DayColumn: View {
     let events: [CalendarEvent]
     let hourHeight: CGFloat
     /// The event being dragged, shown faint where it was.
-    var draggedID: String?
+    var draggedKey: String?
     var onDrag: (CalendarEvent, DragGesture.Value) -> Void = { _, _ in }
     var onDrop: () -> Void = {}
 
     var body: some View {
         GeometryReader { geometry in
-            let placements = EventLayout.layout(events.map { ($0.id, max($0.start, startOfDay), min($0.end, endOfDay)) })
+            // By key: the same meeting in two calendars (yours, and that of someone you follow) shows side by side.
+            let placements = EventLayout.layout(events.map { ($0.key, max($0.start, startOfDay), min($0.end, endOfDay)) })
             ZStack(alignment: .topLeading) {
                 Color.clear
                     .contentShape(Rectangle())
                     .onTapGesture { location in createEvent(at: location.y) }
-                ForEach(events) { event in
-                    let placement = placements[event.id] ?? EventLayout.Placement(column: 0, columns: 1, span: 1)
+                ForEach(events, id: \.key) { event in
+                    let placement = placements[event.key] ?? EventLayout.Placement(column: 0, columns: 1, span: 1)
                     let top = y(for: max(event.start, startOfDay))
                     let bottom = y(for: min(event.end, endOfDay))
                     let width = (geometry.size.width - 10) / CGFloat(placement.columns)
                     EventBlock(app: app, model: model, event: event, height: max(bottom - top, 20),
                                onDrag: model.canMove(event) ? { onDrag(event, $0) } : nil, onDrop: onDrop)
-                        .opacity(event.id == draggedID ? 0.35 : 1)
+                        .opacity(event.key == draggedKey ? 0.35 : 1)
                         .frame(width: max(width * CGFloat(placement.span) - 2, 20), height: max(bottom - top - 2, 18))
                         .offset(x: width * CGFloat(placement.column) + 1, y: top + 1)
                 }
@@ -696,15 +697,15 @@ private struct AllDayStrip: View {
                                 if let draft = model.newDraft(start: day, allDay: true) { app.sheet = .eventEditor(draft) }
                             }
                     }
-                    ForEach(rows, id: \.event.id) { row in
+                    ForEach(rows, id: \.event.key) { row in
                         AllDayBar(app: app, model: model, event: row.event)
-                            .opacity(drag?.event.id == row.event.id ? 0.35 : 1)
+                            .opacity(drag?.event.key == row.event.key ? 0.35 : 1)
                             .frame(width: CGFloat(row.span) * width - 4, height: 22)
                             .offset(x: CGFloat(row.first) * width + 2, y: CGFloat(row.row) * 24 + 2)
                             .simultaneousGesture(dayDrag(of: row.event, width: width), including: model.canMove(row.event) ? .all : .subviews)
                     }
                     // Where the dragged bar would land.
-                    if let drag, let row = rows.first(where: { $0.event.id == drag.event.id }) {
+                    if let drag, let row = rows.first(where: { $0.event.key == drag.event.key }) {
                         AllDayBar(app: app, model: model, event: row.event, isPreview: true)
                             .frame(width: CGFloat(row.span) * width - 4, height: 22)
                             .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
@@ -732,7 +733,7 @@ private struct AllDayStrip: View {
         DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.space))
             .onChanged { value in
                 let over = day(at: value.location.x, width: width)
-                if drag?.event.id != event.id {
+                if drag?.event.key != event.key {
                     drag = DayDrag(event: event, from: day(at: value.startLocation.x, width: width), to: over, pointer: value.location)
                     model.dragStarted()
                 }
@@ -852,7 +853,7 @@ struct MonthGridView: View {
                             HStack(spacing: 0) {
                                 ForEach(week, id: \.self) { day in
                                     MonthDay(app: app, model: model, day: day, events: model.events(on: day, from: events), height: rowHeight,
-                                             draggedID: drag?.event.id,
+                                             draggedKey: drag?.event.key,
                                              onDrag: { event, value in dragChanged(event, value, cells: cells) },
                                              onDrop: dragEnded)
                                         .frame(maxWidth: .infinity)
@@ -895,7 +896,7 @@ struct MonthGridView: View {
 
     private func dragChanged(_ event: CalendarEvent, _ value: DragGesture.Value, cells: Cells) {
         guard let over = cells.day(at: value.location) else { return }
-        if drag?.event.id != event.id {
+        if drag?.event.key != event.key {
             drag = DayDrag(event: event, from: cells.day(at: value.startLocation) ?? over, to: over, pointer: value.location)
             model.dragStarted()
         }
@@ -937,7 +938,7 @@ private struct MonthDay: View {
     let events: [CalendarEvent]
     let height: CGFloat
     /// The event being dragged, shown faint where it was.
-    var draggedID: String?
+    var draggedKey: String?
     var onDrag: (CalendarEvent, DragGesture.Value) -> Void = { _, _ in }
     var onDrop: () -> Void = {}
     @State private var showsAll = false
@@ -961,9 +962,9 @@ private struct MonthDay: View {
             }
             .buttonStyle(.plain)
             .padding(.top, 4)
-            ForEach(shown) { event in
+            ForEach(shown, id: \.key) { event in
                 MonthEventChip(app: app, model: model, event: event, onDrag: model.canMove(event) ? { onDrag(event, $0) } : nil, onDrop: onDrop)
-                    .opacity(event.id == draggedID ? 0.35 : 1)
+                    .opacity(event.key == draggedKey ? 0.35 : 1)
             }
             if events.count > shown.count {
                 Button("\(events.count - shown.count) more") { showsAll = true }
@@ -975,7 +976,7 @@ private struct MonthDay: View {
                     .popover(isPresented: $showsAll) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(model.formatting.eventTime(start: day, end: day, isAllDay: true)).font(.pm(13, .medium)).padding(.bottom, 4)
-                            ForEach(events) { event in MonthEventChip(app: app, model: model, event: event) }
+                            ForEach(events, id: \.key) { event in MonthEventChip(app: app, model: model, event: event) }
                         }
                         .padding(14)
                         .frame(width: 260)
@@ -1088,7 +1089,7 @@ struct ScheduleView: View {
                             .frame(width: 150, alignment: .leading)
                             .padding(.top, 6)
                             VStack(spacing: 0) {
-                                ForEach(entry.events) { event in ScheduleRow(app: app, model: model, event: event) }
+                                ForEach(entry.events, id: \.key) { event in ScheduleRow(app: app, model: model, event: event) }
                             }
                         }
                         .padding(.horizontal, 20)
@@ -1134,7 +1135,7 @@ private struct ScheduleRow: View {
                     .frame(width: 11)
                     .padding(.leading, 10)
             }
-            Button { model.selectedEventID = event.id } label: {
+            Button { model.selectedEventKey = event.key } label: {
                 let look = event.isTask ? AnswerLook.solid : AnswerLook(event)
                 HStack(spacing: 14) {
                     if !event.isTask {
@@ -1172,7 +1173,7 @@ private struct ScheduleRow: View {
 extension CalendarViewModel {
     /// Whether an event's details popover is showing, as a binding for `.popover`.
     func detailsBinding(for event: CalendarEvent) -> Binding<Bool> {
-        Binding(get: { [weak self] in self?.selectedEventID == event.id },
-                set: { [weak self] showing in if !showing, self?.selectedEventID == event.id { self?.selectedEventID = nil } })
+        Binding(get: { [weak self] in self?.selectedEventKey == event.key },
+                set: { [weak self] showing in if !showing, self?.selectedEventKey == event.key { self?.selectedEventKey = nil } })
     }
 }

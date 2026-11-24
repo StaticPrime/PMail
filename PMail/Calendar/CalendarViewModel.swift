@@ -151,8 +151,8 @@ final class CalendarViewModel {
     @ObservationIgnored let pending: PendingChanges<CalendarChange>?
     /// What's waiting, as the window shows it.
     private(set) var waiting: [CalendarChange] = []
-    /// The event whose details are showing in a popover.
-    var selectedEventID: String?
+    /// The event whose details are showing in a popover, by its key (the same meeting can be in two calendars).
+    var selectedEventKey: String?
 
     init(account: Account, service: any CalendarService, cache: AccountCache? = nil, changes: PendingChanges<CalendarChange>? = nil,
          calendar: Calendar = .current, defaults: UserDefaults = .standard, today: @escaping () -> Date = Date.init) {
@@ -483,7 +483,7 @@ final class CalendarViewModel {
             .sorted { ($0.isAllDay ? 0 : 1, $0.start) < ($1.isAllDay ? 0 : 1, $1.start) }
     }
 
-    func event(_ id: String?) -> CalendarEvent? { id.flatMap { id in events.first { $0.id == id } } }
+    func event(_ key: String?) -> CalendarEvent? { key.flatMap { key in events.first { $0.key == key } } }
 
     /// The event's color: its own, or its calendar's.
     func color(for event: CalendarEvent) -> Color {
@@ -839,7 +839,7 @@ final class CalendarViewModel {
     /// where the calendar can), else changed back. It shows as it was at once (`originals`), and nothing is emailed.
     private func takeBack(_ draft: EventDraft, saved: CalendarEvent?, snapshot: CalendarSnapshot?, showing originals: [CalendarEvent]) async {
         guard let saved else { return }
-        events.removeAll { $0.id == saved.id }
+        events.removeAll { $0.key == saved.key }
         restore(originals)
         do {
             if draft.original == nil {
@@ -860,7 +860,7 @@ final class CalendarViewModel {
 
     /// Puts events back as they were, in place of any copy showing.
     private func restore(_ originals: [CalendarEvent]) {
-        events.removeAll { event in originals.contains { $0.id == event.id } }
+        events.removeAll { event in originals.contains { $0.key == event.key } }
         events += originals
     }
 
@@ -902,14 +902,14 @@ final class CalendarViewModel {
     /// Shows an event's details, unless it was just dragged.
     func select(_ event: CalendarEvent) {
         guard !isDraggingEvent, dragEndedAt.map({ Date().timeIntervalSince($0) > 0.3 }) ?? true else { return }
-        selectedEventID = event.id
+        selectedEventKey = event.key
     }
 
     /// An event starts being dragged: its details close, and the pointer is a closed hand.
     func dragStarted() {
         guard !isDraggingEvent else { return }
         isDraggingEvent = true
-        selectedEventID = nil
+        selectedEventKey = nil
         NSCursor.closedHand.push()
     }
 
@@ -942,10 +942,10 @@ final class CalendarViewModel {
         let days = calendar.dateComponents([.day], from: event.start, to: start).day ?? 0
         let byDays = calendar.date(byAdding: .day, value: days, to: event.start) == start
         let shift = start.timeIntervalSince(event.start)
-        let originals = events.filter { $0.id == event.id || (scope == .allEvents && event.seriesID != nil && $0.seriesID == event.seriesID) }
+        let originals = events.filter { $0.key == event.key || (scope == .allEvents && $0.isInSameSeries(as: event)) }
         let changes = originals.map { occurrence -> CalendarChange in
             var moved = occurrence
-            if occurrence.id == event.id {
+            if occurrence.key == event.key {
                 (moved.start, moved.end) = (start, end)
             } else if byDays {
                 moved.start = calendar.date(byAdding: .day, value: days, to: occurrence.start) ?? occurrence.start
@@ -1079,10 +1079,10 @@ final class CalendarViewModel {
         if saved.type == .outOfOffice || saved.type == .focusTime { Task { await declinePeriodSaved(saved) } }
         // A repeating event's other times come with the next load.
         if draft.changesRepeat || (draft.original != nil && (scope == .allEvents || draft.original?.calendarID != saved.calendarID)) {
-            if draft.repeatRule == nil { events.removeAll { $0.id == saved.id || $0.id == draft.original?.id } }
+            if draft.repeatRule == nil { events.removeAll { $0.key == saved.key || $0.key == draft.original?.key } }
             reload()
         } else {
-            events.removeAll { $0.id == saved.id || $0.id == draft.original?.id }
+            events.removeAll { $0.key == saved.key || $0.key == draft.original?.key }
             events.append(saved)
         }
         return SavedChange(outcome: .saved, saved: saved, held: held)
@@ -1113,14 +1113,14 @@ final class CalendarViewModel {
             throw error
         }
         changeCount += 1
-        events.removeAll { $0.id == saved.id || $0.id == draft.original?.id }
+        events.removeAll { $0.key == saved.key || $0.key == draft.original?.key }
         events.append(saved)
         return SavedChange(outcome: .saved, saved: saved)
     }
 
     /// Ticks a task off (or back on): here at once, then in its list.
     func setCompleted(_ task: CalendarEvent, _ done: Bool) {
-        guard let index = events.firstIndex(where: { $0.id == task.id }) else { return }
+        guard let index = events.firstIndex(where: { $0.key == task.key }) else { return }
         events[index].isCompleted = done
         changeCount += 1
         var changed = task
@@ -1132,10 +1132,10 @@ final class CalendarViewModel {
             do {
                 let saved = try await service.update(changed, scope: .thisEvent, addingConference: false)
                 changeCount += 1
-                if let index = events.firstIndex(where: { $0.id == task.id }) { events[index] = saved }
+                if let index = events.firstIndex(where: { $0.key == task.key }) { events[index] = saved }
             } catch {
                 if PMailError.isConnectionProblem(error), await keep(later) { return }
-                if let index = events.firstIndex(where: { $0.id == task.id }) { events[index].isCompleted = !done }
+                if let index = events.firstIndex(where: { $0.key == task.key }) { events[index].isCompleted = !done }
                 app?.report(error, doing: done ? "Marking the task done" : "Marking the task not done")
             }
         }
@@ -1147,10 +1147,10 @@ final class CalendarViewModel {
     /// that can't put it back (Google, Microsoft, a task list) gets the deletion once the pause is over instead.
     func delete(_ event: CalendarEvent, scope: RecurrenceScope) {
         let later = CalendarChange.delete(event, scope: scope)
-        let removed = events.filter { shown in !CalendarChange.applying([later], to: [shown]).contains { $0.id == shown.id } }
+        let removed = events.filter { shown in !CalendarChange.applying([later], to: [shown]).contains { $0.key == shown.key } }
         events = CalendarChange.applying([later], to: events)
         changeCount += 1
-        selectedEventID = nil
+        selectedEventKey = nil
         let shown = UUID()
         undoable[shown] = [later]
         let restored = event.isTask ? "Task restored." : "Event restored."
@@ -1243,12 +1243,11 @@ final class CalendarViewModel {
     /// the provider, with a message for the organizer where one's given. Answered by hand, its email is marked read; an
     /// answer PMail gave on its own leaves it unread, so it's still seen.
     func respond(to event: CalendarEvent, with response: AttendeeResponse, comment: String?, scope: RecurrenceScope, automatically: Bool) {
-        let series = scope == .allEvents ? event.seriesID : nil
-        for index in events.indices where events[index].id == event.id || (series != nil && events[index].seriesID == series) {
+        for index in events.indices where events[index].key == event.key || (scope == .allEvents && events[index].isInSameSeries(as: event)) {
             events[index].myResponse = response
         }
         // Said No to, it leaves the calendar, and its details close.
-        if response == .declined, selectedEventID == event.id { selectedEventID = nil }
+        if response == .declined, selectedEventKey == event.key { selectedEventKey = nil }
         changeCount += 1
         let service = self.service
         let later = CalendarChange.answer(event, response: response, scope: scope)

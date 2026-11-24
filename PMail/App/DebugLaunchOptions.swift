@@ -166,10 +166,10 @@ enum DebugLaunchOptions {
             let calendar = session.calendar
             let weekEvents = calendar.shownEvents().filter { calendar.visibleInterval.contains($0.start) && !$0.isAllDay }
                 .sorted { $0.start < $1.start }
-            if let event = weekEvents[safe: defaults.integer(forKey: "PMEvent") - 1] { calendar.selectedEventID = event.id }
+            if let event = weekEvents[safe: defaults.integer(forKey: "PMEvent") - 1] { calendar.selectedEventKey = event.key }
             // `-PMTask 2` shows the details of the week's second task.
             let weekTasks = calendar.shownEvents().filter { calendar.visibleInterval.contains($0.start) && $0.isTask }.sorted { $0.start < $1.start }
-            if let task = weekTasks[safe: defaults.integer(forKey: "PMTask") - 1] { calendar.selectedEventID = task.id }
+            if let task = weekTasks[safe: defaults.integer(forKey: "PMTask") - 1] { calendar.selectedEventKey = task.key }
             if let editor = defaults.string(forKey: "PMEventEditor") {
                 if let number = Int(editor), let event = weekEvents[safe: number - 1] {
                     app.sheet = .eventEditor(calendar.draft(for: event))

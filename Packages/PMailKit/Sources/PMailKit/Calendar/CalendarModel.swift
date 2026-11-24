@@ -372,6 +372,15 @@ public struct CalendarEvent: Codable, Sendable, Identifiable, Hashable {
 
     /// Whether it's a task (in one of the account's task lists) rather than an event.
     public var isTask: Bool { TaskLists.listID(from: calendarID) != nil }
+
+    /// What tells this event apart from everything else showing: its ID with its calendar's. A meeting can be in two
+    /// calendars at once (yours, and that of someone you follow) with the same ID in each, and each is its own event.
+    public var key: String { calendarID + "\u{1F}" + id }
+
+    /// Whether this is a time of the same repeating event, in the same calendar.
+    public func isInSameSeries(as other: CalendarEvent) -> Bool {
+        other.seriesID != nil && seriesID == other.seriesID && calendarID == other.calendarID
+    }
 }
 
 extension CalendarEvent {

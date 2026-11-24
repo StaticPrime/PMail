@@ -304,7 +304,7 @@ struct FindATimeView: View {
             let guestWidth = draft.guests.isEmpty ? 0 : (width - myWidth - 2) / CGFloat(draft.guests.count)
             ZStack(alignment: .topLeading) {
                 hourLines(width: width)
-                ForEach(events(on: day, in: availability.mine)) { event in
+                ForEach(events(on: day, in: availability.mine), id: \.key) { event in
                     myBlock(event, day: day).frame(width: myWidth - 2).offset(x: 1)
                 }
                 ForEach(Array(draft.guests.enumerated()), id: \.offset) { index, guest in
@@ -334,7 +334,7 @@ struct FindATimeView: View {
                         busyBlock(stretch, day: day, color: PersonColors.color(forGuest: index), label: "Busy").frame(width: width - 4).offset(x: 2)
                     }
                 } else {
-                    ForEach(events(on: day, in: availability.mine)) { event in
+                    ForEach(events(on: day, in: availability.mine), id: \.key) { event in
                         myBlock(event, day: day).frame(width: width - 4).offset(x: 2)
                     }
                 }

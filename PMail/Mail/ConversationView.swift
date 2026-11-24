@@ -483,7 +483,7 @@ private struct AttachmentStrip: View {
         await calendar.takeIn(invitation)
         app.show(.calendar)
         calendar.go(to: invitation.event.start)
-        if let event = await calendar.event(withUID: invitation.uid, near: invitation.event) { calendar.selectedEventID = event.id }
+        if let event = await calendar.event(withUID: invitation.uid, near: invitation.event) { calendar.selectedEventKey = event.key }
     }
 
     /// Saves to Downloads under a name not already taken, and opens it or offers to show it.

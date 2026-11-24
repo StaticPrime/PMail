@@ -79,22 +79,25 @@ public enum CalendarChange: Codable, Sendable, Hashable {
         return result
     }
 
-    /// Events as loaded, with the waiting changes made to them, so the window shows what the person did.
+    /// Events as loaded, with the waiting changes made to them, so the window shows what the person did. A change is to
+    /// the event in its own calendar: the same meeting in another calendar (someone's the person follows) stays as it is.
     public static func applying(_ queue: [CalendarChange], to events: [CalendarEvent]) -> [CalendarEvent] {
         var result = events
         for change in queue {
             switch change {
             case let .create(event, _):
-                if !result.contains(where: { $0.id == event.id }) { result.append(event) }
+                if !result.contains(where: { $0.key == event.key }) { result.append(event) }
             case let .update(event, _, _):
-                if let index = result.firstIndex(where: { $0.id == event.id }) { result[index] = event }
+                // Moved to another calendar, it's found by its ID alone.
+                if let index = result.firstIndex(where: { $0.key == event.key }) ?? result.firstIndex(where: { $0.id == event.id }) {
+                    result[index] = event
+                }
             case let .delete(event, scope):
-                result.removeAll { $0.id == event.id || (scope == .allEvents && event.seriesID != nil && $0.seriesID == event.seriesID) }
+                result.removeAll { $0.key == event.key || (scope == .allEvents && $0.isInSameSeries(as: event)) }
             case let .respond(event, response):
-                if let index = result.firstIndex(where: { $0.id == event.id }) { result[index].myResponse = response }
+                if let index = result.firstIndex(where: { $0.key == event.key }) { result[index].myResponse = response }
             case let .answer(event, response, scope):
-                for index in result.indices where result[index].id == event.id
-                    || (scope == .allEvents && event.seriesID != nil && result[index].seriesID == event.seriesID) {
+                for index in result.indices where result[index].key == event.key || (scope == .allEvents && result[index].isInSameSeries(as: event)) {
                     result[index].myResponse = response
                 }
             }

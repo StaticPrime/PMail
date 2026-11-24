@@ -391,9 +391,9 @@ enum SelfTest {
                 calendar.respond(to: demo, with: .accepted, scope: .thisEvent)
                 check(calendar.shownEvents().first { $0.title == "Vendor demo" }.map(AnswerLook.init) == .solid, "answering Yes makes it solid")
                 // Saying No takes it off the calendar.
-                calendar.selectedEventID = demo.id
+                calendar.selectedEventKey = demo.key
                 calendar.respond(to: demo, with: .declined, scope: .thisEvent)
-                check(!calendar.shownEvents().contains { $0.title == "Vendor demo" } && calendar.selectedEventID == nil,
+                check(!calendar.shownEvents().contains { $0.title == "Vendor demo" } && calendar.selectedEventKey == nil,
                       "saying No takes an invitation off the calendar, and closes its details")
             }
             guard var draft = calendar.newDraft() else { return check(false, "a new event can be started") }
@@ -933,7 +933,7 @@ enum SelfTest {
             guard let task = calendar.events.first(where: { $0.title == "Self-test task" }) else { return check(false, "making a task") }
             check(task.isTask && task.type == .task && task.notes == "Made by the self-test", "making a task saves it in the task list")
             calendar.setCompleted(task, true)
-            check(calendar.event(task.id)?.isCompleted == true, "ticking a task off shows at once")
+            check(calendar.event(task.key)?.isCompleted == true, "ticking a task off shows at once")
             let tasks = (session.services.calendar as? CalendarWithTasks)?.tasks as? SampleTaskService
             wait("the task list to hear it's done") { read { await tasks?.allTasks.first { $0.id == task.id }?.isCompleted } == true }
         }
@@ -1367,7 +1367,7 @@ enum SelfTest {
                 } catch { check(false, "saving an iCloud task and focus time", "\(error)") }
             }
             wait("the iCloud task and focus time") {
-                calendar.events.contains { $0.title == "Self-test Mac task" } && calendar.event(yoga.id)?.type == .focusTime
+                calendar.events.contains { $0.title == "Self-test Mac task" } && calendar.event(yoga.key)?.type == .focusTime
             }
         }
         step {

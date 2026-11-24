@@ -27,7 +27,7 @@ struct EventDetailsView: View {
                         }
                     }
                     IconButton(symbol: "pencil", help: event.isTask ? "Edit task" : "Edit event", size: 32, iconSize: 14) {
-                        model.selectedEventID = nil
+                        model.selectedEventKey = nil
                         app.sheet = .eventEditor(model.draft(for: event))
                     }
                     IconButton(symbol: "trash", help: event.isTask ? "Delete task" : "Delete event", size: 32, iconSize: 14) {
@@ -37,11 +37,11 @@ struct EventDetailsView: View {
                 }
                 if !guests.isEmpty {
                     IconButton(symbol: "envelope", help: "Email guests", size: 32, iconSize: 14) {
-                        model.selectedEventID = nil
+                        model.selectedEventKey = nil
                         app.compose(to: guests.map(\.address), subject: event.title)
                     }
                 }
-                IconButton(symbol: "xmark", help: "Close", size: 32, iconSize: 13) { model.selectedEventID = nil }
+                IconButton(symbol: "xmark", help: "Close", size: 32, iconSize: 13) { model.selectedEventKey = nil }
             }
             .padding(.bottom, 2)
             row(icon: nil, color: model.color(for: event)) {

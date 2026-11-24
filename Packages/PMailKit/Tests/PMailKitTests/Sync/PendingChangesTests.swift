@@ -181,6 +181,27 @@ struct PendingChangesTests {
         #expect(shown.first?.myResponse == .declined)
     }
 
+    @Test func aChangeIsToTheEventInItsOwnCalendarNotTheSameMeetingInAnother() {
+        // The same meeting in someone's calendar the person follows has the same ID as theirs.
+        var theirs = event("evt-1", "Planning")
+        theirs.calendarID = "colleague"
+        let mine = event("evt-1", "Planning")
+        var moved = mine
+        moved.start = start.addingTimeInterval(7_200)
+        let shown = CalendarChange.applying([.update(moved, scope: .thisEvent, addingConference: false)], to: [theirs, mine])
+        #expect(shown.map(\.calendarID) == ["colleague", "cal"], "both still show")
+        #expect(shown.first { $0.calendarID == "colleague" }?.start == start, "theirs stays put")
+        #expect(shown.first { $0.calendarID == "cal" }?.start == moved.start)
+        #expect(CalendarChange.applying([.delete(mine, scope: .thisEvent)], to: [theirs, mine]).map(\.calendarID) == ["colleague"])
+        #expect(CalendarChange.applying([.create(mine, addingConference: false)], to: [theirs]).count == 2, "mine is added beside theirs")
+        #expect(mine.key != theirs.key)
+
+        var elsewhere = mine
+        elsewhere.calendarID = "home"
+        #expect(CalendarChange.applying([.update(elsewhere, scope: .thisEvent, addingConference: false)], to: [mine]).map(\.calendarID) == ["home"],
+                "moved to another calendar, it's still found")
+    }
+
     @Test func changesWaitWhileOfflineAndGoOnceTheServerAnswers() async throws {
         let queueFile = file()
         defer { try? FileManager.default.removeItem(at: queueFile.deletingLastPathComponent()) }
