@@ -80,10 +80,14 @@ private struct BrowserSignIn: View {
             if let provider = app.oauth.provider(for: kind) {
                 Text("A \(kind.displayName) sign-in window opens. PMail never sees your password: \(kind.displayName) gives it a key to your mail, calendars and contacts that you can take back at any time.")
                     .font(.pm(13)).foregroundStyle(Theme.textSecondary).multilineTextAlignment(.center).frame(maxWidth: 460)
-                TextField("Email address (optional)", text: $email)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 320)
-                    .onSubmit { start(provider) }
+                VStack(spacing: 6) {
+                    TextField("Email address (optional)", text: $email)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 320)
+                        .onSubmit { start(provider) }
+                    Text("The account goes by this address and sends from it. Left empty, it’s the one you sign in with.")
+                        .font(.pm(11.5)).foregroundStyle(Theme.textTertiary).multilineTextAlignment(.center).frame(maxWidth: 360)
+                }
                 ProviderSignInButton(kind: kind, isWorking: isWorking) { start(provider) }
             } else {
                 VStack(spacing: 10) {
@@ -115,10 +119,11 @@ private struct BrowserSignIn: View {
         Task {
             do {
                 let result = try await signIn.signIn(with: provider, loginHint: email.isEmpty ? nil : email)
-                let account = Account(kind: kind, name: result.identity.name, email: result.identity.email, pictureURL: result.identity.pictureURL)
+                let address = OAuthIdentity.accountAddress(typed: email, signedIn: result.identity.email)
+                let account = Account(kind: kind, name: result.identity.name, email: address, pictureURL: result.identity.pictureURL)
                 let session = try app.accounts.add(account, secret: .oauth(result.tokens))
                 session.activate()
-                app.show("\(result.identity.email) was added.")
+                app.show("\(address) was added.")
                 done()
             } catch PMailError.cancelled {
                 isWorking = false

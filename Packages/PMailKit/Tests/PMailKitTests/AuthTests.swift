@@ -121,6 +121,29 @@ import Testing
         try secrets.setSecret(nil, for: account.id)
         #expect(try secrets.secret(for: account.id) == nil)
     }
+
+    @Test func aNewAccountGoesByTheAddressItWasAddedWith() throws {
+        func token(_ claims: [String: String]) throws -> String {
+            let payload = try JSONSerialization.data(withJSONObject: claims).base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+            return "e30.\(payload).signature"
+        }
+        // A personal Microsoft account whose main address is another provider's goes by the Outlook.com address it
+        // signed in with.
+        let personal = try token(["tid": OAuthIdentity.microsoftPersonalTenant, "email": "pug@mail.example",
+                                  "preferred_username": "pug1981@outlook.com", "name": "Pug Dog"])
+        #expect(OAuthIdentity.fromIDToken(personal) == OAuthIdentity(name: "Pug Dog", email: "pug1981@outlook.com"))
+        // A work account goes by its email address, not the name it signs in with.
+        let work = try token(["tid": "11111111-2222-3333-4444-555555555555", "email": "pug@company.example",
+                              "preferred_username": "pug@company.onmicrosoft.example"])
+        #expect(OAuthIdentity.fromIDToken(work)?.email == "pug@company.example")
+        #expect(OAuthIdentity.fromIDToken(try token(["preferred_username": "pug@company.example"]))?.email == "pug@company.example")
+        // The address typed when adding the account wins over either.
+        #expect(OAuthIdentity.accountAddress(typed: " pug1981@outlook.com ", signedIn: "pug@mail.example") == "pug1981@outlook.com")
+        #expect(OAuthIdentity.accountAddress(typed: "", signedIn: "pug@mail.example") == "pug@mail.example")
+        #expect(OAuthIdentity.accountAddress(typed: "not an address", signedIn: "pug@mail.example") == "pug@mail.example")
+        #expect(OAuthIdentity.accountAddress(typed: "pug@localhost", signedIn: "pug@mail.example") == "pug@mail.example")
+    }
 }
 
 /// Tokens handed to `onUpdate`, kept for checking.

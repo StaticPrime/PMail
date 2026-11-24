@@ -201,15 +201,31 @@ public struct OAuthIdentity: Sendable, Hashable {
         self.pictureURL = pictureURL
     }
 
-    /// The claims in an ID token (it came straight from the provider over TLS, so its signature isn't checked).
+    /// The tenant every personal Microsoft account (Outlook.com, Hotmail, Live) signs in to.
+    public static let microsoftPersonalTenant = "9188040d-6c67-4c5b-b112-36a304b66dad"
+
+    /// The claims in an ID token (it came straight from the provider over TLS, so its signature isn't checked). A
+    /// personal Microsoft account goes by the address it signed in with (`preferred_username`): its `email` is the
+    /// account's main address, which can be another provider's (a Gmail address, say) while its mail is at an
+    /// Outlook.com address added beside it. Other accounts go by their email address.
     public static func fromIDToken(_ token: String) -> OAuthIdentity? {
         let parts = token.split(separator: ".")
         guard parts.count >= 2, let data = TransferEncoding.decodeBase64(String(parts[1])),
               let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        let email = (claims["email"] as? String) ?? (claims["preferred_username"] as? String) ?? (claims["upn"] as? String)
-        guard let email, email.contains("@") else { return nil }
+        let order = (claims["tid"] as? String) == microsoftPersonalTenant
+            ? ["preferred_username", "email", "upn"] : ["email", "preferred_username", "upn"]
+        guard let email = order.lazy.compactMap({ claims[$0] as? String }).first(where: { $0.contains("@") }) else { return nil }
         let name = (claims["name"] as? String) ?? ""
         return OAuthIdentity(name: name, email: email, pictureURL: (claims["picture"] as? String).flatMap(URL.init(string:)))
+    }
+
+    /// The address a new account goes by, and sends from: the one typed when adding it, if one was, even if it isn't
+    /// the provider's main address for the account (people often have several); otherwise the one it signed in with.
+    public static func accountAddress(typed: String, signedIn: String) -> String {
+        let typed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = typed.split(separator: "@", omittingEmptySubsequences: false)
+        guard parts.count == 2, !parts[0].isEmpty, parts[1].contains("."), !typed.contains(where: \.isWhitespace) else { return signedIn }
+        return typed
     }
 }
 
