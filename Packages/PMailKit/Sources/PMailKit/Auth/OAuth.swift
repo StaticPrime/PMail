@@ -60,7 +60,10 @@ public struct OAuthProvider: Sendable, Hashable {
                              scopes: ["openid", "profile", "email", "offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send",
                                       "MailboxSettings.ReadWrite", "Calendars.ReadWrite", "Calendars.Read.Shared", "Contacts.ReadWrite", "Tasks.ReadWrite",
                                       "People.Read"],
-                             extraParameters: ["prompt": "select_account", "response_mode": "query"])
+                             // No prompt=select_account: the sign-in window keeps nothing, so there's never an account to
+                             // pick, and with the address as a login hint Microsoft's account picker can send some work
+                             // accounts back to itself after they're picked.
+                             extraParameters: ["response_mode": "query"])
     }
 
     /// Google's redirect for apps registered as native clients: the client ID's parts reversed as a URL scheme.
