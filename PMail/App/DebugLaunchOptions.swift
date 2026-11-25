@@ -190,6 +190,25 @@ enum DebugLaunchOptions {
             let weekEvents = calendar.shownEvents().filter { calendar.visibleInterval.contains($0.start) && !$0.isAllDay }
                 .sorted { $0.start < $1.start }
             if let event = weekEvents[safe: defaults.integer(forKey: "PMEvent") - 1] { calendar.selectedEventKey = event.key }
+            // `-PMQuickEditor new` clicks today at 10:30 (or `3` opens the week's third event in the quick editor);
+            // `-PMQuickTitle words` types a title, `-PMQuickMove YES` clicks a day later at 2 PM a second on, and
+            // `-PMQuickClose YES` closes it after that.
+            if let quick = defaults.string(forKey: "PMQuickEditor") {
+                if let number = Int(quick), let event = weekEvents[safe: number - 1] {
+                    calendar.openQuickEditor(calendar.draft(for: event))
+                } else if let start = Calendar.current.date(bySettingHour: 10, minute: 30, second: 0, of: AppClock.now()) {
+                    calendar.clicked(.time(start))
+                }
+                if let title = defaults.string(forKey: "PMQuickTitle") { calendar.quickDraft?.title = title }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    if defaults.bool(forKey: "PMQuickMove"), let start = calendar.quickDraft?.start,
+                       let next = Calendar.current.date(byAdding: .day, value: 1, to: start),
+                       let moved = Calendar.current.date(bySettingHour: 14, minute: 0, second: 0, of: next) {
+                        calendar.clicked(.time(moved))
+                    }
+                    if defaults.bool(forKey: "PMQuickClose") { calendar.closeQuickEditor() }
+                }
+            }
             // `-PMTask 2` shows the details of the week's second task.
             let weekTasks = calendar.shownEvents().filter { calendar.visibleInterval.contains($0.start) && $0.isTask }.sorted { $0.start < $1.start }
             if let task = weekTasks[safe: defaults.integer(forKey: "PMTask") - 1] { calendar.selectedEventKey = task.key }

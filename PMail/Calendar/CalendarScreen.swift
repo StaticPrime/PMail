@@ -24,13 +24,26 @@ struct CalendarScreen: View {
                     CalendarHeader(model: model)
                     Divider().overlay(Theme.divider)
                     let events = model.shownEvents(matching: app.searchText)
-                    switch model.mode {
-                    case .day, .week: TimeGridView(app: app, model: model, days: model.visibleDays, events: events)
-                    case .month: MonthGridView(app: app, model: model, events: events)
-                    case .schedule: ScheduleView(app: app, model: model, events: events, searching: !app.searchText.isEmpty)
+                    Group {
+                        switch model.mode {
+                        case .day, .week: TimeGridView(app: app, model: model, days: model.visibleDays, events: withQuickDraft(events))
+                        case .month: MonthGridView(app: app, model: model, events: withQuickDraft(events))
+                        case .schedule: ScheduleView(app: app, model: model, events: events, searching: !app.searchText.isEmpty)
+                        }
+                    }
+                    // The quick editor beside the event it's making or changing, the calendar in reach around it.
+                    .overlayPreferenceValue(QuickDraftPlace.self) { anchor in
+                        GeometryReader { proxy in
+                            QuickEditorLayer(app: app, model: model, block: anchor.map { proxy[$0] }, area: proxy.size)
+                        }
                     }
                 }
             }
+        }
+        .alert("Discard unsaved changes?", isPresented: Binding(get: { model.asksToDiscardQuickDraft },
+                                                                set: { if !$0 { model.asksToDiscardQuickDraft = false } })) {
+            Button("Cancel", role: .cancel) { model.keepQuickDraft() }
+            Button("Discard", role: .destructive) { model.discardQuickDraft() }
         }
         // A repeating event dragged somewhere new: that time, or every time where the calendar can move them all.
         .confirmationDialog(model.pendingMove.map { "Move “\($0.event.shownTitle)”?" } ?? "",
@@ -45,6 +58,12 @@ struct CalendarScreen: View {
             Text(model.features.movesWholeSeries ? "It repeats: move just this one, or every time it happens?"
                                                  : "It repeats: just this one moves, since this calendar keeps the others’ own times.")
         }
+    }
+
+    /// The events with the quick editor's own in place of the one it's changing (or beside the rest, for a new one).
+    private func withQuickDraft(_ events: [CalendarEvent]) -> [CalendarEvent] {
+        guard let draft = model.quickDraft else { return events }
+        return events.filter { $0.key != draft.original?.key } + [draft.preview]
     }
 }
 
@@ -570,8 +589,8 @@ struct TimeGridView: View {
     }
 }
 
-/// One day's column of timed events, with the red line for now on today. Clicking an empty slot makes an event
-/// there; dragging an event is the view's to follow.
+/// One day's column of timed events, with the red line for now on today. Clicking an empty slot starts an event there
+/// in the quick editor, or moves the one it has there; dragging an event is the view's to follow.
 private struct DayColumn: View {
     let app: AppModel
     let model: CalendarViewModel
@@ -585,13 +604,15 @@ private struct DayColumn: View {
 
     var body: some View {
         GeometryReader { geometry in
+            // The quick editor's event is drawn over the rest, which keep their places.
+            let others = events.filter { $0.id != EventDraft.previewID }
             // By key: the same meeting in two calendars (yours, and that of someone you follow) shows side by side.
-            let placements = EventLayout.layout(events.map { ($0.key, max($0.start, startOfDay), min($0.end, endOfDay)) })
+            let placements = EventLayout.layout(others.map { ($0.key, max($0.start, startOfDay), min($0.end, endOfDay)) })
             ZStack(alignment: .topLeading) {
                 Color.clear
                     .contentShape(Rectangle())
-                    .onTapGesture { location in createEvent(at: location.y) }
-                ForEach(events, id: \.key) { event in
+                    .onTapGesture { location in clicked(at: location.y) }
+                ForEach(others, id: \.key) { event in
                     let placement = placements[event.key] ?? EventLayout.Placement(column: 0, columns: 1, span: 1)
                     let top = y(for: max(event.start, startOfDay))
                     let bottom = y(for: min(event.end, endOfDay))
@@ -601,6 +622,9 @@ private struct DayColumn: View {
                         .opacity(event.key == draggedKey ? 0.35 : 1)
                         .frame(width: max(width * CGFloat(placement.span) - 2, 20), height: max(bottom - top - 2, 18))
                         .offset(x: width * CGFloat(placement.column) + 1, y: top + 1)
+                }
+                if let draft = events.first(where: { $0.id == EventDraft.previewID }) {
+                    draftBlock(draft, width: geometry.size.width)
                 }
                 if model.isToday(day) {
                     let nowY = y(for: model.today())
@@ -622,11 +646,25 @@ private struct DayColumn: View {
         CGFloat(date.timeIntervalSince(startOfDay) / 3600) * hourHeight
     }
 
-    private func createEvent(at y: CGFloat) {
+    /// A click on an empty slot: the half hour it's in.
+    private func clicked(at y: CGFloat) {
         let minutes = Int((y / hourHeight * 60 / 30).rounded(.down)) * 30
-        guard let start = model.calendar.date(byAdding: .minute, value: minutes, to: startOfDay),
-              let draft = model.newDraft(start: start) else { return }
-        app.sheet = .eventEditor(draft)
+        guard let start = model.calendar.date(byAdding: .minute, value: minutes, to: startOfDay) else { return }
+        model.clicked(.time(start))
+    }
+
+    /// The quick editor's event: across the column, over the others, in its calendar's color.
+    private func draftBlock(_ event: CalendarEvent, width: CGFloat) -> some View {
+        let top = y(for: max(event.start, startOfDay))
+        let bottom = y(for: min(event.end, endOfDay))
+        return EventBlockFace(model: model, event: event, start: event.start, end: event.end, height: max(bottom - top, 20))
+            .frame(width: max(width - 8, 20), height: max(bottom - top - 2, 18))
+            .contentShape(Rectangle())
+            // A click on it isn't a click on the time under it.
+            .onTapGesture {}
+            .modifier(QuickDraftMark(isDraft: true))
+            .offset(x: 2, y: top + 1)
+            .accessibilityLabel("\(eventTitleString(event)), \(model.formatting.eventTime(start: event.start, end: event.end, isAllDay: false))")
     }
 }
 
@@ -720,14 +758,13 @@ private struct AllDayStrip: View {
                             .contentShape(Rectangle())
                             .frame(width: width, height: geometry.size.height)
                             .offset(x: CGFloat(index) * width)
-                            .onTapGesture {
-                                if let draft = model.newDraft(start: day, allDay: true) { app.sheet = .eventEditor(draft) }
-                            }
+                            .onTapGesture { model.clicked(.allDay(day)) }
                     }
                     ForEach(rows, id: \.event.key) { row in
                         AllDayBar(app: app, model: model, event: row.event)
                             .opacity(drag?.event.key == row.event.key ? 0.35 : 1)
                             .frame(width: CGFloat(row.span) * width - 4, height: 22)
+                            .modifier(QuickDraftMark(isDraft: row.event.id == EventDraft.previewID))
                             .offset(x: CGFloat(row.first) * width + 2, y: CGFloat(row.row) * 24 + 2)
                             .simultaneousGesture(dayDrag(of: row.event, width: width), including: model.canMove(row.event) ? .all : .subviews)
                     }
@@ -974,6 +1011,8 @@ private struct MonthDay: View {
         let isToday = model.isToday(day)
         let inMonth = model.grid.isSameMonth(day, model.anchor)
         let fits = max(0, Int((height - 34) / 22))
+        // The quick editor's event first, so it's never under "N more".
+        let events = events.filter { $0.id == EventDraft.previewID } + events.filter { $0.id != EventDraft.previewID }
         let shown = events.count > fits ? Array(events.prefix(max(0, fits - 1))) : events
         VStack(spacing: 2) {
             Button {
@@ -992,6 +1031,8 @@ private struct MonthDay: View {
             ForEach(shown, id: \.key) { event in
                 MonthEventChip(app: app, model: model, event: event, onDrag: model.canMove(event) ? { onDrag(event, $0) } : nil, onDrop: onDrop)
                     .opacity(event.key == draggedKey ? 0.35 : 1)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(event.id == EventDraft.previewID ? Theme.surfaceRaised : .clear))
+                    .modifier(QuickDraftMark(isDraft: event.id == EventDraft.previewID))
             }
             if events.count > shown.count {
                 Button("\(events.count - shown.count) more") { showsAll = true }
@@ -1015,9 +1056,7 @@ private struct MonthDay: View {
         .padding(.horizontal, 4)
         .frame(height: height)
         .contentShape(Rectangle())
-        .onTapGesture {
-            if let draft = model.newDraft(start: day, allDay: true) { app.sheet = .eventEditor(draft) }
-        }
+        .onTapGesture { model.clicked(.day(day)) }
     }
 
     private var dayNumber: String {

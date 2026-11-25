@@ -101,6 +101,63 @@ struct EventDraft: Identifiable, Hashable {
         return repeatRule?.normalized(start: original.start) != before?.normalized(start: original.start)
     }
     var isTask: Bool { type == .task }
+
+    /// What the draft was when an editor opened on it (its fingerprint), to tell whether closing the editor loses
+    /// anything; nil until one has.
+    var unchanged: Int?
+
+    /// The draft's fields, for comparing with what it was. A new event has something to lose only once something has
+    /// been entered in it (a title, place, description, guests, video meeting, repeat or color): where and when it goes,
+    /// its kind and calendar are choices a blank event loses nothing by. An event being changed counts every change.
+    var fingerprint: Int {
+        var hasher = Hasher()
+        if isNew {
+            hasher.combine(title)
+            hasher.combine(location)
+            hasher.combine(notes)
+            hasher.combine(notesHTML)
+            hasher.combine(guests)
+            hasher.combine(conference)
+            hasher.combine(addsNativeConference)
+            hasher.combine(faceTimeLink)
+            hasher.combine(repeatRule)
+            hasher.combine(colorHex)
+            hasher.combine(declineMessage)
+        } else {
+            var copy = self
+            copy.unchanged = nil
+            copy.saveError = nil
+            hasher.combine(copy)
+        }
+        return hasher.finalize()
+    }
+
+    /// Whether it differs from what it was when an editor opened on it.
+    var hasUnsavedChanges: Bool { unchanged.map { $0 != fingerprint } ?? false }
+
+    /// Notes what it is now as what it was, unless an earlier editor already has (the full editor carries on from the
+    /// quick editor's changes).
+    mutating func noteUnchanged() {
+        if unchanged == nil { unchanged = fingerprint }
+    }
+
+    /// The ID the draft's own block has while it's edited, beside the events it isn't.
+    static let previewID = "quick-draft"
+
+    /// The draft as an event, for its block while it's edited.
+    var preview: CalendarEvent {
+        var event = original ?? CalendarEvent(calendarID: calendarID, start: start, end: end)
+        event.id = Self.previewID
+        event.calendarID = calendarID
+        event.title = title
+        event.start = start
+        event.end = end
+        event.isAllDay = isAllDay
+        event.colorHex = colorHex
+        event.type = type
+        event.location = location.isEmpty ? nil : location
+        return event
+    }
 }
 
 /// One account's calendars as the window shows them: which calendars are on, the view and the days showing, and the
@@ -1055,14 +1112,166 @@ final class CalendarViewModel {
     /// Whether an event can be dragged somewhere else: one on a calendar that can be changed, that isn't called off or
     /// someone else's meeting (theirs to move).
     func canMove(_ event: CalendarEvent) -> Bool {
+        // The quick editor's own block moves with a click instead.
+        guard event.id != EventDraft.previewID else { return false }
         guard calendarInfo(event.calendarID)?.isReadOnly == false, event.status != .cancelled else { return false }
         return event.organizer.map { $0.isSameMailbox(as: account.email) } ?? true
     }
 
-    /// Shows an event's details, unless it was just dragged.
+    /// Shows an event's details, unless it was just dragged. With the quick editor open, they show once it has closed
+    /// (asking first, if closing it would lose changes); its own block does nothing.
     func select(_ event: CalendarEvent) {
         guard !isDraggingEvent, dragEndedAt.map({ Date().timeIntervalSince($0) > 0.3 }) ?? true else { return }
+        guard event.id != EventDraft.previewID else { return }
+        if quickDraft != nil {
+            return closeQuickEditor { [weak self] in self?.selectedEventKey = event.key }
+        }
         selectedEventKey = event.key
+    }
+
+    // MARK: The quick editor
+
+    /// Where a click in the day, week or month view lands: a time, a day's all-day row, or a day of the month.
+    enum Slot {
+        case time(Date)
+        case allDay(Date)
+        case day(Date)
+    }
+
+    /// The event being made or changed in the quick editor, beside its block in the day, week or month view (nil when
+    /// there's none). The calendar stays in reach around it, and a click on another time or day moves it there.
+    var quickDraft: EventDraft?
+    /// Closing the quick editor would lose changes: waiting for Discard or Cancel.
+    var asksToDiscardQuickDraft = false
+    /// What waits for the quick editor to close (another event's details), if it does.
+    @ObservationIgnored private var afterQuickEditor: (() -> Void)?
+
+    /// Opens the quick editor on a draft: a new event's, or an event's to change.
+    func openQuickEditor(_ draft: EventDraft) {
+        var draft = draft
+        draft.noteUnchanged()
+        selectedEventKey = nil
+        quickDraft = draft
+    }
+
+    /// A click on an empty part of the day, week or month view: the event in the quick editor moves there, or a new
+    /// one starts there.
+    func clicked(_ slot: Slot) {
+        if quickDraft != nil { return moveQuickDraft(to: slot) }
+        let draft: EventDraft? = switch slot {
+        case let .time(start): newDraft(start: start)
+        case let .allDay(day), let .day(day): newDraft(start: day, allDay: true)
+        }
+        if let draft { openQuickEditor(draft) }
+    }
+
+    /// Moves the event in the quick editor to where a click landed, keeping how long it lasts: onto a time (an all-day
+    /// event becomes an hour there), onto a day's all-day row (a timed one becomes all-day), or onto a day of the month
+    /// (keeping its time). A task stays a day, and focus time a stretch of hours.
+    func moveQuickDraft(to slot: Slot) {
+        guard var draft = quickDraft else { return }
+        let length = draft.end.timeIntervalSince(draft.start)
+        let days = max(1, calendar.dateComponents([.day], from: calendar.startOfDay(for: draft.start), to: calendar.startOfDay(for: draft.end)).day ?? 1)
+        /// The same time of day, on another day.
+        func sameTime(on day: Date) -> Date {
+            let time = calendar.dateComponents([.hour, .minute], from: draft.start)
+            return calendar.date(bySettingHour: time.hour ?? 9, minute: time.minute ?? 0, second: 0, of: day) ?? day
+        }
+        func wholeDays(from day: Date, count: Int) {
+            draft.start = calendar.startOfDay(for: day)
+            draft.end = calendar.date(byAdding: .day, value: count, to: draft.start) ?? draft.start.addingTimeInterval(86_400)
+        }
+        switch slot {
+        case let .time(start) where draft.isTask:
+            wholeDays(from: start, count: 1)
+        case let .time(start):
+            if draft.isAllDay {
+                draft.isAllDay = false
+                draft.start = start
+                draft.end = start.addingTimeInterval(3_600)
+                draft.reminders = defaultReminders(for: draft.calendarID, allDay: false)
+            } else {
+                draft.start = start
+                draft.end = start.addingTimeInterval(length)
+            }
+        case let .allDay(day) where draft.isTask || draft.isAllDay:
+            wholeDays(from: day, count: draft.isTask ? 1 : days)
+        case let .allDay(day) where draft.type == .focusTime:
+            draft.start = sameTime(on: day)
+            draft.end = draft.start.addingTimeInterval(length)
+        case let .allDay(day):
+            draft.isAllDay = true
+            wholeDays(from: day, count: 1)
+            draft.reminders = defaultReminders(for: draft.calendarID, allDay: true)
+        case let .day(day) where draft.isTask || draft.isAllDay:
+            wholeDays(from: day, count: draft.isTask ? 1 : days)
+        case let .day(day):
+            draft.start = sameTime(on: day)
+            draft.end = draft.start.addingTimeInterval(length)
+        }
+        quickDraft = draft
+    }
+
+    /// Closes the quick editor, asking first whether to discard its changes when it has any (or `typed` says there's
+    /// text typed that isn't in it yet). `then` runs once it has closed, not if Cancel keeps it open.
+    func closeQuickEditor(typed: Bool = false, then next: (() -> Void)? = nil) {
+        guard let draft = quickDraft else {
+            next?()
+            return
+        }
+        guard draft.hasUnsavedChanges || typed else {
+            quickDraft = nil
+            next?()
+            return
+        }
+        afterQuickEditor = next
+        asksToDiscardQuickDraft = true
+    }
+
+    /// Discard: the quick editor closes without saving, and what was waiting for it goes ahead.
+    func discardQuickDraft() {
+        quickDraft = nil
+        asksToDiscardQuickDraft = false
+        let next = afterQuickEditor
+        afterQuickEditor = nil
+        next?()
+    }
+
+    /// Cancel: the quick editor stays open, as it was.
+    func keepQuickDraft() {
+        asksToDiscardQuickDraft = false
+        afterQuickEditor = nil
+    }
+
+    /// More Options: the event goes on in the full editor, changes and all.
+    func openFullEditor(_ draft: EventDraft) {
+        quickDraft = nil
+        app?.sheet = .eventEditor(draft)
+    }
+
+    /// Saves the event in the quick editor and closes it, with Undo afterwards.
+    func saveQuickDraft(_ draft: EventDraft, scope: RecurrenceScope) {
+        var saving = draft
+        saving.scope = scope
+        saving.saveError = nil
+        quickDraft = nil
+        saveWithUndo(saving)
+    }
+
+    /// Gets a draft ready to save, or says why it can't be: a guest's address typed but not added yet is added (as the
+    /// guest field would on Return), and an event has to end after it starts.
+    func checkedForSaving(_ draft: inout EventDraft, typedGuest: inout String) -> String? {
+        let typed = typedGuest.trimmingCharacters(in: .whitespacesAndNewlines)
+        if draft.type == .event, !typed.isEmpty {
+            let added = TypedAddresses.adding(typed, to: draft.guests)
+            guard added.dropFirst(draft.guests.count).allSatisfy({ TypedAddresses.isComplete($0.email) }), added.count > draft.guests.count else {
+                return "“\(typed)” isn’t a complete email address."
+            }
+            draft.guests = added
+            typedGuest = ""
+        }
+        guard draft.isTask || draft.end > draft.start else { return "The event has to end after it starts." }
+        return nil
     }
 
     /// An event starts being dragged: its details close, and the pointer is a closed hand.

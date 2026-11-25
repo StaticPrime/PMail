@@ -16,10 +16,8 @@ struct EventEditor: View {
     @State private var isSaving = false
     @State private var error: String?
     @State private var asksScope = false
-    @State private var showsFaceTime = false
-    /// Add Zoom Meeting opened Zoom to schedule one; its copied invitation is pasted here.
-    @State private var showsZoomPaste = false
-    @State private var zoomPaste = ""
+    /// Closing would lose changes: waiting for Discard or Cancel.
+    @State private var asksToDiscard = false
     @State private var colorMenu = PopUpMenu()
     @State private var detailsTab = DetailsTab.details
     @State private var guestsTab = GuestsTab.guests
@@ -32,8 +30,10 @@ struct EventEditor: View {
         self.app = app
         self.model = model
         self.contacts = contacts
+        var draft = draft
+        // What it is now, to tell whether closing loses anything (unless the quick editor already noted that).
+        draft.noteUnchanged()
         _draft = State(initialValue: draft)
-        _showsFaceTime = State(initialValue: !draft.faceTimeLink.isEmpty)
         // Opened again because saving it failed: why, until it's saved.
         _error = State(initialValue: draft.saveError)
         #if DEBUG
@@ -48,7 +48,7 @@ struct EventEditor: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                IconButton(symbol: "xmark", help: "Close without saving") { dismiss() }
+                IconButton(symbol: "xmark", help: "Close without saving") { close() }
                     .keyboardShortcut(.cancelAction)
                 TextField("Add title", text: $draft.title)
                     .textFieldStyle(.plain)
@@ -113,6 +113,10 @@ struct EventEditor: View {
             Button("This event") { commit(scope: .thisEvent) }
             Button("All events") { commit(scope: .allEvents) }
             Button("Cancel", role: .cancel) {}
+        }
+        .alert("Discard unsaved changes?", isPresented: $asksToDiscard) {
+            Button("Cancel", role: .cancel) {}
+            Button("Discard", role: .destructive) { dismiss() }
         }
         .sheet(isPresented: $asksCustomRepeat) {
             CustomRepeatSheet(start: draft.start, isAllDay: draft.isAllDay, calendar: model.calendar,
@@ -279,7 +283,7 @@ struct EventEditor: View {
     @ViewBuilder
     private var eventRows: some View {
         if draft.type == .event {
-            if showsConferenceRow { conferenceRow }
+            VideoMeetingRow(model: model, draft: $draft)
             // Over the rows below it, for the places it suggests.
             field(icon: "mappin.and.ellipse") {
                 LocationField(location: $draft.location)
@@ -374,128 +378,6 @@ struct EventEditor: View {
                     .foregroundStyle(Theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-        }
-    }
-
-    /// Whether there's a video meeting to show or offer: none is offered where the account's choice is None.
-    private var showsConferenceRow: Bool {
-        draft.conference != nil || draft.addsNativeConference || showsFaceTime || showsZoomPaste
-            || model.videoMeetingOffer(for: draft.calendarID) != .noMeeting
-    }
-
-    /// The video meeting the event has, or the one chosen for the account in Settings ▸ Calendar ▸ Video meetings: the
-    /// calendar's own (Meet or Teams) with one click, a Zoom meeting (scheduled in Zoom and its invitation pasted, or
-    /// the Personal Room), or a FaceTime link pasted in.
-    @ViewBuilder
-    private var conferenceRow: some View {
-        let offer = model.videoMeetingOffer(for: draft.calendarID)
-        field(icon: "video") {
-            VStack(alignment: .leading, spacing: 8) {
-                if let conference = draft.conference, conference.kind != .faceTime || draft.faceTimeLink.isEmpty {
-                    HStack(spacing: 10) {
-                        FilledPillButton(title: "Join with \(conference.kind.displayName)") { NSWorkspace.shared.open(conference.joinURL) }
-                        Text(conference.joinURL.host ?? "").font(.pm(12)).foregroundStyle(Theme.textSecondary)
-                        IconButton(symbol: "xmark", help: "Remove the video meeting", size: 28, iconSize: 11) {
-                            draft.conference = nil
-                            draft.faceTimeLink = ""
-                        }
-                    }
-                } else if showsZoomPaste {
-                    zoomPasteRow
-                } else if showsFaceTime {
-                    // Ahead of Meet and Teams: an event's FaceTime link shows, whatever the account now offers.
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
-                            TextField("Paste a FaceTime link", text: $draft.faceTimeLink).textFieldStyle(.roundedBorder).frame(width: 340)
-                            Button("Paste") { pasteFaceTimeLink() }
-                            Button("Open FaceTime") { openFaceTime() }
-                        }
-                        Text("In FaceTime, click Create Link, choose Copy Link, then paste it here. Guests click the link to join, on a Mac, iPhone or iPad, or in a web browser.")
-                            .font(.pm(11.5))
-                            .foregroundStyle(Theme.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: 480, alignment: .leading)
-                        if !draft.faceTimeLink.isEmpty, !ConferenceDetector.isFaceTimeLink(draft.faceTimeLink) {
-                            Text("That doesn’t look like a FaceTime link; it will be saved as a video call link.")
-                                .font(.pm(11.5)).foregroundStyle(Theme.danger)
-                        }
-                    }
-                } else if let native = offer.madeByCalendar {
-                    if draft.addsNativeConference {
-                        HStack(spacing: 10) {
-                            Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
-                            Text("\(native.displayName) video conferencing will be added when you save.").font(.pm(13))
-                            IconButton(symbol: "xmark", help: "Don’t add it", size: 28, iconSize: 11) { draft.addsNativeConference = false }
-                        }
-                    } else {
-                        OutlinePillButton(title: "Add \(native.displayName) video conferencing") { draft.addsNativeConference = true }
-                    }
-                } else if offer == .zoom {
-                    OutlinePillButton(title: "Add Zoom meeting") { addZoomMeeting() }
-                } else if offer == .faceTime {
-                    OutlinePillButton(title: "Add FaceTime link") {
-                        showsFaceTime = true
-                        pasteFaceTimeLink(onlyIfFaceTime: true)
-                    }
-                }
-            }
-        }
-    }
-
-    /// The Zoom meeting scheduled in Zoom: its copied invitation (or just its link) pasted in, which PMail keeps the
-    /// meeting's link from.
-    private var zoomPasteRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                TextField("Paste the Zoom invitation", text: $zoomPaste).textFieldStyle(.roundedBorder).frame(width: 300)
-                    .onChange(of: zoomPaste) { _, text in takeZoomMeeting(from: text) }
-                Button("Paste") { zoomPaste = NSPasteboard.general.string(forType: .string) ?? "" }
-                Button("Open Zoom") { NSWorkspace.shared.open(VideoMeetingChoice.zoomSchedulePage) }
-                IconButton(symbol: "xmark", help: "Don’t add a Zoom meeting", size: 28, iconSize: 11) {
-                    showsZoomPaste = false
-                    zoomPaste = ""
-                }
-            }
-            Text("Schedule the meeting in Zoom, click Copy Invitation, then paste it here.")
-                .font(.pm(11.5))
-                .foregroundStyle(Theme.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 480, alignment: .leading)
-            if !zoomPaste.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("There’s no Zoom meeting link in that. Copy the invitation, or the meeting’s link, in Zoom.")
-                    .font(.pm(11.5)).foregroundStyle(Theme.danger)
-            }
-        }
-    }
-
-    /// Add Zoom Meeting: the account's Personal Room at once where that's chosen in Settings, otherwise Zoom's page for
-    /// scheduling a meeting, whose invitation is then pasted.
-    private func addZoomMeeting() {
-        if let room = model.videoMeeting.personalRoomMeeting {
-            draft.conference = room
-            draft.faceTimeLink = ""
-            return
-        }
-        showsZoomPaste = true
-        NSWorkspace.shared.open(VideoMeetingChoice.zoomSchedulePage)
-    }
-
-    private func takeZoomMeeting(from text: String) {
-        guard let meeting = ConferenceDetector.zoomMeeting(in: text) else { return }
-        draft.conference = meeting
-        draft.faceTimeLink = ""
-        showsZoomPaste = false
-        zoomPaste = ""
-    }
-
-    private func pasteFaceTimeLink(onlyIfFaceTime: Bool = false) {
-        guard let text = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
-        if !onlyIfFaceTime || ConferenceDetector.isFaceTimeLink(text) { draft.faceTimeLink = text }
-    }
-
-    private func openFaceTime() {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.FaceTime") {
-            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
         }
     }
 
@@ -690,28 +572,24 @@ struct EventEditor: View {
     }
 
     private func field(icon: String, @ViewBuilder content: () -> some View) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: icon).font(.system(size: 15)).foregroundStyle(Theme.icon).frame(width: 22).padding(.top, 6)
-            content()
-        }
+        EditorField(icon: icon) { content() }
     }
 
     // MARK: Saving
 
+    /// Closes without saving, asking first whether to discard what was changed (or typed and not yet added).
+    private func close() {
+        if draft.hasUnsavedChanges || !guestText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            asksToDiscard = true
+        } else {
+            dismiss()
+        }
+    }
+
     private func save() {
         // A guest typed but not added with Return is added now, rather than lost.
-        let typed = guestText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if draft.type == .event, !typed.isEmpty {
-            let added = TypedAddresses.adding(typed, to: draft.guests)
-            guard added.dropFirst(draft.guests.count).allSatisfy({ TypedAddresses.isComplete($0.email) }), added.count > draft.guests.count else {
-                error = "“\(typed)” isn’t a complete email address."
-                return
-            }
-            draft.guests = added
-            guestText = ""
-        }
-        guard draft.isTask || draft.end > draft.start else {
-            error = "The event has to end after it starts."
+        if let problem = model.checkedForSaving(&draft, typedGuest: &guestText) {
+            error = problem
             return
         }
         if draft.original?.isRecurring == true {
@@ -734,7 +612,7 @@ struct EventEditor: View {
 }
 
 /// Adding guests by name or address, with suggestions from contacts.
-private struct GuestField: View {
+struct GuestField: View {
     @Binding var guests: [MailAddress]
     @Binding var text: String
     let contacts: ContactsViewModel

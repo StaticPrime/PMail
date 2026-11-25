@@ -32,7 +32,13 @@ struct EventDetailsView: View {
                     }
                     IconButton(symbol: "pencil", help: event.isTask ? "Edit task" : "Edit event", size: 32, iconSize: 14) {
                         model.selectedEventKey = nil
-                        app.sheet = .eventEditor(model.draft(for: event))
+                        // Beside it in the day, week or month view, where a click on another time moves it; the
+                        // schedule has no times to click, so there it's the full editor.
+                        if model.mode == .schedule {
+                            app.sheet = .eventEditor(model.draft(for: event))
+                        } else {
+                            model.openQuickEditor(model.draft(for: event))
+                        }
                     }
                     IconButton(symbol: "trash", help: event.isTask ? "Delete task" : "Delete event", size: 32, iconSize: 14) {
                         // Undo can bring it back; a repeating event asks which times go.
