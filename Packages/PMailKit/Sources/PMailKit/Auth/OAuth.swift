@@ -66,6 +66,16 @@ public struct OAuthProvider: Sendable, Hashable {
                              extraParameters: ["response_mode": "query"])
     }
 
+    /// Where an administrator approves PMail for their whole organization, for an organization that doesn't let people
+    /// approve apps themselves: Microsoft's tenant-wide admin consent, given in the organization of whoever signs in to it,
+    /// so the one link does for any organization. Nil for providers without one.
+    public var adminApprovalURL: URL? {
+        guard kind == .microsoft else { return nil }
+        var components = URLComponents(string: "https://login.microsoftonline.com/organizations/adminconsent")!
+        components.queryItems = [URLQueryItem(name: "client_id", value: clientID)]
+        return components.url
+    }
+
     /// Google's redirect for apps registered as native clients: the client ID's parts reversed as a URL scheme.
     /// "1234-abc.apps.googleusercontent.com" gives "com.googleusercontent.apps.1234-abc:/oauth2redirect".
     public static func googleRedirectURI(forClientID clientID: String) -> String {
@@ -259,13 +269,20 @@ public struct OAuthClient: Sendable {
         return components.url!
     }
 
-    /// The authorization code from the page the provider redirected to. Throws `.cancelled` if the person said no.
+    /// Microsoft's reasons for needing an administrator's approval first: none given yet (65001), only administrators may
+    /// give it (90094, 90095), or the app's publisher isn't verified (900941, 900981). Saying no oneself is 65004.
+    static let adminApprovalCodes = ["AADSTS65001", "AADSTS90094", "AADSTS90095", "AADSTS900941", "AADSTS900981"]
+
+    /// The authorization code from the page the provider redirected to. Throws `.cancelled` if the person said no, and
+    /// `.needsAdminApproval` when their organization has to approve PMail first.
     public func authorizationCode(from callback: URL, expectedState: String) throws -> String {
         let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems ?? []
         func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
         if let error = value("error") {
+            let reason = value("error_description") ?? ""
+            if provider.kind == .microsoft, Self.adminApprovalCodes.contains(where: { reason.contains($0) }) { throw PMailError.needsAdminApproval }
             if error == "access_denied" || error == "consent_required" { throw PMailError.cancelled }
-            throw PMailError.authenticationFailed(value("error_description") ?? error)
+            throw PMailError.authenticationFailed(reason.isEmpty ? error : reason)
         }
         guard value("state") == expectedState else { throw PMailError.authenticationFailed("The sign-in answer didn’t match the request.") }
         guard let code = value("code"), !code.isEmpty else { throw PMailError.authenticationFailed("The provider sent no sign-in code.") }

@@ -24,6 +24,8 @@ public enum PMailError: Error, Sendable, Equatable, LocalizedError {
     case timedOut
     /// Sign-in through the provider's page isn't set up in this copy of PMail (no client ID).
     case notConfigured(String)
+    /// The account's organization lets only its administrators approve apps like PMail, and none has yet.
+    case needsAdminApproval
 
     public var errorDescription: String? {
         switch self {
@@ -39,6 +41,7 @@ public enum PMailError: Error, Sendable, Equatable, LocalizedError {
         case .cancelled: "Cancelled."
         case .timedOut: "The server took too long to answer."
         case let .notConfigured(what): what
+        case .needsAdminApproval: "Your organization needs to approve PMail before you can sign in."
         }
     }
 

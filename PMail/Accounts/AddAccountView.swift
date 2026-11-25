@@ -70,16 +70,30 @@ private struct BrowserSignIn: View {
     @State private var email = ""
     @State private var isWorking = false
     @State private var error: String?
+    /// The link an administrator approves PMail with, when the account's organization has to approve it first.
+    @State private var approvalLink: URL?
     @State private var signIn = OAuthSignIn()
+
+    /// What PuggleSoft's website tells IT admins about approving PMail.
+    private static let forAdmins = URL(string: "https://pugglesoft.com/pmail.html#it-admins")!
 
     var body: some View {
         VStack(spacing: 18) {
             ProviderLogo(kind: kind, size: 56)
                 .onAppear { if email.isEmpty { email = initialEmail } }
+                #if DEBUG
+                // `-PMAdminApproval YES` shows what an organization that approves apps itself gets.
+                .onAppear {
+                    if UserDefaults.standard.bool(forKey: "PMAdminApproval") { approvalLink = app.oauth.provider(for: kind)?.adminApprovalURL }
+                }
+                #endif
             Text("Sign in with \(kind.displayName)").font(.pm(24)).foregroundStyle(Theme.textPrimary)
             if let provider = app.oauth.provider(for: kind) {
-                Text("A \(kind.displayName) sign-in window opens. PMail never sees your password: \(kind.displayName) gives it a key to your mail, calendars and contacts that you can take back at any time.")
-                    .font(.pm(13)).foregroundStyle(Theme.textSecondary).multilineTextAlignment(.center).frame(maxWidth: 460)
+                // Making room for why signing in stopped, when the organization has to approve PMail.
+                if approvalLink == nil {
+                    Text("A \(kind.displayName) sign-in window opens. PMail never sees your password: \(kind.displayName) gives it a key to your mail, calendars and contacts that you can take back at any time.")
+                        .font(.pm(13)).foregroundStyle(Theme.textSecondary).multilineTextAlignment(.center).frame(maxWidth: 460)
+                }
                 VStack(spacing: 6) {
                     TextField("Email address (optional)", text: $email)
                         .textFieldStyle(.roundedBorder)
@@ -105,6 +119,7 @@ private struct BrowserSignIn: View {
                 .padding(18)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Theme.canvas))
             }
+            if let approvalLink { adminApproval(approvalLink) }
             if let error {
                 Text(error).font(.pm(12.5)).foregroundStyle(Theme.danger).multilineTextAlignment(.center).frame(maxWidth: 460).textSelection(.enabled)
             }
@@ -112,10 +127,35 @@ private struct BrowserSignIn: View {
         .padding(.top, 10)
     }
 
+    /// Why signing in stopped when the organization approves apps itself, with the link its administrator does it with.
+    private func adminApproval(_ link: URL) -> some View {
+        VStack(spacing: 10) {
+            Text("Your organization needs to approve PMail first").font(.pm(14, .medium)).foregroundStyle(Theme.textPrimary)
+            Text("Only its administrators can approve apps like PMail. Send your IT admin this link: once they’ve approved PMail for everyone, sign in again.")
+                .font(.pm(12.5)).foregroundStyle(Theme.textSecondary).multilineTextAlignment(.center).frame(maxWidth: 460)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(link.absoluteString)
+                .font(.pm(11.5)).foregroundStyle(Theme.textTertiary).lineLimit(1).truncationMode(.middle).frame(maxWidth: 460)
+                .textSelection(.enabled)
+            HStack(spacing: 10) {
+                OutlinePillButton(title: "Copy Link", symbol: "doc.on.doc") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(link.absoluteString, forType: .string)
+                    app.show("Link copied.")
+                }
+                OutlinePillButton(title: "For IT Admins", symbol: "info.circle") { NSWorkspace.shared.open(Self.forAdmins) }
+                    .help("What PMail asks for, and how to approve it: \(Self.forAdmins.absoluteString)")
+            }
+        }
+        .padding(18)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.canvas))
+    }
+
     private func start(_ provider: OAuthProvider) {
         guard !isWorking else { return }
         isWorking = true
         error = nil
+        approvalLink = nil
         Task {
             do {
                 let result = try await signIn.signIn(with: provider, loginHint: email.isEmpty ? nil : email)
@@ -125,6 +165,9 @@ private struct BrowserSignIn: View {
                 session.activate()
                 app.show("\(address) was added.")
                 done()
+            } catch PMailError.needsAdminApproval {
+                isWorking = false
+                approvalLink = provider.adminApprovalURL
             } catch PMailError.cancelled {
                 isWorking = false
             } catch {

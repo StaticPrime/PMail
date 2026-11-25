@@ -54,6 +54,20 @@ import Testing
         #expect(throws: PMailError.self) {
             try client.authorizationCode(from: URL(string: "msauth.com.pugglesoft.PMail://auth?code=abc&state=other")!, expectedState: "s1")
         }
+        // An organization whose administrators approve apps says so, rather than looking like the person said no.
+        for reason in ["AADSTS900941:+Administrator+consent+is+required.+App+is+considered+risky.", "AADSTS90094:+The+grant+requires+admin+permission."] {
+            #expect(throws: PMailError.needsAdminApproval) {
+                try client.authorizationCode(from: URL(string: "msauth.com.pugglesoft.PMail://auth?error=access_denied&error_description=\(reason)&state=s1")!,
+                                             expectedState: "s1")
+            }
+        }
+        #expect(throws: PMailError.cancelled) {
+            try client.authorizationCode(from: URL(string: "msauth.com.pugglesoft.PMail://auth?error=access_denied&error_description=AADSTS65004:+User+declined+to+consent+to+access+the+app.&state=s1")!,
+                                         expectedState: "s1")
+        }
+        // One link does for any organization: its administrator approves PMail in their own.
+        #expect(client.provider.adminApprovalURL?.absoluteString == "https://login.microsoftonline.com/organizations/adminconsent?client_id=id")
+        #expect(OAuthProvider.google(clientID: "1234-abc.apps.googleusercontent.com").adminApprovalURL == nil)
     }
 
     @Test func exchangeAndRefreshKeepTheRefreshToken() async throws {
