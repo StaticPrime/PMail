@@ -344,6 +344,57 @@ extension IMAPMailService {
         }
     }
 
+    // MARK: Deleting for good
+
+    /// Deletes messages for good the only way Gmail does over IMAP: moved to the trash, then deleted from there.
+    /// Deleting a message from All Mail does nothing at Gmail, and a draft deleted from Drafts only goes to the trash,
+    /// so drafts thrown away (or replaced by a newer version) go this way. The mail kept on this Mac lets them go at
+    /// once. Messages no longer where their IDs say (moved, or their mailbox renumbered) throw `notFound`, after the
+    /// rest are deleted.
+    func gmailDeleteForGood(_ ids: [IMAPMessageID], client: IMAPClient) async throws {
+        let roles = Self.gmailRoles(try await knownMailboxes(client: client))
+        guard let trash = roles.first(where: { $0.value == .trash })?.key else {
+            throw PMailError.notSupported("This account has no Trash folder.")
+        }
+        var found: [IMAPMessageID] = []
+        var gone: [String] = []
+        var moved: [String] = []
+        for (mailbox, group) in Self.grouped(ids, by: { $0.mailbox }) {
+            let selected = try await ensureSelected(mailbox, writable: true, client: client)
+            // UIDs from before the mailbox's UIDVALIDITY changed would point at other messages.
+            let valid = group.filter { $0.uid > 0 && $0.uidValidity == (selected.uidValidity ?? 0) }
+            found += valid
+            guard !valid.isEmpty else { continue }
+            // Gmail's own IDs, the same in every mailbox, find them again in the trash. A message already deleted
+            // elsewhere doesn't answer, and has nothing left to delete.
+            let fetched = try await client.uidFetch(valid.map(\.uid), items: "X-GM-MSGID")
+            let present = fetched.compactMap(\.uid)
+            let messageIDs = fetched.compactMap(\.gmailMessageID)
+            gone += messageIDs
+            guard !present.isEmpty else { continue }
+            if mailbox == trash {
+                try await client.deleteMessages(present)
+            } else {
+                try await client.uidMove(present, to: trash)
+                moved += messageIDs
+            }
+        }
+        // Out of All Mail now (or gone already), so out of every list kept on this Mac too.
+        if let store = gmailStore {
+            let kept = await store.ids(for: found.map { MessageSummary(id: $0.rawValue) })
+            let leaving = Array(Set(kept + gone))
+            if !leaving.isEmpty {
+                await store.delete(leaving)
+                gmailNotify(.changed)
+            }
+        }
+        if let inTrash = IMAPSearchKey.any(moved.map { .gmailMessage($0) }) {
+            _ = try await ensureSelected(trash, writable: true, client: client)
+            try await client.deleteMessages(try await client.uidSearch([inTrash]))
+        }
+        if found.count < ids.count { throw PMailError.notFound }
+    }
+
     // MARK: Tabs
 
     /// Unread messages in the inbox under each category tab, by Gmail's search.

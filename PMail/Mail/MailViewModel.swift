@@ -421,10 +421,11 @@ final class MailViewModel {
         let waiting = waitingForNetwork
         waitingForNetwork = []
         let service = self.service
+        let drafts = storage.waitingDrafts
         Task {
             for item in waiting {
                 do {
-                    try await Self.apply(item, with: service)
+                    try await Self.apply(item, with: service, drafts: drafts)
                     learn(from: item)
                 } catch {
                     app?.report(error, doing: "That change")
@@ -502,20 +503,19 @@ final class MailViewModel {
             .filter { $0.leaves && $0.listKey == key }.flatMap { $0.messages.map(\.id) })
         var shown = page.conversations
         if !leaving.isEmpty {
-            shown = shown.compactMap { conversation in
-                var conversation = conversation
-                conversation.messages.removeAll { leaving.contains($0.id) }
-                return conversation.messages.isEmpty ? nil : conversation
-            }
+            let inDrafts = showsDrafts
+            shown = shown.compactMap { $0.remaining(without: leaving, listedInDrafts: inDrafts) }
         }
         let filedAway = page.conversations.count - shown.count
         // A page listed with more to fill in for what's being filed away shows a page's worth.
         if shown.count > pageSize { shown = Array(shown.prefix(pageSize)) }
-        // Drafts kept on this Mac go at the top of Drafts, in place of the server's copies they replace (or delete).
+        // Drafts kept on this Mac go at the top of Drafts, in place of the server's copies they replace (or delete),
+        // apart from ones being thrown away.
         if showsDrafts, pageIndex == 0, !waitingDrafts.isEmpty {
             let replaced = Set(waitingDrafts.compactMap { $0.replaces?.id })
             shown.removeAll { conversation in conversation.messages.contains { replaced.contains($0.id) } }
-            shown = waitingDrafts.reversed().compactMap { draft in draft.summary.map { Conversation(id: draft.summaryID, messages: [$0]) } } + shown
+            shown = waitingDrafts.reversed().filter { !leaving.contains($0.summaryID) }
+                .compactMap { draft in draft.summary.map { Conversation(id: draft.summaryID, messages: [$0]) } } + shown
         }
         conversations = shown
         totalCount = page.totalCount.map { max(0, $0 - filedAway) }
@@ -976,11 +976,8 @@ final class MailViewModel {
         let wasOpen = openConversation
         let leaves = alwaysLeaves || leavesList(action)
         if leaves {
-            conversations = conversations.compactMap { conversation in
-                var conversation = conversation
-                conversation.messages.removeAll { ids.contains($0.id) }
-                return conversation.messages.isEmpty ? nil : conversation
-            }
+            let inDrafts = showsDrafts
+            conversations = conversations.compactMap { $0.remaining(without: ids, listedInDrafts: inDrafts) }
             if let totalCount { self.totalCount = max(0, totalCount - (snapshot.count - conversations.count)) }
             checkedIDs.subtract(snapshot.map(\.id).filter { id in !conversations.contains { $0.id == id } })
         }
@@ -1034,9 +1031,13 @@ final class MailViewModel {
         committing[id] = item
         defer { committing[id] = nil }
         do {
-            try await Self.apply(item, with: service)
+            try await Self.apply(item, with: service, drafts: storage.waitingDrafts)
             learn(from: item)
-            if item.discardsDrafts { draftsChanged() }
+            if item.discardsDrafts {
+                draftsChanged()
+                // The server's copies that drafts kept on this Mac were to replace go now, when it can be reached.
+                if item.messages.contains(where: { $0.id.hasPrefix(WaitingDraft.summaryPrefix) }) { await sendWaitingDrafts() }
+            }
             await loadFolders(thenList: false)
             refreshTabCounts()
         } catch where Self.isConnectionProblem(error) {
@@ -1066,11 +1067,12 @@ final class MailViewModel {
         let items = Array(pending.values)
         pending.removeAll()
         let service = self.service
+        let drafts = storage.waitingDrafts
         for item in items {
             item.task?.cancel()
             Task { [weak self] in
                 do {
-                    try await Self.apply(item, with: service)
+                    try await Self.apply(item, with: service, drafts: drafts)
                     self?.learn(from: item)
                 } catch where Self.isConnectionProblem(error) {
                     self?.waitingForNetwork.append(item)
@@ -1088,7 +1090,7 @@ final class MailViewModel {
         waitingForNetwork.removeAll()
         for item in items {
             item.task?.cancel()
-            if (try? await Self.apply(item, with: service)) != nil { learn(from: item) }
+            if (try? await Self.apply(item, with: service, drafts: storage.waitingDrafts)) != nil { learn(from: item) }
         }
     }
 
@@ -1202,10 +1204,17 @@ final class MailViewModel {
         draftsChanged()
     }
 
-    /// Sends a waiting action to the server: thrown-away drafts are deleted as drafts, anything else is the action.
-    private static func apply(_ item: PendingAction, with service: any MailService) async throws {
+    /// Sends a waiting action to the server: thrown-away drafts are deleted as drafts (one kept on this Mac goes from
+    /// there, and the server's copy it was to replace waits to be deleted), anything else is the action.
+    private static func apply(_ item: PendingAction, with service: any MailService, drafts: PendingChanges<WaitingDraft>) async throws {
         if item.discardsDrafts {
-            for draft in item.messages { try await service.deleteDraft(draft) }
+            for draft in item.messages {
+                if draft.id.hasPrefix(WaitingDraft.summaryPrefix) {
+                    await drafts.discard(summaryID: draft.id)
+                } else {
+                    try await service.deleteDraft(draft)
+                }
+            }
         } else {
             try await service.perform(item.action, on: item.messages)
         }

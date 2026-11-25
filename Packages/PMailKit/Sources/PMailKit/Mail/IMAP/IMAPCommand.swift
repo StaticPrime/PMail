@@ -235,6 +235,9 @@ public indirect enum IMAPSearchKey: Sendable, Hashable {
     case gmailSearch(String)
     /// The messages in one of Gmail's conversations (X-GM-THRID). An ID that isn't a number matches nothing.
     case gmailThread(String)
+    /// The message with one of Gmail's own message IDs (X-GM-MSGID), the same in every mailbox. An ID that isn't a
+    /// number matches nothing.
+    case gmailMessage(String)
 
     /// One key that matches when any of the keys does; nil for none.
     public static func any(_ keys: [IMAPSearchKey]) -> IMAPSearchKey? {
@@ -285,6 +288,8 @@ public indirect enum IMAPSearchKey: Sendable, Hashable {
         case let .gmailSearch(query): string("X-GM-RAW", query)
         case let .gmailThread(id):
             builder.text(!id.isEmpty && id.utf8.allSatisfy { $0 >= 0x30 && $0 <= 0x39 } ? "X-GM-THRID " + id : "NOT ALL")
+        case let .gmailMessage(id):
+            builder.text(!id.isEmpty && id.utf8.allSatisfy { $0 >= 0x30 && $0 <= 0x39 } ? "X-GM-MSGID " + id : "NOT ALL")
         case let .allOf(keys):
             builder.text("(")
             for (index, key) in keys.enumerated() {

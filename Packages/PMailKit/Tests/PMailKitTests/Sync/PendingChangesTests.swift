@@ -286,6 +286,28 @@ struct PendingChangesTests {
         #expect(await pending.all().isEmpty, "one sent from its window is taken out")
     }
 
+    @Test func aWaitingDraftThrownAwayGoesWithTheServerCopyItWasToReplace() async throws {
+        let queueFile = file()
+        defer { try? FileManager.default.removeItem(at: queueFile.deletingLastPathComponent()) }
+        let server = PretendMail()
+        let me = MailAddress(name: "Jamie", email: "jamie@example.com")
+        let onServer = try #require(try await server.saveDraft(OutgoingMessage(from: me, subject: "Plan", textBody: "v1"), replacing: nil))
+        let pending = PendingChanges<WaitingDraft>(file: queueFile)
+        let fresh = WaitingDraft(message: OutgoingMessage(from: me, subject: "Party", textBody: "Saturday?"), replaces: nil)
+        let edited = WaitingDraft(message: OutgoingMessage(from: me, subject: "Plan", textBody: "v2"), replaces: onServer)
+        await pending.add(fresh, merging: WaitingDraft.adding)
+        await pending.add(edited, merging: WaitingDraft.adding)
+        await pending.discard(summaryID: fresh.summaryID)
+        await pending.discard(summaryID: edited.summaryID)
+        await pending.discard(summaryID: WaitingDraft.summaryPrefix + UUID().uuidString)
+        let left = await pending.all()
+        #expect(left.compactMap(\.summary).isEmpty, "nothing left to list in Drafts")
+        #expect(left.count == 1 && left.first?.message == nil && left.first?.replaces?.id == onServer.id, "the server copy waits to be deleted")
+        #expect(await pending.send(using: server).deleted.count == 1)
+        #expect(await server.drafts.isEmpty)
+        #expect(await pending.all().isEmpty)
+    }
+
     @Test func contactsWaitAndGoTheSameWay() async throws {
         let queueFile = file()
         defer { try? FileManager.default.removeItem(at: queueFile.deletingLastPathComponent()) }

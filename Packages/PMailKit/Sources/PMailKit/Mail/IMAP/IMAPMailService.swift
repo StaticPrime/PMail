@@ -754,7 +754,7 @@ public actor IMAPMailService: MailService {
             }
             let appended = try await client.append(raw, to: drafts, flags: ["\\Draft", "\\Seen"])
             // The new version is saved; the rest is tidying up, and a failure there mustn't lose it.
-            if let replaced { try? await self.delete([replaced], client: client) }
+            if let replaced { try? await self.deleteDrafts([replaced], client: client) }
             var location = appended
             if location == nil { location = try? await self.findDraft(messageID: message.messageID, in: drafts, client: client) }
             guard let location else { return nil }
@@ -783,8 +783,13 @@ public actor IMAPMailService: MailService {
             if let local = localFolders { return try await local.store.delete(ids: [draft.id]) }
             throw PMailError.notFound
         }
-        try await withClient { client in try await self.delete([id], client: client) }
-        gmailSyncSoon()
+        try await withClient { client in try await self.deleteDrafts([id], client: client) }
+    }
+
+    /// Deletes drafts for good: from their mailbox, or on Gmail by way of the trash (where the mail kept on this Mac
+    /// lets them go at once).
+    private func deleteDrafts(_ ids: [IMAPMessageID], client: IMAPClient) async throws {
+        if isGmail { try await gmailDeleteForGood(ids, client: client) } else { try await delete(ids, client: client) }
     }
 
     /// Deletes messages for good, mailbox by mailbox.

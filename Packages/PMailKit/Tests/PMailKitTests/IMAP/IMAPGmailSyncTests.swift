@@ -94,30 +94,32 @@ import Testing
     }
 
     /// The first sync of an account with three messages in All Mail (an unread inbox message, its reply from the account,
-    /// and a promotion in the inbox) and one in Trash.
-    private func firstSync(_ session: inout Session) {
+    /// and a promotion in the inbox) and one in Trash; `withDraft` adds a draft of a second reply, in All Mail as 104.
+    private func firstSync(_ session: inout Session, withDraft: Bool = false) {
+        let count = withDraft ? 4 : 3
+        let next: UInt32 = withDraft ? 105 : 104
         session.signIn()
         session.list()
-        session.examine("[Gmail]/All Mail", exists: 3, validity: 11, next: 104, modSeq: 500)
+        session.examine("[Gmail]/All Mail", exists: count, validity: 11, next: next, modSeq: 500)
         session.fetch("UID FETCH 1:* \(Self.indexFetch)", [
             Self.index(1, uid: 101, thread: 101, labels: #"\Inbox"#, flags: "", hour: 10),
             Self.index(2, uid: 102, thread: 102, labels: #"\Inbox \Important"#, hour: 11),
             Self.index(3, uid: 103, thread: 101, labels: #"\Sent"#, hour: 12),
-        ])
+        ] + (withDraft ? [Self.index(4, uid: 104, thread: 101, labels: #"\Draft"#, flags: #"\Seen \Draft"#, hour: 13)] : []))
         session.examine("[Gmail]/Spam", exists: 0, validity: 12, next: 1, modSeq: 3)
         session.examine("[Gmail]/Trash", exists: 1, validity: 13, next: 8, modSeq: 4)
         session.fetch("UID FETCH 1:* \(Self.indexFetch)", [Self.index(1, uid: 7, thread: 7, labels: "", hour: 9)])
         // The tabs, the first time for everything.
-        session.examine("[Gmail]/All Mail", exists: 3, validity: 11, next: 104, modSeq: 500, condstore: false)
+        session.examine("[Gmail]/All Mail", exists: count, validity: 11, next: next, modSeq: 500, condstore: false)
         session.ok(#"UID SEARCH X-GM-RAW "category:promotions""#, ["* SEARCH 102"])
         session.ok(#"UID SEARCH X-GM-RAW "category:social""#, ["* SEARCH"])
         session.ok(#"UID SEARCH X-GM-RAW "category:updates""#, ["* SEARCH"])
         session.ok(#"UID SEARCH X-GM-RAW "category:forums""#, ["* SEARCH"])
         // Headers: the inbox's first, the newest first, in one batch here.
-        session.fetch("UID FETCH 101:103 \(Self.headerFetch)", [
+        session.fetch("UID FETCH 101:\(next - 1) \(Self.headerFetch)", [
             Self.headers(1, uid: 101, subject: "Park day"), Self.headers(2, uid: 102, subject: "50% off kibble"),
             Self.headers(3, uid: 103, subject: "Re: Park day"),
-        ])
+        ] + (withDraft ? [Self.headers(4, uid: 104, subject: "Re: Park day")] : []))
         session.examine("[Gmail]/Trash", exists: 1, validity: 13, next: 8, modSeq: 4, condstore: false)
         session.fetch("UID FETCH 7 \(Self.headerFetch)", [Self.headers(1, uid: 7, subject: "Old news")])
     }
@@ -210,5 +212,71 @@ import Testing
         #expect(try await mail.listConversations(ListRequest(folderID: "Work")).conversations.map(\.id) == ["17900000000000102"],
                 "Move to: the label on, out of the inbox")
         #expect(main.mismatches.isEmpty && main.isFinished && background.mismatches.isEmpty)
+    }
+
+    /// What deleting draft 104 for good says to Gmail: deleting it from All Mail would do nothing there, so it goes to
+    /// the trash and is deleted from there (as 8).
+    private static func deletingTheDraftForGood(_ session: inout Session) {
+        session.select("[Gmail]/All Mail")
+        session.fetch("UID FETCH 104 (X-GM-MSGID)", ["* 4 FETCH (UID 104 X-GM-MSGID 17900000000000104)"])
+        session.ok(#"UID MOVE 104 "[Gmail]/Trash""#, ["* 4 EXPUNGE"])
+        session.select("[Gmail]/Trash")
+        session.ok("UID SEARCH X-GM-MSGID 17900000000000104", ["* SEARCH 8"])
+        session.ok(#"UID STORE 8 +FLAGS.SILENT (\Deleted)"#)
+        session.ok("UID EXPUNGE 8", ["* 2 EXPUNGE"])
+    }
+
+    @Test func aDraftThrownAwayIsDeletedForGoodAndLeavesDraftsAtOnce() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var session = Session()
+        firstSync(&session, withDraft: true)
+        let background = ScriptedByteStream(greeting: Script.greeting(Self.capabilities), script: session.steps)
+        var actions = Session()
+        actions.signIn()
+        Self.deletingTheDraftForGood(&actions)
+        let main = ScriptedByteStream(greeting: Script.greeting(Self.capabilities), script: actions.steps)
+        let mail = service([background, main], folder: folder)
+        try await mail.syncGmail()
+        let drafts = try await mail.listConversations(ListRequest(folderID: "[Gmail]/Drafts")).conversations
+        #expect(drafts.map(\.id) == ["17900000000000101"])
+        #expect(drafts.first?.messages.map(\.isDraft) == [false, false, true], "Gmail lists a reply's draft with its whole conversation")
+        let draft = try #require(drafts.first?.messages.last)
+        try await mail.deleteDraft(draft)
+        #expect(try await mail.listConversations(ListRequest(folderID: "[Gmail]/Drafts")).conversations.isEmpty, "out of Drafts at once")
+        let park = try await mail.listConversations(ListRequest(folderID: "INBOX")).conversations.first { $0.id == "17900000000000101" }
+        #expect(park?.messages.map(\.subject) == ["Park day", "Re: Park day"], "the rest of the conversation stays")
+        #expect(main.mismatches.isEmpty && main.isFinished && background.mismatches.isEmpty)
+    }
+
+    @Test func savingADraftAgainDeletesItsOldCopyForGood() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var session = Session()
+        firstSync(&session, withDraft: true)
+        let background = ScriptedByteStream(greeting: Script.greeting(Self.capabilities), script: session.steps)
+        let message = OutgoingMessage(from: MailAddress(name: "Pug Tester", email: "pug@gmail.com"), to: [MailAddress(email: "alex@example.com")],
+                                      subject: "Re: Park day", textBody: "See you at 3!", messageID: "<draft-2@gmail.com>",
+                                      date: Date(timeIntervalSince1970: 1_795_000_000))
+        let raw = MIMEBuilder.buildForSaving(message)
+        var actions = Session()
+        actions.signIn()
+        let append = actions.tag()
+        actions.steps += [
+            .expect(#"\#(append) APPEND "[Gmail]/Drafts" (\Draft \Seen) {\#(raw.count)+}"#, reply: ""),
+            .expectBytes(raw.count, reply: ""),
+            .expect("", reply: "\(append) OK [APPENDUID 5 9] (Success)\r\n"),
+        ]
+        Self.deletingTheDraftForGood(&actions)
+        let main = ScriptedByteStream(greeting: Script.greeting(Self.capabilities), script: actions.steps)
+        let mail = service([background, main], folder: folder)
+        try await mail.syncGmail()
+        #expect(background.mismatches.isEmpty && background.isFinished)
+        let old = try #require(try await mail.listConversations(ListRequest(folderID: "[Gmail]/Drafts")).conversations.first?.messages.last)
+        let saved = try #require(try await mail.saveDraft(message, replacing: old))
+        #expect(saved.id == IMAPMessageID(mailbox: "[Gmail]/Drafts", uidValidity: 5, uid: 9).rawValue && saved.isDraft)
+        #expect(try await mail.listConversations(ListRequest(folderID: "[Gmail]/Drafts")).conversations.isEmpty,
+                "the old copy isn't left behind as a second draft; the new one comes with the next sync")
+        #expect(main.mismatches.isEmpty && main.isFinished)
     }
 }

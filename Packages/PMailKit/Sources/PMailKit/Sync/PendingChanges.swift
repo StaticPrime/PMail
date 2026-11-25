@@ -415,6 +415,16 @@ extension PendingChanges where Change == ContactChange {
 }
 
 extension PendingChanges where Change == WaitingDraft {
+    /// Throws away a draft kept on this Mac, by its row's ID in Drafts: it goes, and the copy on the server it was to
+    /// replace (if any) waits to be deleted instead. One already on its way to the server is past stopping.
+    public func discard(summaryID: String) {
+        guard let draft = all().first(where: { $0.summaryID == summaryID }) else { return }
+        remove { $0.id == draft.id }
+        if let replaces = draft.replaces {
+            add(WaitingDraft(message: nil, replaces: replaces, savedAt: draft.savedAt), merging: WaitingDraft.adding)
+        }
+    }
+
     /// Saves the waiting drafts to the server, each replacing its earlier copy there (or saved anew when that copy is
     /// gone), and deletes the drafts thrown away offline, oldest first, as calendar changes are sent.
     public func send(using service: any MailService) async -> PendingResult<MessageSummary> {

@@ -36,6 +36,23 @@ import Testing
         #expect(conversations[1].participants(me: "me@example.com") == ["Sam"])
     }
 
+    @Test func aConversationLeavesDraftsWithItsLastDraft() {
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let received = MessageSummary(id: "1", threadID: "a", subject: "Pie plans", date: base)
+        let reply = MessageSummary(id: "2", threadID: "a", subject: "Re: Pie plans", date: base.addingTimeInterval(60), isDraft: true)
+        let another = MessageSummary(id: "3", threadID: "a", subject: "Re: Pie plans", date: base.addingTimeInterval(120), isDraft: true)
+        // Gmail lists a draft's whole conversation in Drafts: it leaves Drafts with its draft, and other lists keep the rest.
+        let listed = Conversation(id: "a", messages: [received, reply])
+        #expect(listed.remaining(without: ["2"], listedInDrafts: true) == nil)
+        #expect(listed.remaining(without: ["2"])?.messages.map(\.id) == ["1"])
+        #expect(Conversation(id: "a", messages: [received, reply, another]).remaining(without: ["2"], listedInDrafts: true)?.messages.map(\.id)
+                == ["1", "3"], "it stays while it has another draft")
+        // Drafts their server doesn't mark as drafts go one by one, and the conversation with the last of them.
+        let unmarked = Conversation(id: "b", messages: [MessageSummary(id: "4", threadID: "b"), MessageSummary(id: "5", threadID: "b")])
+        #expect(unmarked.remaining(without: ["4"], listedInDrafts: true)?.messages.map(\.id) == ["5"])
+        #expect(unmarked.remaining(without: ["4", "5"], listedInDrafts: true) == nil)
+    }
+
     @Test func serverPresetsGuessTheUsualNames() {
         let yahoo = ServerPresets.guess(forEmail: "pug@yahoo.com")
         #expect(yahoo.incoming.host == "imap.mail.yahoo.com" && yahoo.incoming.port == 993)

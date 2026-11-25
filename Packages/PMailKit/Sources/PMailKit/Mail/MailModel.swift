@@ -202,6 +202,16 @@ public struct Conversation: Codable, Sendable, Identifiable, Hashable {
         return names
     }
 
+    /// What a list still shows of the conversation once some of its messages leave it, or nil when it leaves the list
+    /// too: when none of its messages are left, or, listed in Drafts, none of its drafts (Gmail lists a draft's whole
+    /// conversation there).
+    public func remaining(without ids: Set<String>, listedInDrafts: Bool = false) -> Conversation? {
+        var rest = self
+        rest.messages.removeAll { ids.contains($0.id) }
+        if rest.messages.isEmpty || listedInDrafts && hasDraft && !rest.hasDraft { return nil }
+        return rest
+    }
+
     /// Groups messages into conversations by `threadID`, newest conversation first.
     public static func group(_ messages: [MessageSummary]) -> [Conversation] {
         var order: [String] = []
