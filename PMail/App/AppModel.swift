@@ -99,7 +99,7 @@ final class AppModel {
     /// Bumped to open the account switcher from code.
     var accountMenuRequest = 0
     /// Whether the calendar shows every account's own calendars, whichever account is showing (the others' read-only), so
-    /// the person sees their whole schedule: Settings ▸ Calendar.
+    /// the person sees their whole schedule: on until turned off in Settings ▸ Calendar.
     var showsAllCalendars: Bool {
         didSet {
             guard showsAllCalendars != oldValue else { return }
@@ -113,7 +113,18 @@ final class AppModel {
     init(accounts: AccountsController, oauth: OAuthConfiguration) {
         self.accounts = accounts
         self.oauth = oauth
-        showsAllCalendars = accounts.defaults.bool(forKey: Self.showsAllCalendarsKey)
+        let defaults = accounts.defaults
+        showsAllCalendars = defaults.object(forKey: Self.showsAllCalendarsKey) == nil ? Self.showsAllCalendarsUntilSet
+                                                                                      : defaults.bool(forKey: Self.showsAllCalendarsKey)
+    }
+
+    /// Every account's calendars show until the person says otherwise, apart from in sample runs (the self-test and
+    /// snapshots), whose accounts' calendars stay apart unless `-ShowsAllCalendars YES` asks, so what they check stays put.
+    private static var showsAllCalendarsUntilSet: Bool {
+        #if DEBUG
+        if DebugLaunchOptions.usesSampleAccounts { return false }
+        #endif
+        return true
     }
 
     var current: AccountSession? { accounts.current }
