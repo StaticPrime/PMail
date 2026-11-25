@@ -98,11 +98,22 @@ final class AppModel {
     var searchFocusRequest = 0
     /// Bumped to open the account switcher from code.
     var accountMenuRequest = 0
+    /// Whether the calendar shows every account's own calendars, whichever account is showing (the others' read-only), so
+    /// the person sees their whole schedule: Settings ▸ Calendar.
+    var showsAllCalendars: Bool {
+        didSet {
+            guard showsAllCalendars != oldValue else { return }
+            accounts.defaults.set(showsAllCalendars, forKey: Self.showsAllCalendarsKey)
+            for session in accounts.sessions.values { session.calendar.otherAccountsChanged() }
+        }
+    }
+    static let showsAllCalendarsKey = "ShowsAllCalendars"
     private var toastTask: Task<Void, Never>?
 
     init(accounts: AccountsController, oauth: OAuthConfiguration) {
         self.accounts = accounts
         self.oauth = oauth
+        showsAllCalendars = accounts.defaults.bool(forKey: Self.showsAllCalendarsKey)
     }
 
     var current: AccountSession? { accounts.current }
@@ -196,6 +207,8 @@ final class AppModel {
         composers.removeAll { $0.session.id == id }
         accounts.remove(id)
         searchText = ""
+        // Its calendars go from beside the others' too.
+        for session in accounts.sessions.values { session.calendar.otherAccountsChanged() }
         current?.activate()
     }
 
@@ -205,6 +218,7 @@ final class AppModel {
         accounts.switchTo(id)
         searchText = ""
         current?.activate()
+        current?.calendar.becameCurrent()
         sync?.accountChanged()
     }
 

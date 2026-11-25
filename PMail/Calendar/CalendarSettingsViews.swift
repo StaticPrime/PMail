@@ -19,7 +19,8 @@ struct CalendarSettingsTarget: Equatable {
     var calendarID: String
 }
 
-/// A calendar's ⋯ menu: show just it, its settings, and its color.
+/// A calendar's ⋯ menu: show just it, its settings, and its color. Another account's calendar (showing beside the
+/// account's own) has just showing it alone and switching to its account, where it can be changed.
 struct CalendarRowMenu: View {
     let app: AppModel
     let model: CalendarViewModel
@@ -36,8 +37,28 @@ struct CalendarRowMenu: View {
     }
 
     var body: some View {
+        if let origin = OtherAccountCalendars.origin(of: calendar.id) {
+            VStack(alignment: .leading, spacing: 4) {
+                menuButton("Display This Only") {
+                    model.showOnly(calendar)
+                    close()
+                }
+                menuButton("Switch to This Account") {
+                    close()
+                    app.switchAccount(to: origin.account)
+                }
+            }
+            .padding(12)
+            .frame(width: 236)
+            .background(Theme.surface)
+        } else {
+            ownCalendarMenu
+        }
+    }
+
+    private var ownCalendarMenu: some View {
         let current = model.colorHex(of: calendar).uppercased()
-        VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 4) {
             menuButton("Display This Only") {
                 model.showOnly(calendar)
                 close()
@@ -126,6 +147,14 @@ struct CalendarSettingsPane: View {
             if app.accounts.accounts.isEmpty {
                 Text("Add an account to see its calendars’ settings here.").foregroundStyle(.secondary)
             } else {
+                if app.accounts.accounts.count > 1 {
+                    Section {
+                        Toggle("Show calendars from all my accounts", isOn: Binding(get: { app.showsAllCalendars }, set: { app.showsAllCalendars = $0 }))
+                    } footer: {
+                        Text("Whichever account is showing, your other accounts’ calendars are under My calendars too, so you can see when "
+                             + "you’re free. Their events can be changed only from their own account.")
+                    }
+                }
                 Section {
                     Picker("Account", selection: Binding(get: { account }, set: { accountID = $0; calendarID = nil })) {
                         ForEach(app.accounts.accounts) { account in Text(account.email).tag(Optional(account.id)) }

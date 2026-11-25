@@ -16,6 +16,10 @@ struct EventDetailsView: View {
     var body: some View {
         let calendarInfo = model.calendarInfo(event.calendarID)
         let canEdit = calendarInfo?.isReadOnly == false
+        // An event of another account's, showing beside this one's: changed (and answered) only from that account.
+        let otherAccount = OtherAccountCalendars.origin(of: event.calendarID).flatMap { origin in
+            app.accounts.accounts.first { $0.id == origin.account }
+        }
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 2) {
                 Spacer()
@@ -163,7 +167,17 @@ struct EventDetailsView: View {
                 }
             }
             if let calendarInfo {
-                row(icon: calendarInfo.isTaskList ? "checklist" : "calendar") { Text(calendarInfo.name).font(.pm(13)).foregroundStyle(Theme.textPrimary) }
+                row(icon: calendarInfo.isTaskList ? "checklist" : "calendar") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(calendarInfo.name).font(.pm(13)).foregroundStyle(Theme.textPrimary)
+                        if let otherAccount {
+                            Text(otherAccount.email).font(.pm(12)).foregroundStyle(Theme.textSecondary)
+                            Button("Switch to this account to change it") { model.showInItsAccount(event) }
+                                .buttonStyle(.link)
+                                .font(.pm(12.5))
+                        }
+                    }
+                }
             }
             if event.visibility != .default {
                 row(icon: event.visibility == .private ? "lock" : "globe") {
@@ -177,7 +191,7 @@ struct EventDetailsView: View {
                 Label(who.map { "\($0) canceled this event." } ?? "This event was canceled.", systemImage: "calendar.badge.minus")
                     .font(.pm(13)).foregroundStyle(Theme.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            } else if let response = event.myResponse, !(event.organizer?.isSameMailbox(as: model.account.email) ?? false) {
+            } else if otherAccount == nil, let response = event.myResponse, !(event.organizer?.isSameMailbox(as: model.account.email) ?? false) {
                 Divider().overlay(Theme.divider).padding(.vertical, 8)
                 // The answer goes to whoever sent the invitation.
                 if response == .needsAction, let organizer = event.organizer {

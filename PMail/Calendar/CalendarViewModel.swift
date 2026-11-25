@@ -154,6 +154,23 @@ final class CalendarViewModel {
     /// The event whose details are showing in a popover, by its key (the same meeting can be in two calendars).
     var selectedEventKey: String?
 
+    /// Another of the person's accounts whose own calendars show beside this account's (Settings ▸ Calendar ▸ Show
+    /// calendars from all my accounts), read-only.
+    struct OtherAccount: Identifiable {
+        let account: Account
+        /// Its calendars, with their IDs here.
+        var calendars: [CalendarInfo]
+        var id: UUID { account.id }
+    }
+    /// The other accounts whose calendars show here, in the order of the accounts, as last loaded.
+    private(set) var otherAccounts: [OtherAccount] = []
+    /// Their events in what's loaded, on their calendars' IDs here. Kept apart from the account's own, which are all
+    /// that saving, answering and Undo ever deal with.
+    private(set) var otherEvents: [CalendarEvent] = []
+    @ObservationIgnored private var otherLoadedInterval: DateInterval?
+    @ObservationIgnored private var otherLoadedAt: Date?
+    @ObservationIgnored private var otherGeneration = 0
+
     init(account: Account, service: any CalendarService, cache: AccountCache? = nil, changes: PendingChanges<CalendarChange>? = nil,
          calendar: Calendar = .current, defaults: UserDefaults = .standard, today: @escaping () -> Date = Date.init) {
         self.account = account
@@ -310,17 +327,17 @@ final class CalendarViewModel {
             loadedInterval = nil
             loadIfNeeded(quietly: true)
         }
+        refreshOtherAccountsIfDue()
     }
 
     /// Loads events when what's showing goes past what's loaded: a few weeks either side, so moving a week or a
     /// month along rarely waits. Quietly (a refresh in the background), it shows no progress and no errors.
     func loadIfNeeded(quietly: Bool = false) {
+        loadOtherAccountsIfNeeded()
         let visible = visibleInterval
         if let loadedInterval, loadedInterval.start <= visible.start, loadedInterval.end >= visible.end { return }
         guard !calendars.isEmpty else { return }
-        let start = calendar.date(byAdding: .day, value: -14, to: grid.startOfWeek(grid.startOfMonth(visible.start))) ?? visible.start
-        let end = calendar.date(byAdding: .day, value: 45, to: visible.end) ?? visible.end
-        let interval = DateInterval(start: start, end: end)
+        let interval = loadingInterval(around: visible)
         loadGeneration += 1
         let generation = loadGeneration
         if !quietly { isLoading = true }
@@ -353,6 +370,139 @@ final class CalendarViewModel {
                 needsSignIn = (error as? PMailError)?.needsSignIn ?? false
             }
         }
+    }
+
+    /// What's loaded around what's showing: a few weeks either side.
+    private func loadingInterval(around visible: DateInterval) -> DateInterval {
+        let start = calendar.date(byAdding: .day, value: -14, to: grid.startOfWeek(grid.startOfMonth(visible.start))) ?? visible.start
+        let end = calendar.date(byAdding: .day, value: 45, to: visible.end) ?? visible.end
+        return DateInterval(start: start, end: end)
+    }
+
+    /// The account's events in `interval` as they show here, when what's loaded covers it (for another account showing
+    /// this one's calendars beside its own).
+    func events(covering interval: DateInterval) -> [CalendarEvent]? {
+        guard let loadedInterval, loadedInterval.start <= interval.start, loadedInterval.end >= interval.end else { return nil }
+        return events
+    }
+
+    // MARK: The person's other accounts
+
+    /// Whether the person's other accounts' calendars show here: Settings asks for every account's, and this is the
+    /// account showing.
+    var showsOtherAccounts: Bool {
+        guard let app, app.showsAllCalendars else { return false }
+        return app.accounts.currentID == account.id
+    }
+
+    /// The other accounts with calendars showing here, for the sidebar.
+    var shownOtherAccounts: [OtherAccount] { showsOtherAccounts ? otherAccounts.filter { !$0.calendars.isEmpty } : [] }
+
+    /// Loads the other accounts' calendars and events around what's showing, when they show here and what's loaded
+    /// doesn't cover it.
+    private func loadOtherAccountsIfNeeded() {
+        guard showsOtherAccounts else { return }
+        let visible = visibleInterval
+        if let otherLoadedInterval, otherLoadedInterval.start <= visible.start, otherLoadedInterval.end >= visible.end { return }
+        let interval = loadingInterval(around: visible)
+        otherGeneration += 1
+        let generation = otherGeneration
+        let before = otherEvents
+        Task {
+            let loaded = await otherAccountCalendars(in: interval, keeping: before)
+            guard generation == otherGeneration else { return }
+            otherAccounts = loaded.accounts
+            otherEvents = loaded.events
+            otherLoadedInterval = interval
+            otherLoadedAt = Date()
+        }
+    }
+
+    /// The other accounts' calendars again in the background, as often as those accounts are checked.
+    private func refreshOtherAccountsIfDue() {
+        guard showsOtherAccounts else { return }
+        let every = (app?.sync?.checkInterval ?? 120) * 2
+        if let otherLoadedAt, Date().timeIntervalSince(otherLoadedAt) < every - 10 { return }
+        otherLoadedInterval = nil
+        loadOtherAccountsIfNeeded()
+    }
+
+    /// The account was switched to: the other accounts' calendars show as they are now (one may have just changed).
+    func becameCurrent() {
+        guard showsOtherAccounts, !calendars.isEmpty else { return }
+        otherLoadedInterval = nil
+        loadOtherAccountsIfNeeded()
+    }
+
+    /// Every account's calendars were asked for or not any more, or an account went: what shows here follows.
+    func otherAccountsChanged() {
+        otherLoadedInterval = nil
+        guard let app, app.showsAllCalendars else {
+            otherAccounts = []
+            otherEvents = []
+            return
+        }
+        let kept = Set(app.accounts.accounts.map(\.id))
+        otherAccounts.removeAll { !kept.contains($0.id) }
+        otherEvents.removeAll { OtherAccountCalendars.origin(of: $0.calendarID).map { !kept.contains($0.account) } ?? true }
+        loadOtherAccountsIfNeeded()
+    }
+
+    /// The other accounts' own calendars, and their events in `interval`: as each account's calendar has them when what
+    /// it loaded covers the stretch, else from its server (with the changes waiting to go there). An account whose
+    /// server can't be reached keeps what showed before, or else its copy on this Mac.
+    func otherAccountCalendars(in interval: DateInterval, keeping before: [CalendarEvent] = []) async
+        -> (accounts: [OtherAccount], events: [CalendarEvent]) {
+        guard let app else { return ([], []) }
+        var accounts: [OtherAccount] = []
+        var events: [CalendarEvent] = []
+        for other in app.accounts.accounts where other.id != account.id {
+            guard let session = app.accounts.session(for: other.id) else { continue }
+            let model = session.calendar
+            var theirCalendars = model.calendars
+            if theirCalendars.isEmpty { theirCalendars = await session.storage.cache.calendars() ?? [] }
+            if theirCalendars.isEmpty { theirCalendars = (try? await session.services.calendar.loadCalendars()) ?? [] }
+            let shown = OtherAccountCalendars.calendars(theirCalendars, of: other.id).map { calendar in
+                // In the color the account shows it in.
+                var colored = calendar
+                if let original = theirCalendars.first(where: { OtherAccountCalendars.id($0.id, of: other.id) == calendar.id }) {
+                    colored.colorHex = model.colorHex(of: original)
+                }
+                return colored
+            }
+            guard !shown.isEmpty else { continue }
+            accounts.append(OtherAccount(account: other, calendars: shown))
+            let theirs: [CalendarEvent]
+            if let showing = model.events(covering: interval) {
+                theirs = showing
+            } else if let loaded = try? await session.services.calendar.loadEvents(
+                in: shown.compactMap { OtherAccountCalendars.origin(of: $0.id)?.calendarID }, from: interval.start, to: interval.end) {
+                theirs = CalendarChange.applying(await session.storage.calendarChanges.all(), to: loaded)
+            } else {
+                let earlier = before.filter { OtherAccountCalendars.origin(of: $0.calendarID)?.account == other.id }
+                if !earlier.isEmpty {
+                    events += earlier
+                    continue
+                }
+                theirs = await session.storage.cache.events()?.events ?? []
+            }
+            events += OtherAccountCalendars.events(theirs.filter { $0.start < interval.end && $0.end >= interval.start }, on: shown, of: other.id)
+        }
+        return (accounts, events)
+    }
+
+    /// Switches to the account an event from another account is in, to change it there: the same days, with the event
+    /// open.
+    func showInItsAccount(_ event: CalendarEvent) {
+        guard let app, let origin = OtherAccountCalendars.origin(of: event.calendarID),
+              let session = app.accounts.session(for: origin.account) else { return }
+        selectedEventKey = nil
+        app.switchAccount(to: origin.account)
+        app.show(.calendar)
+        let there = session.calendar
+        if there.mode != mode { there.mode = mode }
+        there.go(to: event.start)
+        there.selectedEventKey = OtherAccountCalendars.original(of: event).key
     }
 
     // MARK: Moving around
@@ -458,21 +608,27 @@ final class CalendarViewModel {
         defaults.set(Array(hiddenCalendarIDs), forKey: "HiddenCalendars-\(account.id.uuidString)")
     }
 
-    func calendarInfo(_ id: String) -> CalendarInfo? { calendars.first { $0.id == id } }
+    func calendarInfo(_ id: String) -> CalendarInfo? {
+        calendars.first { $0.id == id } ?? otherAccounts.lazy.flatMap(\.calendars).first { $0.id == id }
+    }
 
     // MARK: Events
 
     /// Events from the calendars that are on (canceled ones too, marked), matching the search if there is one. An
-    /// invitation the account said No to isn't shown: saying No takes it off the calendar.
+    /// invitation the account said No to isn't shown: saying No takes it off the calendar. With every account's
+    /// calendars showing, the other accounts' events come too, apart from meetings the account has a copy of already.
     func shownEvents(matching search: String = "") -> [CalendarEvent] {
         let words = search.lowercased().split(separator: " ").map(String.init)
-        return events.filter { event in
+        func shows(_ event: CalendarEvent) -> Bool {
             guard !hiddenCalendarIDs.contains(event.calendarID), event.myResponse != .declined else { return false }
             guard !words.isEmpty else { return true }
             let text = [event.title, event.location ?? "", event.notes ?? "", event.attendees.map(\.address.displayName).joined(separator: " ")]
                 .joined(separator: " ").lowercased()
             return words.allSatisfy { text.contains($0) }
         }
+        let own = events.filter(shows)
+        guard showsOtherAccounts else { return own }
+        return own + OtherAccountCalendars.withoutRepeats(otherEvents.filter(shows), besides: own)
     }
 
     /// Events that touch a day, all-day events first, then by start.
@@ -483,7 +639,9 @@ final class CalendarViewModel {
             .sorted { ($0.isAllDay ? 0 : 1, $0.start) < ($1.isAllDay ? 0 : 1, $1.start) }
     }
 
-    func event(_ key: String?) -> CalendarEvent? { key.flatMap { key in events.first { $0.key == key } } }
+    func event(_ key: String?) -> CalendarEvent? {
+        key.flatMap { key in events.first { $0.key == key } ?? otherEvents.first { $0.key == key } }
+    }
 
     /// The event's color: its own, or its calendar's.
     func color(for event: CalendarEvent) -> Color {
@@ -564,9 +722,9 @@ final class CalendarViewModel {
         return (preferences.eventReminders[calendarID] ?? [10]).map { Reminder(minutes: $0) }
     }
 
-    /// Shows just one calendar, hiding the account's others.
+    /// Shows just one calendar, hiding the account's others (and the other accounts', where they show).
     func showOnly(_ calendar: CalendarInfo) {
-        hiddenCalendarIDs = Set(calendars.map(\.id)).subtracting([calendar.id])
+        hiddenCalendarIDs = Set(calendars.map(\.id) + otherAccounts.flatMap { $0.calendars.map(\.id) }).subtracting([calendar.id])
         defaults.set(Array(hiddenCalendarIDs), forKey: "HiddenCalendars-\(account.id.uuidString)")
     }
 

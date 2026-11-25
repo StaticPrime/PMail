@@ -47,12 +47,16 @@ final class Availability {
 
 extension CalendarViewModel {
     /// The person's own events in a stretch of days that make them busy (from their calendars, not others' or task
-    /// lists; not free, declined or cancelled ones), without the event being changed.
+    /// lists; not free, declined or cancelled ones), without the event being changed. With every account's calendars
+    /// showing, their other accounts' calendars count too.
     func myBusyEvents(in range: DateInterval, excluding eventID: String?) async -> [CalendarEvent] {
         let ids = myCalendars.map(\.id)
-        guard !ids.isEmpty else { return [] }
-        let loaded = (try? await service.loadEvents(in: ids, from: range.start, to: range.end))
-            ?? events.filter { ids.contains($0.calendarID) && $0.start < range.end && $0.end > range.start }
+        var loaded: [CalendarEvent] = []
+        if !ids.isEmpty {
+            loaded = (try? await service.loadEvents(in: ids, from: range.start, to: range.end))
+                ?? events.filter { ids.contains($0.calendarID) && $0.start < range.end && $0.end > range.start }
+        }
+        if showsOtherAccounts { loaded += await otherAccountCalendars(in: range, keeping: otherEvents).events }
         return loaded.filter { event in
             event.id != eventID && event.availability == .busy && event.status != .cancelled && event.myResponse != .declined && !event.isTask
         }

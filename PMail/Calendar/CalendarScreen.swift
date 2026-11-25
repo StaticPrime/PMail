@@ -119,7 +119,7 @@ private struct CalendarSidebar: View {
                         MiniMonth(model: model)
                             .padding(.horizontal, 18)
                             .padding(.bottom, 18)
-                        if !model.myCalendars.isEmpty { calendarSection("My calendars", model.myCalendars) }
+                        if !model.myCalendars.isEmpty || !model.shownOtherAccounts.isEmpty { myCalendarsSection }
                         if !model.taskLists.isEmpty || model.tasksProblem != nil { taskSection }
                         otherCalendarsSection
                     }
@@ -204,6 +204,33 @@ private struct CalendarSidebar: View {
             })
         }
         subscribeMenu.show(items)
+    }
+
+    /// The account's own calendars, then, with every account's calendars showing, each other account's under its address
+    /// (shown here, changed only there).
+    private var myCalendarsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("My calendars").font(.pm(14, .medium)).foregroundStyle(Theme.textPrimary).padding(.leading, 26).padding(.vertical, 8)
+            ForEach(model.myCalendars) { calendar in
+                CalendarRow(app: app, model: model, calendar: calendar)
+            }
+            ForEach(model.shownOtherAccounts) { other in
+                Text(other.account.email)
+                    .font(.pm(11.5))
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.leading, 26)
+                    .padding(.trailing, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 2)
+                    .help("\(other.account.email)’s calendars. Switch to that account to change their events.")
+                ForEach(other.calendars) { calendar in
+                    CalendarRow(app: app, model: model, calendar: calendar)
+                }
+            }
+        }
+        .padding(.bottom, 12)
     }
 
     private func calendarSection(_ title: String, _ calendars: [CalendarInfo]) -> some View {
