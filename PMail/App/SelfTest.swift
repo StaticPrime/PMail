@@ -209,8 +209,10 @@ enum SelfTest {
             wait("the conversation to open") { mail.openMessages.count == 3 }
         }
         step {
-            check(mail.openMessages.map(\.summary.from?.shortName) == ["Priya", "Jamie", "Priya"], "a conversation shows its messages oldest first",
+            check(mail.openMessages.map(\.summary.from?.shortName) == ["Priya", "Jamie", "Priya"], "a conversation opens with all its messages",
                   "\(mail.openMessages.map(\.summary.from?.shortName))")
+            let shown = mail.shownMessages.map(\.summary.date)
+            check(shown.count == 3 && zip(shown, shown.dropFirst()).allSatisfy { $0 > $1 }, "and shows them newest first", "\(shown)")
             check(mail.expandedMessageIDs.contains(mail.openMessages.last!.id), "the newest message starts open")
             check(!mail.expandedMessageIDs.contains(mail.openMessages[1].id), "read older messages start folded")
             check(mail.positionText.hasSuffix("of 57"), "the reading toolbar says where it is", mail.positionText)

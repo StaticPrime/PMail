@@ -3,8 +3,8 @@ import PMailKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// An open conversation: the toolbar, the subject, each message (older ones folded to a line), and Reply, Reply all
-/// and Forward at the bottom.
+/// An open conversation: the toolbar, the subject, then each message, newest first (older ones folded to a line), with
+/// Reply, Reply all and Forward under the newest.
 struct ConversationView: View {
     let app: AppModel
     let session: AccountSession
@@ -57,32 +57,38 @@ struct ConversationView: View {
                     } else if mail.isLoadingConversation && mail.openMessages.isEmpty {
                         ProgressView().controlSize(.small).frame(maxWidth: .infinity).padding(.top, 40)
                     } else {
-                        ForEach(mail.openMessages) { message in
+                        // The message Reply answers: the newest that isn't a draft.
+                        let newest = mail.openQueuedItem == nil ? mail.openMessages.last(where: { !$0.summary.isDraft }) : nil
+                        ForEach(mail.shownMessages) { message in
                             if mail.expandedMessageIDs.contains(message.id) {
                                 ExpandedMessage(app: app, session: session, mail: mail, message: message)
                             } else {
                                 CollapsedMessage(mail: mail, message: message)
                             }
+                            if message.id == newest?.id { replyButtons(to: message) }
                             Divider().overlay(Theme.divider).padding(.leading, 72)
-                        }
-                        if let last = mail.openMessages.last(where: { !$0.summary.isDraft }), mail.openQueuedItem == nil {
-                            HStack(spacing: 12) {
-                                OutlinePillButton(title: "Reply", symbol: "arrowshape.turn.up.left") { app.reply(to: last, kind: .reply, in: session) }
-                                if last.summary.to.count + last.summary.cc.count > 1 {
-                                    OutlinePillButton(title: "Reply all", symbol: "arrowshape.turn.up.left.2") {
-                                        app.reply(to: last, kind: .replyAll, in: session)
-                                    }
-                                }
-                                OutlinePillButton(title: "Forward", symbol: "arrowshape.turn.up.right") { app.reply(to: last, kind: .forward, in: session) }
-                            }
-                            .padding(.leading, 72)
-                            .padding(.vertical, 24)
                         }
                     }
                 }
                 .padding(.bottom, 80)
             }
         }
+    }
+
+    /// Reply, Reply all (when there's anyone else to reply to) and Forward, under the newest message.
+    private func replyButtons(to message: MailMessage) -> some View {
+        HStack(spacing: 12) {
+            OutlinePillButton(title: "Reply", symbol: "arrowshape.turn.up.left") { app.reply(to: message, kind: .reply, in: session) }
+            if message.summary.to.count + message.summary.cc.count > 1 {
+                OutlinePillButton(title: "Reply all", symbol: "arrowshape.turn.up.left.2") {
+                    app.reply(to: message, kind: .replyAll, in: session)
+                }
+            }
+            OutlinePillButton(title: "Forward", symbol: "arrowshape.turn.up.right") { app.reply(to: message, kind: .forward, in: session) }
+        }
+        .padding(.leading, 72)
+        .padding(.top, 4)
+        .padding(.bottom, 24)
     }
 
     private var subjectRow: some View {

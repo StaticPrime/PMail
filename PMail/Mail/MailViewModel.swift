@@ -52,7 +52,10 @@ final class MailViewModel {
 
     // Reading
     private(set) var openConversation: Conversation?
+    /// The open conversation's messages, oldest first, as services give them.
     private(set) var openMessages: [MailMessage] = []
+    /// The open conversation's messages as the window shows them: newest first.
+    var shownMessages: [MailMessage] { openMessages.reversed() }
     var expandedMessageIDs: Set<String> = []
     private(set) var isLoadingConversation = false
     private(set) var conversationError: String?
