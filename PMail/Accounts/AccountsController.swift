@@ -286,9 +286,10 @@ final class AccountsController {
             Task { await mail.close() }
         }
         try? secrets.setSecret(nil, for: id)
-        // The copies and waiting messages go; calendars, contacts, tasks and mail kept only on this Mac stay in its folder.
+        // The copies (a Google account's mail list among them, and the copy an earlier build kept before it) and waiting
+        // messages go; calendars, contacts, tasks and mail kept only on this Mac stay in its folder.
         let folder = storageFolder(for: id)
-        for name in ["Cache", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json", "Remote Content", "JunkMarks.json",
+        for name in ["Cache", "Gmail", "Google Mail", "Outbox", "Snoozes.json", "BlockedSenders.json", "Labels.json", "Categories.json", "Remote Content", "JunkMarks.json",
                      KeptFromJunk.fileName,
                      "Recipients.json", EventTypeBook.fileName, DeclineBook.fileName, MicrosoftCalendarService.oldDeclinedFileName, DismissedEvents.fileName, FollowedCalendars.fileName, CalendarFeeds.folderName, AccountStorage.calendarChangesFile, AccountStorage.contactChangesFile,
                      AccountStorage.waitingDraftsFile] {
