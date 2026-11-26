@@ -65,7 +65,15 @@ if ! xcodebuild -project PMail.xcodeproj -scheme PMail -configuration Release \
     exit 1
 fi
 APP="$WORK/PMail.xcarchive/Products/Applications/PMail.app"
-codesign --verify --strict "$APP"
+codesign --verify --strict --deep "$APP"
+
+# The update installer service inside the app installs updates, which the app's sandbox can't: it must be there,
+# and not sandboxed itself.
+INSTALLER_SERVICE="$APP/Contents/XPCServices/UpdateInstaller.xpc"
+[ -d "$INSTALLER_SERVICE" ] || fail "the app has no update installer service ($INSTALLER_SERVICE)"
+if codesign -d --entitlements - --xml "$INSTALLER_SERVICE" 2>/dev/null | grep -q "com.apple.security.app-sandbox"; then
+    fail "the update installer service is sandboxed, so it couldn't install updates"
+fi
 
 # Its debug symbols, zipped beside the installer. Release builds are stripped, so a crash report from an installed
 # copy shows only addresses in PMail; these name them. They fit this build alone, matched by the UUIDs of its
@@ -88,21 +96,32 @@ SIGN_IN=""
 SIGN_IN=", sign-in with ${SIGN_IN:-neither Google nor Microsoft}"
 
 # 2. With a Developer ID, sign the app again for distribution: the hardened runtime, a secure timestamp,
-#    and the same entitlements the build gave it. The Tor client inside it is signed first, from the inside out:
-#    its library, then tor with the entitlements that keep it in PMail's sandbox, then the app around them.
+#    and the same entitlements the build gave it. Its nested code is signed first, from the inside out: the Tor
+#    client's library, then tor with the entitlements that keep it in PMail's sandbox, then the update installer
+#    service the same way with its own (lack of) entitlements, and then the app around them, whose signature
+#    seals theirs. Both sets of entitlements are read before anything is signed again.
 if [ -n "${DEVELOPER_ID_APPLICATION:-}" ]; then
-    echo "Signing PMail.app with the Developer ID…"
+    codesign -d --entitlements - --xml "$APP" > "$WORK/entitlements.plist" 2>/dev/null || true
+    codesign -d --entitlements - --xml "$INSTALLER_SERVICE" > "$WORK/service-entitlements.plist" 2>/dev/null || true
+    echo "Signing the Tor client with the Developer ID…"
     codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID_APPLICATION" "$APP/Contents/Frameworks/libevent-2.1.7.dylib"
     codesign --force --options runtime --timestamp --entitlements Vendor/Tor/tor.entitlements \
         --sign "$DEVELOPER_ID_APPLICATION" "$APP/Contents/Helpers/tor"
-    codesign -d --entitlements - --xml "$APP" > "$WORK/entitlements.plist" 2>/dev/null || true
+    echo "Signing the update installer service with the Developer ID…"
+    if [ -s "$WORK/service-entitlements.plist" ]; then
+        codesign --force --options runtime --timestamp --entitlements "$WORK/service-entitlements.plist" \
+            --sign "$DEVELOPER_ID_APPLICATION" "$INSTALLER_SERVICE"
+    else
+        codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID_APPLICATION" "$INSTALLER_SERVICE"
+    fi
+    echo "Signing PMail.app with the Developer ID…"
     if [ -s "$WORK/entitlements.plist" ]; then
         codesign --force --options runtime --timestamp --entitlements "$WORK/entitlements.plist" \
             --sign "$DEVELOPER_ID_APPLICATION" "$APP"
     else
         codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID_APPLICATION" "$APP"
     fi
-    codesign --verify --strict "$APP"
+    codesign --verify --strict --deep "$APP"
 fi
 
 # 3. The app package. Installers normally update any other copy of an app they find on the disk

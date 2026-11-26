@@ -1,12 +1,11 @@
 import AppKit
 import PMailKit
-import ServiceManagement
 import SwiftUI
 
-/// PMail ▸ Settings, in panes along a toolbar so none grows taller than the screen: General (new mail, opening at
-/// login, the keyboard), Mail (Undo Send, inbox categories), Calendar (each calendar's settings), Junk Mail (junk and
-/// blocked senders' mail), Privacy (remote content), Accounts (each account's settings, blocked senders and sender
-/// categories) and Signing In.
+/// PMail ▸ Settings, in panes along a toolbar so none grows taller than the screen: General (new mail, the keyboard,
+/// updates), Mail (Undo Send, inbox categories), Calendar (each calendar's settings), Junk Mail
+/// (junk and blocked senders' mail), Privacy (remote content), Accounts (each account's settings, blocked senders and
+/// sender categories) and Signing In.
 final class SettingsWindowController: NSWindowController {
     private static var shared: SettingsWindowController?
 
@@ -111,14 +110,14 @@ private struct SettingsPaneHeight: Layout {
     }
 }
 
-/// General: new mail, opening at login, and the keyboard.
+/// General: new mail, the keyboard, and updates.
 private struct GeneralSettings: View {
     let app: AppModel
     @AppStorage("NotifyNewMail") private var notifyNewMail = true
     @AppStorage("CheckMinutes") private var checkMinutes = 2
     @AppStorage("SingleKeyShortcuts") private var singleKeys = true
-    @State private var opensAtLogin = SMAppService.mainApp.status == .enabled
-    @State private var loginError: String?
+    /// Kept where the update check reads it: PMail's own settings, or the sample accounts' in sample runs.
+    @AppStorage(UpdateController.automaticUpdatesKey, store: UpdateController.shared.defaults) private var automaticUpdates = true
 
     var body: some View {
         Form {
@@ -132,26 +131,43 @@ private struct GeneralSettings: View {
                 }
                 Text("An IMAP account (iCloud included) is watched while it’s showing: new mail appears the moment its server says so, or within a minute.")
                     .font(.pm(11.5)).foregroundStyle(.secondary)
-                Toggle("Open PMail when I log in", isOn: Binding(get: { opensAtLogin }, set: { setOpensAtLogin($0) }))
-                if let loginError { Text(loginError).font(.pm(11.5)).foregroundStyle(.red) }
             }
             Section("Keyboard") {
                 Toggle("Single-key shortcuts (C to compose, E to archive, J and K to move…)", isOn: $singleKeys)
                 Button("Show All Shortcuts") { app.sheet = .shortcuts }
             }
+            Section {
+                updates
+            } header: {
+                Text("Updates")
+            } footer: {
+                Text(AboutView.version)
+                    .font(.pm(11.5))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .settingsPane()
     }
 
-    /// Adds PMail to (or takes it out of) the apps that open at login, so new mail and snoozes keep coming.
-    private func setOpensAtLogin(_ on: Bool) {
-        do {
-            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-            loginError = nil
-        } catch {
-            loginError = "macOS didn’t allow it: \(error.localizedDescription)"
+    /// Automatic Updates, or what keeps this copy up to date instead.
+    @ViewBuilder private var updates: some View {
+        switch UpdateController.shared.capability {
+        case .appStore:
+            Text("The App Store keeps PMail up to date. When it has a new version, a banner at the top of the window says so.")
+                .font(.pm(11.5)).foregroundStyle(.secondary)
+        case let .none(reason):
+            automaticToggle
+            Text(reason).font(.pm(11.5)).foregroundStyle(.secondary)
+        case .updatesItself:
+            automaticToggle
         }
-        opensAtLogin = SMAppService.mainApp.status == .enabled
+    }
+
+    @ViewBuilder private var automaticToggle: some View {
+        Toggle("Automatic Updates", isOn: $automaticUpdates)
+        Text("When PMail opens, it checks for a new version. With Automatic Updates on, it downloads the new version and installs it, then opens again. With it off, a banner at the top of the window says when a new version is available.")
+            .font(.pm(11.5)).foregroundStyle(.secondary)
     }
 }
 

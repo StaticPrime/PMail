@@ -59,6 +59,9 @@ final class ComposeModel: Identifiable {
     var waitingDraftSummaryID: String? { waitingDraftID.map { WaitingDraft.summaryPrefix + $0.uuidString } }
     @ObservationIgnored private var lastSavedFingerprint = ""
     @ObservationIgnored private var sendTask: Task<Void, Never>?
+    /// Messages sent but still waiting out Undo Send or on their way to the server. Quitting to open a new version of
+    /// PMail waits for them (see UpdateController).
+    private(set) static var messagesOnTheirWay = 0
     /// Seconds a sent message waits, so Undo can still stop it.
     @ObservationIgnored var undoSendDelay: TimeInterval = UndoSend.seconds
 
@@ -219,7 +222,9 @@ final class ComposeModel: Identifiable {
         app?.close(self)
         let delay = undoSendDelay
         // The task keeps the message alive (its window is gone) until it's sent or Undo stops it.
+        Self.messagesOnTheirWay += 1
         sendTask = Task {
+            defer { Self.messagesOnTheirWay -= 1 }
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
             await self.deliver(message)
@@ -404,18 +409,20 @@ final class ComposeModel: Identifiable {
 
     // MARK: Drafts
 
-    /// Closes the window, keeping what was written as a draft.
-    func closeKeepingDraft() {
+    /// Closes the window, keeping what was written as a draft. The task it returns saves the draft (nil when there's
+    /// nothing new to save), for waiting on it.
+    @discardableResult
+    func closeKeepingDraft() -> Task<Void, Never>? {
         takeTypedAddresses()
         app?.close(self)
-        guard !isEmpty, session.services.mail.capabilities.supportsDrafts else { return }
+        guard !isEmpty, session.services.mail.capabilities.supportsDrafts else { return nil }
         let message = outgoing()
         let fingerprint = Self.fingerprint(message)
-        guard fingerprint != lastSavedFingerprint else { return }
+        guard fingerprint != lastSavedFingerprint else { return nil }
         lastSavedFingerprint = fingerprint
         let previous = savedDraft
         let service = session.services.mail
-        Task {
+        return Task {
             // Offline, or already kept on this Mac (so its versions go in order), it waits on this Mac.
             let offline = app?.sync?.isOnline == false
             if offline || waitingDraftID != nil {

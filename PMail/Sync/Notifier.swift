@@ -80,8 +80,11 @@ final class SystemNotifier: NSObject, MailNotifier, UNUserNotificationCenterDele
         let data = info["message"] as? Data
         completionHandler()
         Task { @MainActor [weak self] in
-            if let accountText, let account = UUID(uuidString: accountText), let data,
-               let message = try? JSONDecoder().decode(MessageSummary.self, from: data) {
+            guard let accountText, let account = UUID(uuidString: accountText), let data,
+                  let message = try? JSONDecoder().decode(MessageSummary.self, from: data) else { return }
+            // One clicked while PMail is still opening opens once it has (in the new version, should PMail restart to
+            // finish updating first).
+            UpdateController.shared.whenLaunched(handoff: LaunchHandoff.conversation(account: account, message: message).encoded) {
                 self?.onOpen?(account, message)
             }
         }

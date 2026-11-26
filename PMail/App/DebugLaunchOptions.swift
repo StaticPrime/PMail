@@ -254,15 +254,18 @@ enum DebugLaunchOptions {
     private static func snapshot(_ name: String, delegate: AppDelegate) {
         let windows = NSApp.windows.filter { $0.isVisible && $0.frame.width > 1 }
         let main = delegate.windowController?.window
+        // The splash screen or an update's progress (`-UpdateDemo`), drawn on its own.
+        let update = windows.first { $0.windowController is UpdateWindowController }
         let about = windows.first { $0.windowController is AboutWindowController }
         let settings = windows.first { $0.title == "Settings" || $0.identifier?.rawValue == "PMailSettings" }
         // A sheet over Settings (Junk Mail ▸ Advanced, say) is drawn on its own.
-        guard let base = about ?? settings?.attachedSheet ?? settings ?? main else {
+        guard let base = update ?? about ?? settings?.attachedSheet ?? settings ?? main else {
             print("PMSnapshot: no window")
             exit(1)
         }
         // The window, then every window of PMail's over it (sheets, popovers, menus), each drawn where it is.
-        let others = base === main ? windows.filter { $0 !== base && $0.frame.intersects(base.frame) && $0 !== about && $0 !== settings } : []
+        let others = base === main
+            ? windows.filter { $0 !== base && $0.frame.intersects(base.frame) && $0 !== about && $0 !== settings && $0 !== update } : []
         let scale = base.backingScaleFactor
         let size = NSSize(width: base.frame.width * scale, height: base.frame.height * scale)
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height), bitsPerSample: 8,

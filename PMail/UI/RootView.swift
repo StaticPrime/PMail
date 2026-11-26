@@ -2,8 +2,9 @@ import AppKit
 import PMailKit
 import SwiftUI
 
-/// Everything in the main window: the top bar, the rail of Mail, Calendar and Contacts, the part showing, compose
-/// windows docked at the bottom right and notes at the bottom left.
+/// Everything in the main window: the top bar, the banner saying a new version of PMail is available (when it is), the
+/// rail of Mail, Calendar and Contacts, the part showing, compose windows docked at the bottom right and notes at the
+/// bottom left.
 struct RootView: View {
     @Bindable var app: AppModel
     let chrome: WindowChrome
@@ -11,6 +12,7 @@ struct RootView: View {
     var body: some View {
         VStack(spacing: 0) {
             TopBar(app: app, chrome: chrome)
+            UpdateBannerView(banner: UpdateController.shared.banner)
             if let session = app.current {
                 HStack(spacing: 0) {
                     AppRail(app: app, session: session)
@@ -271,7 +273,7 @@ struct WelcomeView: View {
                 ProviderGrid(app: app) { kind in app.sheet = .addAccount(kind) }
                     .frame(maxWidth: 560)
                     .padding(.top, 8)
-                Text("PMail talks only to your mail provider. It has no account of its own, shows no ads and never tracks you.")
+                Text("PMail has no account of its own, shows no ads and never tracks you.")
                     .font(.pm(12))
                     .foregroundStyle(Theme.textTertiary)
                     .padding(.top, 8)

@@ -52,7 +52,7 @@ struct AccountMenu: View {
             .background(RoundedRectangle(cornerRadius: 16).fill(Theme.surface))
             .clipShape(RoundedRectangle(cornerRadius: 16))
             .padding(.top, 18)
-            Text("PMail talks only to your mail providers. No ads, no tracking.")
+            Text("No ads, no tracking.")
                 .font(.pm(11))
                 .foregroundStyle(Theme.textTertiary)
                 .padding(.top, 14)

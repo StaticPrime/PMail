@@ -25,5 +25,7 @@
 	<string>$(PMAIL_MICROSOFT_TENANT)</string>
 	<key>PMailMicrosoftRedirectURI</key>
 	<string>$(PMAIL_MICROSOFT_REDIRECT_URI)</string>
+	<key>PuggleUpdateURL</key>
+	<string>https://github.com/StaticPrime/PMail/releases/latest/download/update.json</string>
 </dict>
 </plist>

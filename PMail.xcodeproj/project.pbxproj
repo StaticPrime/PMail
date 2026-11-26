@@ -8,12 +8,41 @@
 
 /* Begin PBXBuildFile section */
 		5E0000000000000000000013 /* PMailKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5E0000000000000000000012 /* PMailKit */; };
+		5E0000000000000000000023 /* PuggleUpdate in Frameworks */ = {isa = PBXBuildFile; productRef = 5E0000000000000000000022 /* PuggleUpdate */; };
+		5E0000000000000000000025 /* PuggleUpdate in Frameworks */ = {isa = PBXBuildFile; productRef = 5E0000000000000000000024 /* PuggleUpdate */; };
+		5E0000000000000000000027 /* UpdateInstaller.xpc in Embed XPC Services */ = {isa = PBXBuildFile; fileRef = 5E0000000000000000000018 /* UpdateInstaller.xpc */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5E0000000000000000000028 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5E0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5E000000000000000000001B;
+			remoteInfo = UpdateInstaller;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		5E0000000000000000000026 /* Embed XPC Services */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/XPCServices";
+			dstSubfolderSpec = 16;
+			files = (
+				5E0000000000000000000027 /* UpdateInstaller.xpc in Embed XPC Services */,
+			);
+			name = "Embed XPC Services";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		5E0000000000000000000004 /* PMail.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PMail.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5E0000000000000000000015 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
 		5E0000000000000000000016 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
+		5E0000000000000000000018 /* UpdateInstaller.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = UpdateInstaller.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
+		5E000000000000000000002A /* UpdateInstaller.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = UpdateInstaller.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -23,6 +52,13 @@
 				Info.plist,
 			);
 			target = 5E0000000000000000000007 /* PMail */;
+		};
+		5E000000000000000000001A /* Exceptions for "UpdateInstaller" folder in "UpdateInstaller" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 5E000000000000000000001B /* UpdateInstaller */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -35,6 +71,14 @@
 			path = PMail;
 			sourceTree = "<group>";
 		};
+		5E0000000000000000000019 /* UpdateInstaller */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				5E000000000000000000001A /* Exceptions for "UpdateInstaller" folder in "UpdateInstaller" target */,
+			);
+			path = UpdateInstaller;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -43,6 +87,15 @@
 			buildActionMask = 2147483647;
 			files = (
 				5E0000000000000000000013 /* PMailKit in Frameworks */,
+				5E0000000000000000000025 /* PuggleUpdate in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5E000000000000000000001D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5E0000000000000000000023 /* PuggleUpdate in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -53,6 +106,7 @@
 			isa = PBXGroup;
 			children = (
 				5E0000000000000000000005 /* PMail */,
+				5E0000000000000000000019 /* UpdateInstaller */,
 				5E0000000000000000000014 /* Config */,
 				5E0000000000000000000003 /* Products */,
 			);
@@ -62,6 +116,7 @@
 			isa = PBXGroup;
 			children = (
 				5E0000000000000000000004 /* PMail.app */,
+				5E0000000000000000000018 /* UpdateInstaller.xpc */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -71,6 +126,7 @@
 			children = (
 				5E0000000000000000000015 /* Debug.xcconfig */,
 				5E0000000000000000000016 /* Release.xcconfig */,
+				5E000000000000000000002A /* UpdateInstaller.xcconfig */,
 			);
 			path = Config;
 			sourceTree = "<group>";
@@ -86,10 +142,12 @@
 				5E0000000000000000000009 /* Frameworks */,
 				5E000000000000000000000A /* Resources */,
 				5E0000000000000000000017 /* Embed Tor */,
+				5E0000000000000000000026 /* Embed XPC Services */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				5E0000000000000000000029 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				5E0000000000000000000005 /* PMail */,
@@ -97,10 +155,34 @@
 			name = PMail;
 			packageProductDependencies = (
 				5E0000000000000000000012 /* PMailKit */,
+				5E0000000000000000000024 /* PuggleUpdate */,
 			);
 			productName = PMail;
 			productReference = 5E0000000000000000000004 /* PMail.app */;
 			productType = "com.apple.product-type.application";
+		};
+		5E000000000000000000001B /* UpdateInstaller */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5E000000000000000000001F /* Build configuration list for PBXNativeTarget "UpdateInstaller" */;
+			buildPhases = (
+				5E000000000000000000001C /* Sources */,
+				5E000000000000000000001D /* Frameworks */,
+				5E000000000000000000001E /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				5E0000000000000000000019 /* UpdateInstaller */,
+			);
+			name = UpdateInstaller;
+			packageProductDependencies = (
+				5E0000000000000000000022 /* PuggleUpdate */,
+			);
+			productName = UpdateInstaller;
+			productReference = 5E0000000000000000000018 /* UpdateInstaller.xpc */;
+			productType = "com.apple.product-type.xpc-service";
 		};
 /* End PBXNativeTarget section */
 
@@ -113,6 +195,9 @@
 				LastUpgradeCheck = 2720;
 				TargetAttributes = {
 					5E0000000000000000000007 = {
+						CreatedOnToolsVersion = 27.2;
+					};
+					5E000000000000000000001B = {
 						CreatedOnToolsVersion = 27.2;
 					};
 				};
@@ -135,12 +220,20 @@
 			projectRoot = "";
 			targets = (
 				5E0000000000000000000007 /* PMail */,
+				5E000000000000000000001B /* UpdateInstaller */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		5E000000000000000000000A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5E000000000000000000001E /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -190,7 +283,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		5E000000000000000000001C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5E0000000000000000000029 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5E000000000000000000001B /* UpdateInstaller */;
+			targetProxy = 5E0000000000000000000028 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		5E000000000000000000000D /* Debug */ = {
@@ -301,6 +409,42 @@
 			};
 			name = Release;
 		};
+		5E0000000000000000000020 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 5E000000000000000000002A /* UpdateInstaller.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 5;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = UpdateInstaller/Info.plist;
+				MARKETING_VERSION = 1.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = com.pugglesoft.PMail.UpdateInstaller;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		5E0000000000000000000021 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 5;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = UpdateInstaller/Info.plist;
+				MARKETING_VERSION = 1.1.2;
+				PRODUCT_BUNDLE_IDENTIFIER = com.pugglesoft.PMail.UpdateInstaller;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -322,6 +466,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		5E000000000000000000001F /* Build configuration list for PBXNativeTarget "UpdateInstaller" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5E0000000000000000000020 /* Debug */,
+				5E0000000000000000000021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -335,6 +488,14 @@
 		5E0000000000000000000012 /* PMailKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = PMailKit;
+		};
+		5E0000000000000000000022 /* PuggleUpdate */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PuggleUpdate;
+		};
+		5E0000000000000000000024 /* PuggleUpdate */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PuggleUpdate;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
