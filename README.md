@@ -167,7 +167,7 @@ Help ▸ Keyboard Shortcuts (⌘/) lists every keyboard shortcut. Single-key sho
 - Protect mail activity loads pictures as PMail finds new mail. Messages that arrived before it was turned on, and messages over 5 MB, load their pictures when opened, and a picture that changes (a countdown, say) shows as it was when the message arrived. Video and sound from the internet never load.
 - Contact pictures show for Google contacts but can't be changed in PMail; Microsoft contacts show without pictures.
 - An IMAP conversation opened from the inbox includes your replies from Sent, but one opened from Sent doesn't bring in the inbox side.
-- Installing an update takes an administrator's password, so someone who can't give one keeps the version they have (the banner keeps offering the new one). Version 1.1.2 and earlier don't update themselves: the first version that does has to be installed by hand.
+- Installing an update takes an administrator's password, so someone who can't give one keeps the version they have (the banner keeps offering the new one). Version 1.1.3 and earlier don't update themselves: the first version that does has to be installed by hand.
 - Updates go where the installer puts PMail, the Applications folder. A copy moved somewhere else stays as it is, and the new version opens from Applications.
 
 ## Requirements
