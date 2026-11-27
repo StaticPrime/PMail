@@ -173,7 +173,7 @@ Help ▸ Keyboard Shortcuts (⌘/) lists every keyboard shortcut. Single-key sho
 ## Requirements
 
 - macOS 14 Sonoma or later
-- Xcode 16 or later (developed with Xcode 27.2, Swift 6)
+- Xcode 26 or later (developed with Xcode 27.2, Swift 6)
 
 ## Building and running
 
